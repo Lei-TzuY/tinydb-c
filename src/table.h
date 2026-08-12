@@ -151,12 +151,75 @@ typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
 #define INTERNAL_NODE_RIGHT_SPLIT_COUNT ((INTERNAL_NODE_MAX_KEYS + 1) / 2)
 #define INTERNAL_NODE_LEFT_SPLIT_COUNT  ((INTERNAL_NODE_MAX_KEYS + 1) - INTERNAL_NODE_RIGHT_SPLIT_COUNT)
 
+#define MAX_TABLES 16
+#define MAX_COLUMNS_PER_TABLE 16
+#define MAX_NAME_SIZE 32
+
+typedef enum {
+    COL_TYPE_INT,
+    COL_TYPE_VARCHAR
+} ColumnType;
+
+typedef struct {
+    char        name[MAX_NAME_SIZE];
+    ColumnType  type;
+    uint32_t    size;
+    uint32_t    offset;
+} TableColumn;
+
+typedef struct {
+    char        name[MAX_NAME_SIZE];
+    uint32_t    root_page_num;
+    uint32_t    num_columns;
+    TableColumn columns[MAX_COLUMNS_PER_TABLE];
+    uint32_t    row_size;
+    bool        has_fk;
+    char        fk_col[MAX_NAME_SIZE];
+    char        fk_parent_table[MAX_NAME_SIZE];
+    char        fk_parent_col[MAX_NAME_SIZE];
+} TableSchema;
+
+#define MAX_INDEXES 8
+
+typedef struct {
+    char name[MAX_NAME_SIZE];        /* e.g., "idx_users_email" */
+    char table_name[MAX_NAME_SIZE];  /* e.g., "users" */
+    char column_name[MAX_NAME_SIZE]; /* e.g., "email" */
+    uint32_t enabled;
+} SecondaryIndexMeta;
+
+typedef struct {
+    char key_val[256];      /* Column value as string or binary payload */
+    uint32_t primary_key;   /* Row ID */
+} GenericIndexEntry;
+
+typedef struct {
+    char name[MAX_NAME_SIZE];
+    char table_name[MAX_NAME_SIZE];
+    char column_name[MAX_NAME_SIZE];
+    bool enabled;
+    bool dirty;
+    GenericIndexEntry* entries;
+    uint32_t count;
+    uint32_t capacity;
+    char index_filename[512];
+    char index_wal_filename[512];
+} GenericSecondaryIndex;
+
+typedef struct {
+    uint32_t           num_tables;
+    TableSchema        schemas[MAX_TABLES];
+    uint32_t           num_indexes;
+    SecondaryIndexMeta indexes[MAX_INDEXES];
+} Catalog;
+
 /* ─── Table & Cursor ─────────────────────────────────────────── */
 
 typedef struct {
     uint32_t root_page_num;
     Pager*   pager;
     bool     in_transaction; /* true between BEGIN and COMMIT/ROLLBACK */
+    Catalog  catalog;
     bool     username_index_enabled;
     bool     username_index_dirty;
     UsernameIndexEntry* username_index_entries;
@@ -166,6 +229,9 @@ typedef struct {
     char     index_catalog_wal_filename[512];
     char     username_index_filename[512];
     char     username_index_wal_filename[512];
+
+    uint32_t              num_sec_indexes;
+    GenericSecondaryIndex sec_indexes[MAX_INDEXES];
 } Table;
 
 typedef struct {
@@ -175,17 +241,47 @@ typedef struct {
     bool     end_of_table;
 } Cursor;
 
+typedef struct {
+    uint32_t total_pages;
+    uint32_t leaf_pages;
+    uint32_t internal_pages;
+    uint32_t free_pages;
+    uint32_t total_rows;
+} TableStats;
+
 /* ─── Public API ─────────────────────────────────────────────── */
 
 Table*  db_open(const char* filename);
 void    db_close(Table* table);
+void    db_get_stats(Table* table, TableStats* stats);
+bool    table_create_table(Table* table, const char* name, uint32_t num_cols, char col_names[][32], char col_types[][16], bool has_fk, const char* fk_col, const char* fk_parent_table, const char* fk_parent_col);
+TableSchema* table_get_schema(Table* table, const char* name);
+void    table_print_tables(Table* table);
+void    print_page(Table* table, uint32_t page_num);
+void    db_vacuum(Table* table);
+bool    db_integrity_check(Table* table);
+void    db_checkpoint(Table* table);
+uint32_t db_get_user_version(Table* table);
+void    db_set_user_version(Table* table, uint32_t version);
 void    table_truncate(Table* table);
+
+/* Legacy username index API */
 void    table_create_username_index(Table* table);
 void    table_drop_username_index(Table* table);
 void    table_mark_username_index_dirty(Table* table);
 void    table_ensure_username_index(Table* table);
 void    table_prepare_username_index_commit(Table* table);
 void    table_finalize_username_index_commit(Table* table);
+
+/* Generic secondary index API */
+bool    table_create_index(Table* table, const char* index_name, const char* table_name, const char* column_name);
+bool    table_drop_index(Table* table, const char* index_name);
+GenericSecondaryIndex* table_find_index_by_column(Table* table, const char* table_name, const char* column_name);
+GenericSecondaryIndex* table_find_index_by_name(Table* table, const char* index_name);
+void    table_mark_indexes_dirty(Table* table);
+void    table_ensure_all_indexes(Table* table);
+void    table_prepare_all_indexes_commit(Table* table);
+void    table_finalize_all_indexes_commit(Table* table);
 
 Cursor* table_start(Table* table);
 Cursor* table_end(Table* table);
