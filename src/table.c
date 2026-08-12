@@ -15,8 +15,11 @@
 
 #ifdef _WIN32
 #include <io.h>
+#define db_strcasecmp _stricmp
 #else
+#include <strings.h>
 #include <unistd.h>
+#define db_strcasecmp strcasecmp
 #endif
 
 #define INDEX_CATALOG_MAGIC   0x58444954u /* TIDX */
@@ -32,6 +35,8 @@ typedef struct {
     uint32_t version;
     uint32_t username_index_enabled;
     uint32_t username_index_entries_valid;
+    uint32_t num_indexes;
+    SecondaryIndexMeta indexes[MAX_INDEXES];
 } IndexCatalog;
 
 typedef struct {
@@ -42,6 +47,25 @@ typedef struct {
 
 static void table_load_index_catalog(Table* table);
 static void table_save_index_catalog_state(Table* table, bool entries_valid);
+
+static void build_index_filename(char* output, size_t output_size,
+                                 const char* database_filename,
+                                 const char* index_name,
+                                 const char* suffix) {
+    size_t database_len = strlen(database_filename);
+    size_t index_len = strlen(index_name);
+    size_t suffix_len = strlen(suffix);
+
+    if (database_len + 1u + index_len + suffix_len + 1u > output_size) {
+        printf("Error: Index filename is too long.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    memcpy(output, database_filename, database_len);
+    output[database_len] = '.';
+    memcpy(output + database_len + 1u, index_name, index_len);
+    memcpy(output + database_len + 1u + index_len, suffix, suffix_len + 1u);
+}
 
 /* ═══════════════════════════════════════════════════════════════
  * SECTION 1 — Node accessor helpers
@@ -214,10 +238,12 @@ static void initialize_internal_node(void* node) {
  * exist via the file length.
  * ═══════════════════════════════════════════════════════════════ */
 
+static void table_init_catalog(Table* table);
+
 Table* db_open(const char* filename) {
     Pager* pager = pager_open(filename);
 
-    Table* table = (Table*)malloc(sizeof(Table));
+    Table* table = (Table*)calloc(1, sizeof(Table));
     table->pager          = pager;
     table->root_page_num  = 0;
     table->in_transaction = false;
@@ -254,15 +280,110 @@ Table* db_open(const char* filename) {
         exit(EXIT_FAILURE);
     }
     table_load_index_catalog(table);
+    table_init_catalog(table);
 
     if (pager->num_pages == 0) {
         /* Brand new database: initialize page 0 as an empty leaf root. */
         void* root_node = get_page(pager, 0);
         initialize_leaf_node(root_node);
         set_node_root(root_node, true);
+        mark_page_dirty(pager, 0);
     }
 
     return table;
+}
+
+static void table_init_catalog(Table* table) {
+    if (table->catalog.num_tables > 0) return;
+
+    TableSchema* s = &table->catalog.schemas[0];
+    memset(s, 0, sizeof(*s));
+    strncpy(s->name, "users", MAX_NAME_SIZE - 1);
+    s->root_page_num = 0;
+    s->num_columns = 3;
+
+    strncpy(s->columns[0].name, "id", MAX_NAME_SIZE - 1);
+    s->columns[0].type = COL_TYPE_INT;
+    s->columns[0].size = ID_SIZE;
+    s->columns[0].offset = ID_OFFSET;
+
+    strncpy(s->columns[1].name, "username", MAX_NAME_SIZE - 1);
+    s->columns[1].type = COL_TYPE_VARCHAR;
+    s->columns[1].size = USERNAME_SIZE;
+    s->columns[1].offset = USERNAME_OFFSET;
+
+    strncpy(s->columns[2].name, "email", MAX_NAME_SIZE - 1);
+    s->columns[2].type = COL_TYPE_VARCHAR;
+    s->columns[2].size = EMAIL_SIZE;
+    s->columns[2].offset = EMAIL_OFFSET;
+
+    s->row_size = ROW_SIZE;
+    table->catalog.num_tables = 1;
+}
+
+TableSchema* table_get_schema(Table* table, const char* name) {
+    if (name != NULL && strlen(name) > 0) {
+        for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+            if (strcmp(table->catalog.schemas[i].name, name) == 0) {
+                return &table->catalog.schemas[i];
+            }
+        }
+    }
+    return &table->catalog.schemas[0];
+}
+
+bool table_create_table(Table* table, const char* name, uint32_t num_cols, char col_names[][32], char col_types[][16], bool has_fk, const char* fk_col, const char* fk_parent_table, const char* fk_parent_col) {
+    if (table->catalog.num_tables >= MAX_TABLES) {
+        printf("Error: Catalog full (max %d tables).\n", MAX_TABLES);
+        return false;
+    }
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (strcmp(table->catalog.schemas[i].name, name) == 0) {
+            printf("Error: Table '%s' already exists.\n", name);
+            return false;
+        }
+    }
+
+    uint32_t new_root_page = get_unused_page_num(table->pager);
+    void* new_root_node = get_page(table->pager, new_root_page);
+    initialize_leaf_node(new_root_node);
+    set_node_root(new_root_node, true);
+    mark_page_dirty(table->pager, new_root_page);
+
+    TableSchema* s = &table->catalog.schemas[table->catalog.num_tables++];
+    memset(s, 0, sizeof(*s));
+    strncpy(s->name, name, MAX_NAME_SIZE - 1);
+    s->root_page_num = new_root_page;
+    s->num_columns = num_cols;
+    s->has_fk = has_fk;
+    if (has_fk) {
+        if (fk_col) strncpy(s->fk_col, fk_col, MAX_NAME_SIZE - 1);
+        if (fk_parent_table) strncpy(s->fk_parent_table, fk_parent_table, MAX_NAME_SIZE - 1);
+        if (fk_parent_col) strncpy(s->fk_parent_col, fk_parent_col, MAX_NAME_SIZE - 1);
+    }
+
+    uint32_t offset = 0;
+    for (uint32_t i = 0; i < num_cols; i++) {
+        strncpy(s->columns[i].name, col_names[i], MAX_NAME_SIZE - 1);
+        if (db_strcasecmp(col_types[i], "INT") == 0 ||
+            db_strcasecmp(col_types[i], "INTEGER") == 0) {
+            s->columns[i].type = COL_TYPE_INT;
+            s->columns[i].size = 4;
+        } else {
+            s->columns[i].type = COL_TYPE_VARCHAR;
+            s->columns[i].size = 256;
+        }
+        s->columns[i].offset = offset;
+        offset += s->columns[i].size;
+    }
+    s->row_size = offset;
+    return true;
+}
+
+void table_print_tables(Table* table) {
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        printf("%s\n", table->catalog.schemas[i].name);
+    }
 }
 
 void db_close(Table* table) {
@@ -273,16 +394,8 @@ void db_close(Table* table) {
     }
     pager_checkpoint(pager); /* flush all pages and delete the WAL */
 
-    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
-        if (pager->pages[i] != NULL) {
-            free(pager->pages[i]);
-            pager->pages[i] = NULL;
-        }
-    }
-
-    fclose(pager->file);
     free(table->username_index_entries);
-    free(pager);
+    pager_close(pager);
     free(table);
 }
 
@@ -783,14 +896,43 @@ static void table_load_index_catalog(Table* table) {
             table->username_index_dirty = true;
         }
     }
+
+    table->num_sec_indexes = 0;
+    for (uint32_t i = 0; i < catalog.num_indexes && i < MAX_INDEXES; i++) {
+        if (catalog.indexes[i].enabled != 0) {
+            GenericSecondaryIndex* idx = &table->sec_indexes[table->num_sec_indexes++];
+            memset(idx, 0, sizeof(*idx));
+            strncpy(idx->name, catalog.indexes[i].name, MAX_NAME_SIZE - 1);
+            strncpy(idx->table_name, catalog.indexes[i].table_name, MAX_NAME_SIZE - 1);
+            strncpy(idx->column_name, catalog.indexes[i].column_name, MAX_NAME_SIZE - 1);
+            idx->enabled = true;
+            idx->dirty = true;
+            build_index_filename(idx->index_filename, sizeof(idx->index_filename),
+                                 table->pager->filename, idx->name, ".idx");
+            build_index_filename(idx->index_wal_filename,
+                                 sizeof(idx->index_wal_filename),
+                                 table->pager->filename, idx->name, ".idx.wal");
+        }
+    }
 }
 
 static void table_save_index_catalog_state(Table* table, bool entries_valid) {
     IndexCatalog catalog;
+    memset(&catalog, 0, sizeof(catalog));
     catalog.magic = INDEX_CATALOG_MAGIC;
     catalog.version = INDEX_CATALOG_VERSION;
     catalog.username_index_enabled = table->username_index_enabled ? 1u : 0u;
     catalog.username_index_entries_valid = entries_valid ? 1u : 0u;
+
+    catalog.num_indexes = table->num_sec_indexes;
+    for (uint32_t i = 0; i < table->num_sec_indexes && i < MAX_INDEXES; i++) {
+        if (table->sec_indexes[i].enabled) {
+            strncpy(catalog.indexes[i].name, table->sec_indexes[i].name, MAX_NAME_SIZE - 1);
+            strncpy(catalog.indexes[i].table_name, table->sec_indexes[i].table_name, MAX_NAME_SIZE - 1);
+            strncpy(catalog.indexes[i].column_name, table->sec_indexes[i].column_name, MAX_NAME_SIZE - 1);
+            catalog.indexes[i].enabled = 1u;
+        }
+    }
 
     table_write_index_catalog_wal(table, &catalog);
     table_write_index_catalog_file(table, &catalog);
@@ -893,6 +1035,189 @@ void table_finalize_username_index_commit(Table* table) {
     if (table->username_index_enabled && table->username_index_dirty) {
         table_ensure_username_index(table);
     }
+}
+
+static void extract_column_value(Row* row, TableSchema* schema, const char* col_name, char* dest, size_t dest_size) {
+    dest[0] = '\0';
+    if (schema != NULL) {
+        for (uint32_t i = 0; i < schema->num_columns; i++) {
+            if (strcmp(schema->columns[i].name, col_name) == 0) {
+                if (strcmp(col_name, "id") == 0) {
+                    snprintf(dest, dest_size, "%u", row->id);
+                } else if (strcmp(col_name, "username") == 0) {
+                    strncpy(dest, row->username, dest_size - 1);
+                    dest[dest_size - 1] = '\0';
+                } else if (strcmp(col_name, "email") == 0) {
+                    strncpy(dest, row->email, dest_size - 1);
+                    dest[dest_size - 1] = '\0';
+                }
+                return;
+            }
+        }
+    }
+    if (strcmp(col_name, "username") == 0) {
+        strncpy(dest, row->username, dest_size - 1);
+        dest[dest_size - 1] = '\0';
+    } else if (strcmp(col_name, "email") == 0) {
+        strncpy(dest, row->email, dest_size - 1);
+        dest[dest_size - 1] = '\0';
+    } else if (strcmp(col_name, "id") == 0) {
+        snprintf(dest, dest_size, "%u", row->id);
+    }
+}
+
+static int compare_generic_index_entries(const void* a, const void* b) {
+    const GenericIndexEntry* entry_a = (const GenericIndexEntry*)a;
+    const GenericIndexEntry* entry_b = (const GenericIndexEntry*)b;
+    int cmp = strcmp(entry_a->key_val, entry_b->key_val);
+    if (cmp != 0) return cmp;
+    if (entry_a->primary_key < entry_b->primary_key) return -1;
+    if (entry_a->primary_key > entry_b->primary_key) return 1;
+    return 0;
+}
+
+GenericSecondaryIndex* table_find_index_by_name(Table* table, const char* index_name) {
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        if (table->sec_indexes[i].enabled && strcmp(table->sec_indexes[i].name, index_name) == 0) {
+            return &table->sec_indexes[i];
+        }
+    }
+    return NULL;
+}
+
+GenericSecondaryIndex* table_find_index_by_column(Table* table, const char* table_name, const char* column_name) {
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        if (table->sec_indexes[i].enabled &&
+            (table_name == NULL || strcmp(table->sec_indexes[i].table_name, table_name) == 0) &&
+            strcmp(table->sec_indexes[i].column_name, column_name) == 0) {
+            return &table->sec_indexes[i];
+        }
+    }
+    return NULL;
+}
+
+bool table_create_index(Table* table, const char* index_name, const char* table_name, const char* column_name) {
+    if (table->num_sec_indexes >= MAX_INDEXES) {
+        printf("Error: Maximum number of indexes (%d) reached.\n", MAX_INDEXES);
+        return false;
+    }
+
+    if (table_find_index_by_name(table, index_name) != NULL) {
+        printf("Error: Index %s already exists.\n", index_name);
+        return false;
+    }
+
+    GenericSecondaryIndex* idx = &table->sec_indexes[table->num_sec_indexes++];
+    memset(idx, 0, sizeof(*idx));
+    strncpy(idx->name, index_name, sizeof(idx->name) - 1);
+    strncpy(idx->table_name, table_name, sizeof(idx->table_name) - 1);
+    strncpy(idx->column_name, column_name, sizeof(idx->column_name) - 1);
+    idx->enabled = true;
+    idx->dirty = true;
+
+    build_index_filename(idx->index_filename, sizeof(idx->index_filename),
+                         table->pager->filename, index_name, ".idx");
+    build_index_filename(idx->index_wal_filename,
+                         sizeof(idx->index_wal_filename),
+                         table->pager->filename, index_name, ".idx.wal");
+
+    if (strcmp(index_name, "idx_users_username") == 0) {
+        table_create_username_index(table);
+    }
+
+    table_ensure_all_indexes(table);
+    table_save_index_catalog_state(table, true);
+    return true;
+}
+
+bool table_drop_index(Table* table, const char* index_name) {
+    GenericSecondaryIndex* idx = table_find_index_by_name(table, index_name);
+    if (idx == NULL) {
+        if (strcmp(index_name, "idx_users_username") == 0 && table->username_index_enabled) {
+            table_drop_username_index(table);
+            return true;
+        }
+        printf("Error: Index %s does not exist.\n", index_name);
+        return false;
+    }
+
+    idx->enabled = false;
+    idx->dirty = false;
+    idx->count = 0;
+    idx->capacity = 0;
+    if (idx->entries != NULL) {
+        free(idx->entries);
+        idx->entries = NULL;
+    }
+
+    remove_index_file_if_exists(idx->index_filename, "Unable to remove index file.");
+    remove_index_file_if_exists(idx->index_wal_filename, "Unable to remove index WAL.");
+
+    if (strcmp(index_name, "idx_users_username") == 0) {
+        table_drop_username_index(table);
+    }
+
+    table_save_index_catalog_state(table, false);
+    return true;
+}
+
+void table_ensure_all_indexes(Table* table) {
+    table_ensure_username_index(table);
+
+    TableSchema* schema = table_get_schema(table, "users");
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        GenericSecondaryIndex* idx = &table->sec_indexes[i];
+        if (!idx->enabled || !idx->dirty) continue;
+
+        idx->count = 0;
+        Cursor* cursor = table_start(table);
+        Row row;
+        while (!cursor->end_of_table) {
+            deserialize_row(cursor_value(cursor), &row);
+
+            if (idx->count == idx->capacity) {
+                uint32_t new_cap = idx->capacity == 0 ? 16 : idx->capacity * 2;
+                GenericIndexEntry* new_entries = realloc(idx->entries, new_cap * sizeof(GenericIndexEntry));
+                if (new_entries == NULL) {
+                    printf("Unable to allocate memory for secondary index.\n");
+                    exit(EXIT_FAILURE);
+                }
+                idx->entries = new_entries;
+                idx->capacity = new_cap;
+            }
+
+            GenericIndexEntry* entry = &idx->entries[idx->count++];
+            extract_column_value(&row, schema, idx->column_name, entry->key_val, sizeof(entry->key_val));
+            entry->primary_key = row.id;
+
+            cursor_advance(cursor);
+        }
+        free(cursor);
+
+        if (idx->count > 1) {
+            qsort(idx->entries, idx->count, sizeof(GenericIndexEntry), compare_generic_index_entries);
+        }
+
+        idx->dirty = false;
+    }
+}
+
+void table_mark_indexes_dirty(Table* table) {
+    table_mark_username_index_dirty(table);
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        if (table->sec_indexes[i].enabled) {
+            table->sec_indexes[i].dirty = true;
+        }
+    }
+}
+
+void table_prepare_all_indexes_commit(Table* table) {
+    table_prepare_username_index_commit(table);
+}
+
+void table_finalize_all_indexes_commit(Table* table) {
+    table_finalize_username_index_commit(table);
+    table_ensure_all_indexes(table);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1239,7 +1564,7 @@ void leaf_node_split_and_insert(Cursor* cursor, uint32_t key, Row* value) {
      */
     for (int32_t i = LEAF_NODE_MAX_CELLS; i >= 0; i--) {
         void*    destination_node;
-        if (i >= LEAF_NODE_LEFT_SPLIT_COUNT) {
+        if (i >= (int32_t)LEAF_NODE_LEFT_SPLIT_COUNT) {
             destination_node = new_node;
         } else {
             destination_node = old_node;
@@ -1538,4 +1863,200 @@ void print_tree(Pager* pager, uint32_t page_num, uint32_t indentation_level) {
             print_tree(pager, child, indentation_level + 1);
             break;
     }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * SECTION 12 — Stats, Page Inspection, and VACUUM
+ * ═══════════════════════════════════════════════════════════════ */
+
+void db_get_stats(Table* table, TableStats* stats) {
+    memset(stats, 0, sizeof(*stats));
+    stats->total_pages = table->pager->num_pages;
+    stats->free_pages  = table->pager->free_page_count;
+
+    Cursor* cursor = table_start(table);
+    uint32_t current_page = 0xFFFFFFFF;
+    while (!cursor->end_of_table) {
+        stats->total_rows++;
+        if (cursor->page_num != current_page) {
+            stats->leaf_pages++;
+            current_page = cursor->page_num;
+        }
+        cursor_advance(cursor);
+    }
+    if (stats->leaf_pages == 0 && stats->total_pages > 0) {
+        stats->leaf_pages = 1;
+    }
+
+    for (uint32_t i = 0; i < table->pager->num_pages; i++) {
+        bool is_free = false;
+        for (uint32_t f = 0; f < table->pager->free_page_count; f++) {
+            if (table->pager->free_pages[f] == i) { is_free = true; break; }
+        }
+        if (is_free) continue;
+        void* page = get_page(table->pager, i);
+        if (get_node_type(page) == NODE_INTERNAL) {
+            stats->internal_pages++;
+        }
+    }
+    free(cursor);
+}
+
+void print_page(Table* table, uint32_t page_num) {
+    if (page_num >= table->pager->num_pages) {
+        printf("Error: Page number %u out of bounds (total pages: %u).\n",
+               page_num, table->pager->num_pages);
+        return;
+    }
+    void* page = get_page(table->pager, page_num);
+    NodeType type = get_node_type(page);
+    bool is_root = is_node_root(page);
+    uint32_t parent = *node_parent(page);
+
+    printf("--- Page %u Details ---\n", page_num);
+    printf("Type: %s\n", type == NODE_LEAF ? "LEAF" : "INTERNAL");
+    printf("Is Root: %s\n", is_root ? "Yes" : "No");
+    printf("Parent Page: %u\n", parent);
+
+    if (type == NODE_LEAF) {
+        uint32_t num_cells = *leaf_node_num_cells(page);
+        uint32_t next_leaf = *leaf_node_next_leaf(page);
+        uint32_t prev_leaf = *leaf_node_prev_leaf(page);
+        printf("Num Cells: %u\n", num_cells);
+        printf("Prev Leaf Page: %u\n", prev_leaf);
+        printf("Next Leaf Page: %u\n", next_leaf);
+        printf("Keys: ");
+        for (uint32_t i = 0; i < num_cells; i++) {
+            printf("%u%s", *leaf_node_key(page, i), (i + 1 < num_cells) ? ", " : "");
+        }
+        printf("\n");
+    } else {
+        uint32_t num_keys = *internal_node_num_keys(page);
+        uint32_t right_child = *internal_node_right_child(page);
+        printf("Num Keys: %u\n", num_keys);
+        printf("Right Child Page: %u\n", right_child);
+        printf("Keys & Children:\n");
+        for (uint32_t i = 0; i < num_keys; i++) {
+            printf("  Child[%u] -> Page %u | Key[%u] = %u\n",
+                   i, *internal_node_child(page, i), i, *internal_node_key(page, i));
+        }
+        printf("  Child[%u] (Rightmost) -> Page %u\n", num_keys, right_child);
+    }
+}
+
+void db_vacuum(Table* table) {
+    uint32_t capacity = 16;
+    uint32_t count = 0;
+    Row* rows = malloc(sizeof(Row) * capacity);
+    uint32_t version = db_get_user_version(table);
+
+    Cursor* cursor = table_start(table);
+    while (!cursor->end_of_table) {
+        if (count >= capacity) {
+            capacity *= 2;
+            rows = realloc(rows, sizeof(Row) * capacity);
+        }
+        deserialize_row(cursor_value(cursor), &rows[count++]);
+        cursor_advance(cursor);
+    }
+    free(cursor);
+
+    table_truncate(table);
+
+    for (uint32_t i = 0; i < count; i++) {
+        Cursor* ins_cursor = table_find(table, rows[i].id);
+        leaf_node_insert(ins_cursor, rows[i].id, &rows[i]);
+        free(ins_cursor);
+    }
+    free(rows);
+
+    db_set_user_version(table, version);
+
+    pager_commit(table->pager);
+    pager_checkpoint(table->pager);
+}
+
+uint32_t db_get_user_version(Table* table) {
+    if (table->pager->num_pages == 0) return 0;
+    void* root = get_page(table->pager, table->root_page_num);
+    return *node_parent(root);
+}
+
+void db_set_user_version(Table* table, uint32_t version) {
+    void* root = get_page(table->pager, table->root_page_num);
+    *node_parent(root) = version;
+    mark_page_dirty(table->pager, table->root_page_num);
+}
+
+bool db_integrity_check(Table* table) {
+    bool ok = true;
+    Pager* pager = table->pager;
+
+    if (pager->num_pages == 0) {
+        printf("ok\n");
+        return true;
+    }
+
+    void* root = get_page(pager, table->root_page_num);
+    if (!is_node_root(root)) {
+        printf("Error: Page %u is not marked as root.\n", table->root_page_num);
+        ok = false;
+    }
+
+    for (uint32_t i = 0; i < pager->num_pages; i++) {
+        bool is_free = false;
+        for (uint32_t f = 0; f < pager->free_page_count; f++) {
+            if (pager->free_pages[f] == i) { is_free = true; break; }
+        }
+        if (is_free) continue;
+
+        void* page = get_page(pager, i);
+        NodeType type = get_node_type(page);
+
+        if (type == NODE_LEAF) {
+            uint32_t num_cells = *leaf_node_num_cells(page);
+            if (num_cells > LEAF_NODE_MAX_CELLS) {
+                printf("Error: Leaf page %u has %u cells > max %u.\n", i, num_cells, (uint32_t)LEAF_NODE_MAX_CELLS);
+                ok = false;
+            }
+            for (uint32_t c = 1; c < num_cells; c++) {
+                if (*leaf_node_key(page, c - 1) >= *leaf_node_key(page, c)) {
+                    printf("Error: Leaf page %u keys not sorted (%u >= %u).\n",
+                           i, *leaf_node_key(page, c - 1), *leaf_node_key(page, c));
+                    ok = false;
+                }
+            }
+            uint32_t next = *leaf_node_next_leaf(page);
+            if (next > 0 && next < pager->num_pages) {
+                void* next_p = get_page(pager, next);
+                if (*leaf_node_prev_leaf(next_p) != i) {
+                    printf("Error: Leaf page %u next_leaf %u has broken prev_leaf link.\n", i, next);
+                    ok = false;
+                }
+            }
+        } else if (type == NODE_INTERNAL) {
+            uint32_t num_keys = *internal_node_num_keys(page);
+            if (num_keys > INTERNAL_NODE_MAX_KEYS) {
+                printf("Error: Internal page %u has %u keys > max %u.\n", i, num_keys, (uint32_t)INTERNAL_NODE_MAX_KEYS);
+                ok = false;
+            }
+        } else {
+            printf("Error: Page %u has unknown node type %u.\n", i, (uint32_t)type);
+            ok = false;
+        }
+    }
+
+    if (ok) {
+        printf("ok\n");
+    }
+    return ok;
+}
+
+void db_checkpoint(Table* table) {
+    pager_checkpoint(table->pager);
+    if (table->username_index_enabled) {
+        table_prepare_username_index_commit(table);
+        table_finalize_username_index_commit(table);
+    }
+    printf("Checkpoint complete.\n");
 }

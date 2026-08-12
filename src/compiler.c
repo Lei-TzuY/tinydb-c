@@ -274,7 +274,18 @@ static bool parse_select(Parser* parser, Statement* statement) {
     /* Bare "select" with nothing following */
     if (consume_statement_end(parser)) return true;
 
-    /* Projection: COUNT(*), MIN(id), MAX(id), or * */
+    /* Optional column projection before aggregate: e.g. "email, count(*)" */
+    Parser peek = *parser;
+    char first_col[32];
+    if (parse_identifier_into(&peek, first_col, sizeof(first_col))) {
+        if (consume_character(&peek, ',')) {
+            statement->select.has_project_col = true;
+            strncpy(statement->select.project_col, first_col, sizeof(statement->select.project_col) - 1);
+            *parser = peek;
+        }
+    }
+
+    /* Projection: COUNT(*), MIN(id), MAX(id), SUM(id), AVG(id), or * */
     if (consume_keyword(parser, "count")) {
         if (!consume_character(parser, '(') ||
             !consume_character(parser, '*') ||
@@ -293,31 +304,168 @@ static bool parse_select(Parser* parser, Statement* statement) {
             !consume_character(parser, ')'))
             return false;
         statement->select.aggregate = AGGREGATE_MAX;
+    } else if (consume_keyword(parser, "sum")) {
+        if (!consume_character(parser, '(') ||
+            !consume_keyword(parser, "id") ||
+            !consume_character(parser, ')'))
+            return false;
+        statement->select.aggregate = AGGREGATE_SUM;
+    } else if (consume_keyword(parser, "avg")) {
+        if (!consume_character(parser, '(') ||
+            !consume_keyword(parser, "id") ||
+            !consume_character(parser, ')'))
+            return false;
+        statement->select.aggregate = AGGREGATE_AVG;
     } else {
         if (!consume_character(parser, '*')) return false;
     }
 
-    if (!consume_keyword(parser, "from") || !parse_identifier(parser))
-        return false;
+    if (!consume_keyword(parser, "from")) return false;
+    skip_spaces(parser);
+    const char* tstart = parser->current;
+    while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+        parser->current++;
+    }
+    size_t tlen = parser->current - tstart;
+    if (tlen == 0 || tlen >= sizeof(statement->select.table_name)) return false;
+    memcpy(statement->select.table_name, tstart, tlen);
+    statement->select.table_name[tlen] = '\0';
+
+    if (consume_keyword(parser, "join")) {
+        skip_spaces(parser);
+        const char* jstart = parser->current;
+        while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+            parser->current++;
+        }
+        size_t jlen = parser->current - jstart;
+        if (jlen == 0 || jlen >= sizeof(statement->select.join_table)) return false;
+        memcpy(statement->select.join_table, jstart, jlen);
+        statement->select.join_table[jlen] = '\0';
+        statement->select.has_join = true;
+
+        if (consume_keyword(parser, "on")) {
+            skip_spaces(parser);
+            const char* lstart = parser->current;
+            while (isalnum((unsigned char)*parser->current) || *parser->current == '_' || *parser->current == '.') {
+                parser->current++;
+            }
+            size_t llen = parser->current - lstart;
+            if (llen > 0 && llen < sizeof(statement->select.join_left_col)) {
+                memcpy(statement->select.join_left_col, lstart, llen);
+                statement->select.join_left_col[llen] = '\0';
+            }
+
+            if (consume_character(parser, '=')) {
+                skip_spaces(parser);
+                const char* rstart = parser->current;
+                while (isalnum((unsigned char)*parser->current) || *parser->current == '_' || *parser->current == '.') {
+                    parser->current++;
+                }
+                size_t rlen = parser->current - rstart;
+                if (rlen > 0 && rlen < sizeof(statement->select.join_right_col)) {
+                    memcpy(statement->select.join_right_col, rstart, rlen);
+                    statement->select.join_right_col[rlen] = '\0';
+                }
+            }
+        }
+    }
 
     if (consume_statement_end(parser)) return true;
 
-    /* Optional WHERE id <op> N or username = 'value' */
+    /* Optional WHERE clause: id <op> N, username = 'val', or email = 'val' (supports AND chaining) */
     if (consume_keyword(parser, "where")) {
-        if (consume_keyword(parser, "id")) {
-            CompareOp op;
-            if (!consume_compare_op(parser, &op)) return false;
-            if (!parse_uint32(parser, &statement->select.id)) return false;
-            statement->select.has_id_filter = true;
-            statement->select.id_op = op;
-        } else if (consume_keyword(parser, "username")) {
-            if (!consume_character(parser, '=')) return false;
-            if (!parse_sql_string(parser, statement->select.username,
-                                  sizeof(statement->select.username))) return false;
-            statement->select.has_username_filter = true;
+        while (true) {
+            if (consume_keyword(parser, "id")) {
+                CompareOp op;
+                uint32_t id_val;
+                if (!consume_compare_op(parser, &op)) return false;
+                if (!parse_uint32(parser, &id_val)) return false;
+                statement->select.has_id_filter = true;
+                statement->select.id = id_val;
+                statement->select.id_op = op;
+
+                if (op == COMPARE_GT || op == COMPARE_GTE) {
+                    statement->select.has_id_min_filter = true;
+                    statement->select.id_min = id_val;
+                    statement->select.id_min_op = op;
+                } else if (op == COMPARE_LT || op == COMPARE_LTE) {
+                    statement->select.has_id_max_filter = true;
+                    statement->select.id_max = id_val;
+                    statement->select.id_max_op = op;
+                }
+            } else if (consume_keyword(parser, "username")) {
+                if (consume_keyword(parser, "like")) {
+                    if (!parse_sql_string(parser, statement->select.username_like,
+                                          sizeof(statement->select.username_like))) return false;
+                    statement->select.has_username_like = true;
+                } else {
+                    if (!consume_character(parser, '=')) return false;
+                    if (!parse_sql_string(parser, statement->select.username,
+                                          sizeof(statement->select.username))) return false;
+                    statement->select.has_username_filter = true;
+                }
+            } else if (consume_keyword(parser, "email")) {
+                if (consume_keyword(parser, "like")) {
+                    if (!parse_sql_string(parser, statement->select.email_like,
+                                          sizeof(statement->select.email_like))) return false;
+                    statement->select.has_email_like = true;
+                } else {
+                    if (!consume_character(parser, '=')) return false;
+                    if (!parse_sql_string(parser, statement->select.email,
+                                          sizeof(statement->select.email))) return false;
+                    statement->select.has_email_filter = true;
+                }
+            } else {
+                return false;
+            }
+
+            if (consume_keyword(parser, "and")) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    /* Optional GROUP BY clause: GROUP BY <column_name> */
+    if (consume_keyword(parser, "group")) {
+        if (!consume_keyword(parser, "by")) return false;
+        if (!parse_identifier_into(parser, statement->select.group_by_col, sizeof(statement->select.group_by_col))) {
+            return false;
+        }
+        statement->select.has_group_by = true;
+    }
+
+    /* Optional HAVING clause: HAVING COUNT(*) > N, HAVING MIN(id) >= N, etc. */
+    if (consume_keyword(parser, "having")) {
+        AggregateType h_agg = AGGREGATE_NONE;
+        if (consume_keyword(parser, "count")) {
+            if (!consume_character(parser, '(') || !consume_character(parser, '*') || !consume_character(parser, ')')) return false;
+            h_agg = AGGREGATE_COUNT;
+        } else if (consume_keyword(parser, "min")) {
+            if (!consume_character(parser, '(') || !consume_keyword(parser, "id") || !consume_character(parser, ')')) return false;
+            h_agg = AGGREGATE_MIN;
+        } else if (consume_keyword(parser, "max")) {
+            if (!consume_character(parser, '(') || !consume_keyword(parser, "id") || !consume_character(parser, ')')) return false;
+            h_agg = AGGREGATE_MAX;
+        } else if (consume_keyword(parser, "sum")) {
+            if (!consume_character(parser, '(') || !consume_keyword(parser, "id") || !consume_character(parser, ')')) return false;
+            h_agg = AGGREGATE_SUM;
+        } else if (consume_keyword(parser, "avg")) {
+            if (!consume_character(parser, '(') || !consume_keyword(parser, "id") || !consume_character(parser, ')')) return false;
+            h_agg = AGGREGATE_AVG;
         } else {
             return false;
         }
+
+        CompareOp h_op;
+        uint32_t h_val;
+        if (!consume_compare_op(parser, &h_op)) return false;
+        if (!parse_uint32(parser, &h_val)) return false;
+
+        statement->select.has_having = true;
+        statement->select.having_agg = h_agg;
+        statement->select.having_op = h_op;
+        statement->select.having_val = h_val;
     }
 
     /* Optional ORDER BY id DESC */
@@ -339,32 +487,204 @@ static bool parse_select(Parser* parser, Statement* statement) {
 }
 
 static bool parse_create_index(Parser* parser, Statement* statement) {
-    char index_name[64];
-    char table_name[64];
-
     statement->type = STATEMENT_CREATE_INDEX;
-    if (!consume_keyword(parser, "index") ||
-        !parse_identifier_into(parser, index_name, sizeof(index_name)) ||
-        !consume_keyword(parser, "on") ||
-        !parse_identifier_into(parser, table_name, sizeof(table_name)) ||
-        strcmp(index_name, "idx_users_username") != 0 ||
-        strcmp(table_name, "users") != 0) {
-        return false;
-    }
-    return consume_character(parser, '(') &&
-           consume_keyword(parser, "username") &&
+    return consume_keyword(parser, "index") &&
+           parse_identifier_into(parser, statement->create_index.name, sizeof(statement->create_index.name)) &&
+           consume_keyword(parser, "on") &&
+           parse_identifier_into(parser, statement->create_index.table_name, sizeof(statement->create_index.table_name)) &&
+           consume_character(parser, '(') &&
+           parse_identifier_into(parser, statement->create_index.column_name, sizeof(statement->create_index.column_name)) &&
            consume_character(parser, ')') &&
            consume_statement_end(parser);
 }
 
 static bool parse_drop_index(Parser* parser, Statement* statement) {
-    char index_name[64];
-
     statement->type = STATEMENT_DROP_INDEX;
     return consume_keyword(parser, "index") &&
-           parse_identifier_into(parser, index_name, sizeof(index_name)) &&
-           strcmp(index_name, "idx_users_username") == 0 &&
+           parse_identifier_into(parser, statement->drop_index.name, sizeof(statement->drop_index.name)) &&
            consume_statement_end(parser);
+}
+
+static bool parse_savepoint(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_SAVEPOINT;
+    return parse_identifier_into(parser, statement->savepoint.name, sizeof(statement->savepoint.name)) &&
+           consume_statement_end(parser);
+}
+
+static bool parse_rollback(Parser* parser, Statement* statement) {
+    if (consume_keyword(parser, "to")) {
+        consume_keyword(parser, "savepoint");
+        statement->type = STATEMENT_ROLLBACK_TO;
+        return parse_identifier_into(parser, statement->savepoint.name, sizeof(statement->savepoint.name)) &&
+               consume_statement_end(parser);
+    }
+    statement->type = STATEMENT_ROLLBACK;
+    return consume_statement_end(parser);
+}
+
+static bool parse_release(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_RELEASE_SAVEPOINT;
+    consume_keyword(parser, "savepoint");
+    return parse_identifier_into(parser, statement->savepoint.name, sizeof(statement->savepoint.name)) &&
+           consume_statement_end(parser);
+}
+
+static bool parse_pragma(Parser* parser, Statement* statement) {
+    if (consume_keyword(parser, "integrity_check")) {
+        statement->type = STATEMENT_PRAGMA_INTEGRITY_CHECK;
+        return consume_statement_end(parser);
+    }
+    if (consume_keyword(parser, "checkpoint")) {
+        statement->type = STATEMENT_CHECKPOINT;
+        return consume_statement_end(parser);
+    }
+    if (consume_keyword(parser, "table_info")) {
+        statement->type = STATEMENT_PRAGMA_TABLE_INFO;
+        if (consume_character(parser, '(')) {
+            parse_identifier(parser);
+            consume_character(parser, ')');
+        }
+        return consume_statement_end(parser);
+    }
+    if (consume_keyword(parser, "index_list")) {
+        statement->type = STATEMENT_PRAGMA_INDEX_LIST;
+        if (consume_character(parser, '(')) {
+            parse_identifier(parser);
+            consume_character(parser, ')');
+        }
+        return consume_statement_end(parser);
+    }
+    if (consume_keyword(parser, "user_version")) {
+        if (consume_character(parser, '=')) {
+            statement->type = STATEMENT_PRAGMA_SET_USER_VERSION;
+            return parse_uint32(parser, &statement->pragma.user_version) &&
+                   consume_statement_end(parser);
+        }
+        statement->type = STATEMENT_PRAGMA_USER_VERSION;
+        return consume_statement_end(parser);
+    }
+    return false;
+}
+
+static bool parse_create_table(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_CREATE_TABLE;
+    if (!consume_keyword(parser, "table")) return false;
+    
+    skip_spaces(parser);
+    const char* start = parser->current;
+    while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+        parser->current++;
+    }
+    size_t len = parser->current - start;
+    if (len == 0 || len >= sizeof(statement->create_table.table_name)) return false;
+    memcpy(statement->create_table.table_name, start, len);
+    statement->create_table.table_name[len] = '\0';
+
+    if (!consume_character(parser, '(')) return false;
+
+    uint32_t col_idx = 0;
+    while (true) {
+        skip_spaces(parser);
+        const char* cstart = parser->current;
+        while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+            parser->current++;
+        }
+        size_t clen = parser->current - cstart;
+        if (clen == 0 || clen >= sizeof(statement->create_table.col_names[0])) return false;
+        memcpy(statement->create_table.col_names[col_idx], cstart, clen);
+        statement->create_table.col_names[col_idx][clen] = '\0';
+
+        skip_spaces(parser);
+        const char* tstart = parser->current;
+        while (isalpha((unsigned char)*parser->current)) {
+            parser->current++;
+        }
+        size_t tlen = parser->current - tstart;
+        if (tlen == 0 || tlen >= sizeof(statement->create_table.col_types[0])) return false;
+        memcpy(statement->create_table.col_types[col_idx], tstart, tlen);
+        statement->create_table.col_types[col_idx][tlen] = '\0';
+
+        skip_spaces(parser);
+        if (consume_keyword(parser, "references")) {
+            statement->create_table.has_fk = true;
+            memcpy(statement->create_table.fk_col, statement->create_table.col_names[col_idx], sizeof(statement->create_table.fk_col));
+            skip_spaces(parser);
+            const char* pstart = parser->current;
+            while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+                parser->current++;
+            }
+            size_t plen = parser->current - pstart;
+            if (plen > 0 && plen < sizeof(statement->create_table.fk_parent_table)) {
+                memcpy(statement->create_table.fk_parent_table, pstart, plen);
+                statement->create_table.fk_parent_table[plen] = '\0';
+            }
+            if (consume_character(parser, '(')) {
+                const char* pcstart = parser->current;
+                while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+                    parser->current++;
+                }
+                size_t pclen = parser->current - pcstart;
+                if (pclen > 0 && pclen < sizeof(statement->create_table.fk_parent_col)) {
+                    memcpy(statement->create_table.fk_parent_col, pcstart, pclen);
+                    statement->create_table.fk_parent_col[pclen] = '\0';
+                }
+                consume_character(parser, ')');
+            }
+        }
+
+        col_idx++;
+        skip_spaces(parser);
+        if (consume_character(parser, ',')) {
+            continue;
+        }
+        if (consume_character(parser, ')')) {
+            break;
+        }
+        return false;
+    }
+    statement->create_table.num_columns = col_idx;
+    return consume_statement_end(parser);
+}
+
+static bool parse_prepare(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_PREPARE;
+    skip_spaces(parser);
+    const char* nstart = parser->current;
+    while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+        parser->current++;
+    }
+    size_t nlen = parser->current - nstart;
+    if (nlen == 0 || nlen >= sizeof(statement->prepare.name)) return false;
+    memcpy(statement->prepare.name, nstart, nlen);
+    statement->prepare.name[nlen] = '\0';
+
+    if (!consume_keyword(parser, "from")) return false;
+
+    skip_spaces(parser);
+    const char* tstart = parser->current;
+    size_t tlen = strlen(tstart);
+    if (tlen == 0 || tlen >= sizeof(statement->prepare.sql_template)) return false;
+    memcpy(statement->prepare.sql_template, tstart, tlen);
+    statement->prepare.sql_template[tlen] = '\0';
+    return true;
+}
+
+static bool parse_execute_prepared(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_EXECUTE_PREPARED;
+    skip_spaces(parser);
+    const char* nstart = parser->current;
+    while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+        parser->current++;
+    }
+    size_t nlen = parser->current - nstart;
+    if (nlen == 0 || nlen >= sizeof(statement->execute_prepared.name)) return false;
+    memcpy(statement->execute_prepared.name, nstart, nlen);
+    statement->execute_prepared.name[nlen] = '\0';
+
+    if (consume_keyword(parser, "using")) {
+        parse_uint32(parser, &statement->execute_prepared.param_val);
+    }
+    return true;
 }
 
 PrepareResult prepare_statement(const char* input, Statement* statement) {
@@ -373,6 +693,14 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
     memset(statement, 0, sizeof(*statement));
     parser.current = input;
 
+    if (consume_keyword(&parser, "prepare")) {
+        return parse_prepare(&parser, statement) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "execute")) {
+        return parse_execute_prepared(&parser, statement) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
+    }
+
     if (consume_keyword(&parser, "explain")) {
         statement->explain = true;
         if (!consume_keyword(&parser, "select") ||
@@ -380,6 +708,16 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
             return PREPARE_SYNTAX_ERROR;
         }
         return PREPARE_SUCCESS;
+    }
+
+    if (consume_keyword(&parser, "create")) {
+        if (parse_create_index(&parser, statement)) {
+            return PREPARE_SUCCESS;
+        }
+        if (parse_create_table(&parser, statement)) {
+            return PREPARE_SUCCESS;
+        }
+        return PREPARE_SYNTAX_ERROR;
     }
 
     if (consume_keyword(&parser, "insert")) {
@@ -411,8 +749,21 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
     }
 
     if (consume_keyword(&parser, "rollback")) {
-        statement->type = STATEMENT_ROLLBACK;
-        return consume_statement_end(&parser) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
+        return parse_rollback(&parser, statement)
+            ? PREPARE_SUCCESS
+            : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "savepoint")) {
+        return parse_savepoint(&parser, statement)
+            ? PREPARE_SUCCESS
+            : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "release")) {
+        return parse_release(&parser, statement)
+            ? PREPARE_SUCCESS
+            : PREPARE_SYNTAX_ERROR;
     }
 
     if (consume_keyword(&parser, "update")) {
@@ -429,6 +780,22 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
 
     if (consume_keyword(&parser, "drop")) {
         return parse_drop_index(&parser, statement)
+            ? PREPARE_SUCCESS
+            : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "vacuum")) {
+        statement->type = STATEMENT_VACUUM;
+        return consume_statement_end(&parser) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "checkpoint")) {
+        statement->type = STATEMENT_CHECKPOINT;
+        return consume_statement_end(&parser) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "pragma")) {
+        return parse_pragma(&parser, statement)
             ? PREPARE_SUCCESS
             : PREPARE_SYNTAX_ERROR;
     }

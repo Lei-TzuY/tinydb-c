@@ -58,6 +58,35 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table* table) {
     } else if (strcmp(input_buffer->buffer, ".btree") == 0) {
         print_tree(table->pager, table->root_page_num, 0);
         return META_COMMAND_SUCCESS;
+    } else if (strcmp(input_buffer->buffer, ".constants") == 0) {
+        printf("PAGE_SIZE: %d\n", PAGE_SIZE);
+        printf("ROW_SIZE: %d\n", (int)ROW_SIZE);
+        printf("COMMON_NODE_HEADER_SIZE: %d\n", (int)COMMON_NODE_HEADER_SIZE);
+        printf("LEAF_NODE_HEADER_SIZE: %d\n", (int)LEAF_NODE_HEADER_SIZE);
+        printf("LEAF_NODE_CELL_SIZE: %d\n", (int)LEAF_NODE_CELL_SIZE);
+        printf("LEAF_NODE_SPACE_FOR_CELLS: %d\n", (int)LEAF_NODE_SPACE_FOR_CELLS);
+        printf("LEAF_NODE_MAX_CELLS: %d\n", (int)LEAF_NODE_MAX_CELLS);
+        printf("INTERNAL_NODE_MAX_KEYS: %d\n", (int)INTERNAL_NODE_MAX_KEYS);
+        return META_COMMAND_SUCCESS;
+    } else if (strcmp(input_buffer->buffer, ".stats") == 0) {
+        TableStats stats;
+        db_get_stats(table, &stats);
+        printf("Total Pages: %u\n", stats.total_pages);
+        printf("Leaf Pages: %u\n", stats.leaf_pages);
+        printf("Internal Pages: %u\n", stats.internal_pages);
+        printf("Free Pages: %u\n", stats.free_pages);
+        printf("Total Rows: %u\n", stats.total_rows);
+        printf("In Transaction: %s\n", table->in_transaction ? "Yes" : "No");
+        printf("Secondary Index: %s\n", table->username_index_enabled ? "Enabled" : "Disabled");
+        return META_COMMAND_SUCCESS;
+    } else if (strncmp(input_buffer->buffer, ".page", 5) == 0) {
+        uint32_t page_num = 0;
+        if (sscanf(input_buffer->buffer, ".page %u", &page_num) == 1) {
+            print_page(table, page_num);
+            return META_COMMAND_SUCCESS;
+        }
+        printf("Usage: .page <page_num>\n");
+        return META_COMMAND_SUCCESS;
     } else if (strcmp(input_buffer->buffer, ".schema") == 0) {
         printf("Table: users\n");
         printf("  id        INTEGER       PRIMARY KEY\n");
@@ -68,26 +97,49 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table* table) {
         }
         return META_COMMAND_SUCCESS;
     } else if (strcmp(input_buffer->buffer, ".tables") == 0) {
-        printf("users\n");
+        table_print_tables(table);
+        return META_COMMAND_SUCCESS;
+    } else if (strcmp(input_buffer->buffer, ".checkpoint") == 0) {
+        db_checkpoint(table);
+        return META_COMMAND_SUCCESS;
+    } else if (strcmp(input_buffer->buffer, ".check") == 0) {
+        db_integrity_check(table);
+        return META_COMMAND_SUCCESS;
+    } else if (strcmp(input_buffer->buffer, ".buffer_pool") == 0 ||
+               strcmp(input_buffer->buffer, ".cache") == 0) {
+        pager_print_buffer_pool_stats(table->pager);
         return META_COMMAND_SUCCESS;
     } else if (strcmp(input_buffer->buffer, ".help") == 0) {
         printf("Meta commands:\n");
         printf("  .tables              List tables\n");
         printf("  .schema              Show table schema\n");
         printf("  .btree               Print B+ tree structure\n");
+        printf("  .constants           Show database engine constants\n");
+        printf("  .stats               Show database runtime statistics\n");
+        printf("  .buffer_pool / .cache Display Buffer Pool Manager & LRU eviction stats\n");
+        printf("  .page <n>            Inspect physical page <n> details\n");
+        printf("  .checkpoint          Flush WAL frames to main database file\n");
+        printf("  .check               Run B+ tree and pager integrity check\n");
         printf("  .help                Show this help\n");
         printf("  .exit                Exit\n");
         printf("\nSQL statements:\n");
         printf("  INSERT INTO users VALUES (id, 'username', 'email');\n");
         printf("  SELECT * FROM users;\n");
-        printf("  SELECT * FROM users WHERE id = N;\n");
-        printf("  SELECT * FROM users WHERE username = 'x';\n");
+        printf("  SELECT * FROM users WHERE [id = N] [AND username LIKE 'p%%'] [AND email LIKE '%%s'];\n");
+        printf("  SELECT COUNT(*)|MIN(id)|MAX(id)|SUM(id)|AVG(id) FROM users;\n");
         printf("  CREATE INDEX idx_users_username ON users(username);\n");
         printf("  DROP INDEX idx_users_username;\n");
         printf("  UPDATE users SET username = 'x' [, email = 'y'] WHERE id = N;\n");
         printf("  DELETE FROM users WHERE id = N;\n");
         printf("  DELETE FROM users;\n");
+        printf("  VACUUM;\n");
         printf("  BEGIN;  COMMIT;  ROLLBACK;\n");
+        printf("  SAVEPOINT sp1;  ROLLBACK TO sp1;  RELEASE sp1;\n");
+        printf("  CHECKPOINT;\n");
+        printf("  PRAGMA integrity_check;\n");
+        printf("  PRAGMA table_info; / PRAGMA table_info(users);\n");
+        printf("  PRAGMA index_list; / PRAGMA index_list(users);\n");
+        printf("  PRAGMA user_version; / PRAGMA user_version = N;\n");
         printf("  EXPLAIN SELECT ...;\n");
         return META_COMMAND_SUCCESS;
     } else {
@@ -154,6 +206,12 @@ int main(int argc, char* argv[]) {
                 break;
             case (EXECUTE_DDL_INSIDE_TRANSACTION):
                 printf("Error: Index DDL is not allowed inside a transaction.\n");
+                break;
+            case (EXECUTE_SAVEPOINT_NOT_FOUND):
+                printf("Error: Savepoint not found.\n");
+                break;
+            case (EXECUTE_SAVEPOINT_STACK_FULL):
+                printf("Error: Savepoint stack full.\n");
                 break;
         }
     }

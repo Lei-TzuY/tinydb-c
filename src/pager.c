@@ -95,14 +95,95 @@ static void truncate_file(FILE* file, uint32_t length) {
 #endif
 }
 
-static void clear_page_cache(Pager* pager) {
-    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
-        if (pager->pages[i] != NULL) {
-            free(pager->pages[i]);
-            pager->pages[i] = NULL;
+static void lru_remove(Pager* pager, int frame_idx) {
+    if (frame_idx == -1) return;
+    Frame* frame = &pager->frames[frame_idx];
+
+    if (frame->lru_prev != -1) {
+        pager->frames[frame->lru_prev].lru_next = frame->lru_next;
+    } else if (pager->lru_head == frame_idx) {
+        pager->lru_head = frame->lru_next;
+    }
+
+    if (frame->lru_next != -1) {
+        pager->frames[frame->lru_next].lru_prev = frame->lru_prev;
+    } else if (pager->lru_tail == frame_idx) {
+        pager->lru_tail = frame->lru_prev;
+    }
+
+    frame->lru_prev = -1;
+    frame->lru_next = -1;
+}
+
+static void lru_touch(Pager* pager, int frame_idx) {
+    if (pager->lru_head == frame_idx) return;
+
+    lru_remove(pager, frame_idx);
+
+    pager->frames[frame_idx].lru_next = pager->lru_head;
+    pager->frames[frame_idx].lru_prev = -1;
+
+    if (pager->lru_head != -1) {
+        pager->frames[pager->lru_head].lru_prev = frame_idx;
+    }
+    pager->lru_head = frame_idx;
+
+    if (pager->lru_tail == -1) {
+        pager->lru_tail = frame_idx;
+    }
+}
+
+static int lru_evict(Pager* pager) {
+    int victim = pager->lru_tail;
+    while (victim != -1) {
+        if (pager->frames[victim].pin_count == 0) {
+            break;
         }
+        victim = pager->frames[victim].lru_prev;
+    }
+
+    if (victim == -1) {
+        victim = pager->lru_tail;
+    }
+
+    uint32_t victim_page = pager->frames[victim].page_num;
+    if (victim_page != INVALID_PAGE_NUM) {
+        if (pager->frames[victim].is_dirty) {
+            page_write_checksum(pager->frames[victim].data);
+            seek_file(pager->file, victim_page);
+            write_bytes(pager->file, pager->frames[victim].data, PAGE_SIZE);
+            pager->frames[victim].is_dirty = false;
+            uint32_t end_offset = victim_page * PAGE_SIZE + PAGE_SIZE;
+            if (end_offset > pager->file_length) {
+                pager->file_length = end_offset;
+            }
+        }
+        pager->page_table[victim_page] = -1;
+        pager->evictions++;
+    }
+
+    lru_remove(pager, victim);
+    pager->frames[victim].page_num = INVALID_PAGE_NUM;
+    pager->frames[victim].is_dirty = false;
+    pager->frames[victim].pin_count = 0;
+
+    return victim;
+}
+
+static void clear_page_cache(Pager* pager) {
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        pager->frames[i].page_num = INVALID_PAGE_NUM;
+        pager->frames[i].is_dirty = false;
+        pager->frames[i].pin_count = 0;
+        pager->frames[i].lru_prev = -1;
+        pager->frames[i].lru_next = -1;
+    }
+    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
+        pager->page_table[i] = -1;
         pager->is_dirty[i] = false;
     }
+    pager->lru_head = -1;
+    pager->lru_tail = -1;
 }
 
 static void recover_wal(const char* filename, const char* wal_filename) {
@@ -227,10 +308,27 @@ Pager* pager_open(const char* filename) {
     pager->transaction_num_pages = 0;
     pager->free_page_count = 0;
     pager->transaction_free_page_count = 0;
+    pager->savepoint_count = 0;
+    memset(pager->savepoints, 0, sizeof(pager->savepoints));
+
+    pager->lru_head = -1;
+    pager->lru_tail = -1;
+    pager->cache_hits = 0;
+    pager->cache_misses = 0;
+    pager->evictions = 0;
 
     for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
-        pager->pages[i] = NULL;
+        pager->page_table[i] = -1;
         pager->is_dirty[i] = false;
+    }
+
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        pager->frames[i].page_num = INVALID_PAGE_NUM;
+        pager->frames[i].data = calloc(1, PAGE_SIZE);
+        pager->frames[i].is_dirty = false;
+        pager->frames[i].pin_count = 0;
+        pager->frames[i].lru_prev = -1;
+        pager->frames[i].lru_next = -1;
     }
 
     return pager;
@@ -243,44 +341,100 @@ void* get_page(Pager* pager, uint32_t page_num) {
         exit(EXIT_FAILURE);
     }
 
-    if (pager->pages[page_num] == NULL) {
-        void* page = calloc(1, PAGE_SIZE);
-        if (page == NULL) {
-            printf("Unable to allocate page.\n");
-            exit(EXIT_FAILURE);
-        }
+    int frame_idx = pager->page_table[page_num];
 
-        uint32_t num_pages = pager->file_length / PAGE_SIZE;
-        if (page_num < num_pages) {
-            seek_file(pager->file, page_num);
-            if (fread(page, 1, PAGE_SIZE, pager->file) != PAGE_SIZE) {
-                fail_io("Error reading page");
-            }
-            page_verify_checksum(page, page_num);
-        }
+    if (frame_idx != -1) {
+        pager->cache_hits++;
+        lru_touch(pager, frame_idx);
+        return pager->frames[frame_idx].data;
+    }
 
-        pager->pages[page_num] = page;
-        if (page_num >= pager->num_pages) {
-            pager->num_pages = page_num + 1;
+    pager->cache_misses++;
+
+    /* Find empty frame */
+    frame_idx = -1;
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        if (pager->frames[i].page_num == INVALID_PAGE_NUM) {
+            frame_idx = i;
+            break;
         }
     }
 
-    return pager->pages[page_num];
+    if (frame_idx == -1) {
+        frame_idx = lru_evict(pager);
+    }
+
+    void* page_data = pager->frames[frame_idx].data;
+    memset(page_data, 0, PAGE_SIZE);
+
+    uint32_t file_pages = pager->file_length / PAGE_SIZE;
+    if (page_num < file_pages) {
+        seek_file(pager->file, page_num);
+        if (fread(page_data, 1, PAGE_SIZE, pager->file) != PAGE_SIZE) {
+            fail_io("Error reading page");
+        }
+        page_verify_checksum(page_data, page_num);
+    }
+
+    if (page_num >= pager->num_pages) {
+        pager->num_pages = page_num + 1;
+    }
+
+    pager->frames[frame_idx].page_num = page_num;
+    pager->frames[frame_idx].is_dirty = pager->is_dirty[page_num];
+    pager->frames[frame_idx].pin_count = 0;
+    pager->page_table[page_num] = frame_idx;
+
+    lru_touch(pager, frame_idx);
+
+    return page_data;
+}
+
+void pager_unpin_page(Pager* pager, uint32_t page_num) {
+    if (page_num >= TABLE_MAX_PAGES) return;
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1 && pager->frames[frame_idx].pin_count > 0) {
+        pager->frames[frame_idx].pin_count--;
+    }
+}
+
+void pager_print_buffer_pool_stats(Pager* pager) {
+    uint32_t total = pager->cache_hits + pager->cache_misses;
+    double hit_ratio = (total > 0) ? ((double)pager->cache_hits / total * 100.0) : 0.0;
+
+    printf("=== Buffer Pool Manager Statistics ===\n");
+    printf("Capacity    : %d pages\n", MAX_BUFFER_POOL_SIZE);
+    printf("Hits        : %u\n", pager->cache_hits);
+    printf("Misses      : %u\n", pager->cache_misses);
+    printf("Hit Ratio   : %.2f%%\n", hit_ratio);
+    printf("Evictions   : %u\n", pager->evictions);
+    printf("LRU Queue   (MRU -> LRU):\n");
+
+    int curr = pager->lru_head;
+    int pos = 0;
+    while (curr != -1) {
+        Frame* f = &pager->frames[curr];
+        printf("  [%2d] Frame %2d -> Page %2u (dirty=%d, pins=%u)\n",
+               pos++, curr, f->page_num, f->is_dirty ? 1 : 0, f->pin_count);
+        curr = f->lru_next;
+    }
 }
 
 void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
-    uint32_t end_offset;
+    int frame_idx = pager->page_table[page_num];
+    void* page_data = NULL;
 
-    if (page_num >= TABLE_MAX_PAGES || pager->pages[page_num] == NULL) {
-        printf("Tried to flush invalid page.\n");
-        exit(EXIT_FAILURE);
+    if (frame_idx != -1) {
+        page_data = pager->frames[frame_idx].data;
+    } else {
+        return;
     }
 
-    page_write_checksum(pager->pages[page_num]);
+    page_write_checksum(page_data);
     seek_file(pager->file, page_num);
-    write_bytes(pager->file, pager->pages[page_num], size);
+    write_bytes(pager->file, page_data, size);
 
-    end_offset = page_num * PAGE_SIZE + size;
+    uint32_t end_offset = page_num * PAGE_SIZE + size;
     if (end_offset > pager->file_length) {
         pager->file_length = end_offset;
     }
@@ -298,9 +452,13 @@ void pager_free_page(Pager* pager, uint32_t page_num) {
         printf("BUG: attempted to free page 0 (always root).\n");
         exit(EXIT_FAILURE);
     }
-    if (pager->pages[page_num] != NULL) {
-        free(pager->pages[page_num]);
-        pager->pages[page_num] = NULL;
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) {
+        pager->frames[frame_idx].page_num = INVALID_PAGE_NUM;
+        pager->frames[frame_idx].is_dirty = false;
+        pager->frames[frame_idx].pin_count = 0;
+        lru_remove(pager, frame_idx);
+        pager->page_table[page_num] = -1;
     }
     pager->is_dirty[page_num] = false;
     pager->free_pages[pager->free_page_count++] = page_num;
@@ -310,9 +468,13 @@ void pager_shrink(Pager* pager, uint32_t new_num_pages) {
     if (new_num_pages >= pager->num_pages) return;
 
     for (uint32_t i = new_num_pages; i < pager->num_pages; i++) {
-        if (pager->pages[i] != NULL) {
-            free(pager->pages[i]);
-            pager->pages[i] = NULL;
+        int frame_idx = pager->page_table[i];
+        if (frame_idx != -1) {
+            pager->frames[frame_idx].page_num = INVALID_PAGE_NUM;
+            pager->frames[frame_idx].is_dirty = false;
+            pager->frames[frame_idx].pin_count = 0;
+            lru_remove(pager, frame_idx);
+            pager->page_table[i] = -1;
         }
         pager->is_dirty[i] = false;
     }
@@ -338,6 +500,26 @@ void mark_page_dirty(Pager* pager, uint32_t page_num) {
         exit(EXIT_FAILURE);
     }
     pager->is_dirty[page_num] = true;
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) {
+        pager->frames[frame_idx].is_dirty = true;
+    }
+}
+
+static void free_savepoint_snapshots(Savepoint* sp) {
+    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
+        if (sp->page_snapshots[i] != NULL) {
+            free(sp->page_snapshots[i]);
+            sp->page_snapshots[i] = NULL;
+        }
+    }
+}
+
+static void clear_all_savepoints(Pager* pager) {
+    for (uint32_t i = 0; i < pager->savepoint_count; i++) {
+        free_savepoint_snapshots(&pager->savepoints[i]);
+    }
+    pager->savepoint_count = 0;
 }
 
 void pager_begin_transaction(Pager* pager) {
@@ -348,6 +530,7 @@ void pager_begin_transaction(Pager* pager) {
 
     /* Make every previous autocommit durable before a rollback point is taken. */
     pager_checkpoint(pager);
+    clear_all_savepoints(pager);
     pager->transaction_file_length = pager->file_length;
     pager->transaction_num_pages = pager->num_pages;
     pager->transaction_free_page_count = pager->free_page_count;
@@ -359,12 +542,13 @@ void pager_commit(Pager* pager) {
     uint32_t dirty_count = 0;
 
     for (uint32_t i = 0; i < pager->num_pages; i++) {
-        if (pager->is_dirty[i] && pager->pages[i] != NULL) {
+        if (pager->is_dirty[i]) {
             has_dirty = true;
             dirty_count++;
         }
     }
     if (!has_dirty) {
+        clear_all_savepoints(pager);
         pager->in_transaction = false;
         pager->transaction_file_length = 0;
         pager->transaction_num_pages = 0;
@@ -378,10 +562,12 @@ void pager_commit(Pager* pager) {
 
     write_bytes(wal_file, &dirty_count, sizeof(dirty_count));
     for (uint32_t i = 0; i < pager->num_pages; i++) {
-        if (pager->is_dirty[i] && pager->pages[i] != NULL) {
-            page_write_checksum(pager->pages[i]);
+        if (pager->is_dirty[i]) {
+            void* page_data = get_page(pager, i);
+            page_write_checksum(page_data);
             write_bytes(wal_file, &i, sizeof(i));
-            write_bytes(wal_file, pager->pages[i], PAGE_SIZE);
+            write_bytes(wal_file, page_data, PAGE_SIZE);
+            pager_unpin_page(pager, i);
         }
     }
     uint32_t commit_magic = WAL_COMMIT_MAGIC;
@@ -393,6 +579,7 @@ void pager_commit(Pager* pager) {
     for (uint32_t i = 0; i < pager->num_pages; i++) {
         pager->is_dirty[i] = false;
     }
+    clear_all_savepoints(pager);
     pager->in_transaction = false;
     pager->transaction_file_length = 0;
     pager->transaction_num_pages = 0;
@@ -403,6 +590,7 @@ void pager_rollback(Pager* pager) {
         return;
     }
 
+    clear_all_savepoints(pager);
     clear_page_cache(pager);
     pager->file_length = pager->transaction_file_length;
     pager->num_pages = pager->transaction_num_pages;
@@ -417,13 +605,96 @@ void pager_rollback(Pager* pager) {
 
 void pager_checkpoint(Pager* pager) {
     for (uint32_t i = 0; i < pager->num_pages; i++) {
-        if (pager->pages[i] != NULL) {
-            pager_flush(pager, i, PAGE_SIZE);
-        }
+        void* page_data = get_page(pager, i);
+        (void)page_data;
+        pager_flush(pager, i, PAGE_SIZE);
+        pager_unpin_page(pager, i);
     }
     sync_file(pager->file);
 
     if (remove(pager->wal_filename) != 0 && errno != ENOENT) {
         fail_io("Unable to remove checkpointed WAL");
     }
+}
+
+void pager_close(Pager* pager) {
+    if (pager == NULL) return;
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        if (pager->frames[i].data != NULL) {
+            free(pager->frames[i].data);
+            pager->frames[i].data = NULL;
+        }
+    }
+    fclose(pager->file);
+    free(pager);
+}
+
+bool pager_savepoint(Pager* pager, const char* name) {
+    if (pager->savepoint_count >= MAX_SAVEPOINTS) {
+        return false;
+    }
+    Savepoint* sp = &pager->savepoints[pager->savepoint_count++];
+    memset(sp, 0, sizeof(*sp));
+    strncpy(sp->name, name, sizeof(sp->name) - 1);
+    sp->num_pages = pager->num_pages;
+    sp->free_page_count = pager->free_page_count;
+    memcpy(sp->free_pages, pager->free_pages, sizeof(pager->free_pages));
+    memcpy(sp->is_dirty, pager->is_dirty, sizeof(pager->is_dirty));
+    
+    for (uint32_t i = 0; i < pager->num_pages; i++) {
+        void* page_data = get_page(pager, i);
+        sp->page_snapshots[i] = malloc(PAGE_SIZE);
+        memcpy(sp->page_snapshots[i], page_data, PAGE_SIZE);
+        pager_unpin_page(pager, i);
+    }
+    return true;
+}
+
+bool pager_rollback_to_savepoint(Pager* pager, const char* name) {
+    int target_idx = -1;
+    for (int i = (int)pager->savepoint_count - 1; i >= 0; i--) {
+        if (strcmp(pager->savepoints[i].name, name) == 0) {
+            target_idx = i;
+            break;
+        }
+    }
+    if (target_idx == -1) return false;
+
+    Savepoint* sp = &pager->savepoints[target_idx];
+
+    pager->num_pages = sp->num_pages;
+    pager->free_page_count = sp->free_page_count;
+    memcpy(pager->free_pages, sp->free_pages, sizeof(sp->free_pages));
+
+    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
+        pager->is_dirty[i] = sp->is_dirty[i];
+        if (sp->page_snapshots[i] != NULL) {
+            void* page_data = get_page(pager, i);
+            memcpy(page_data, sp->page_snapshots[i], PAGE_SIZE);
+            pager_unpin_page(pager, i);
+        }
+    }
+
+    for (uint32_t i = target_idx + 1; i < pager->savepoint_count; i++) {
+        free_savepoint_snapshots(&pager->savepoints[i]);
+    }
+    pager->savepoint_count = target_idx + 1;
+    return true;
+}
+
+bool pager_release_savepoint(Pager* pager, const char* name) {
+    int target_idx = -1;
+    for (int i = (int)pager->savepoint_count - 1; i >= 0; i--) {
+        if (strcmp(pager->savepoints[i].name, name) == 0) {
+            target_idx = i;
+            break;
+        }
+    }
+    if (target_idx == -1) return false;
+
+    for (uint32_t i = target_idx; i < pager->savepoint_count; i++) {
+        free_savepoint_snapshots(&pager->savepoints[i]);
+    }
+    pager->savepoint_count = target_idx;
+    return true;
 }
