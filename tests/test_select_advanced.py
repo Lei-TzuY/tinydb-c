@@ -61,28 +61,28 @@ def run_test():
     if '10\n' not in out:
         print(f'FAIL: COUNT(*) expected 10, got:\n{out}')
         sys.exit(1)
-    print('PASS: SELECT COUNT(*) FROM users → 10')
+    print('PASS: SELECT COUNT(*) FROM users -> 10')
 
     rc, out = run_commands(exe, db_file,
         "SELECT COUNT(*) FROM users WHERE id = 5;\n.exit\n")
     if '1\n' not in out:
         print(f'FAIL: COUNT(*) WHERE id=5 expected 1, got:\n{out}')
         sys.exit(1)
-    print('PASS: SELECT COUNT(*) WHERE id = 5 → 1')
+    print('PASS: SELECT COUNT(*) WHERE id = 5 -> 1')
 
     rc, out = run_commands(exe, db_file,
         "SELECT COUNT(*) FROM users WHERE id > 7;\n.exit\n")
     if '3\n' not in out:
         print(f'FAIL: COUNT(*) WHERE id>7 expected 3, got:\n{out}')
         sys.exit(1)
-    print('PASS: SELECT COUNT(*) WHERE id > 7 → 3')
+    print('PASS: SELECT COUNT(*) WHERE id > 7 -> 3')
 
     rc, out = run_commands(exe, db_file,
         "SELECT COUNT(*) FROM users WHERE id <= 4;\n.exit\n")
     if '4\n' not in out:
         print(f'FAIL: COUNT(*) WHERE id<=4 expected 4, got:\n{out}')
         sys.exit(1)
-    print('PASS: SELECT COUNT(*) WHERE id <= 4 → 4')
+    print('PASS: SELECT COUNT(*) WHERE id <= 4 -> 4')
 
     # ── LIMIT ─────────────────────────────────────────────────────
     rc, out = run_commands(exe, db_file,
@@ -91,7 +91,7 @@ def run_test():
     if found != {1, 2, 3}:
         print(f'FAIL: LIMIT 3 returned {sorted(found)}, expected [1,2,3]')
         sys.exit(1)
-    print('PASS: SELECT * LIMIT 3 → rows 1, 2, 3')
+    print('PASS: SELECT * LIMIT 3 -> rows 1, 2, 3')
 
     rc, out = run_commands(exe, db_file,
         "SELECT * FROM users LIMIT 0;\n.exit\n")
@@ -99,7 +99,7 @@ def run_test():
     if found:
         print(f'FAIL: LIMIT 0 should return no rows, got {sorted(found)}')
         sys.exit(1)
-    print('PASS: SELECT * LIMIT 0 → no rows')
+    print('PASS: SELECT * LIMIT 0 -> no rows')
 
     # ── Range scans ───────────────────────────────────────────────
     rc, out = run_commands(exe, db_file,
@@ -108,7 +108,7 @@ def run_test():
     if found != {8, 9, 10}:
         print(f'FAIL: WHERE id>7 returned {sorted(found)}, expected [8,9,10]')
         sys.exit(1)
-    print('PASS: SELECT * WHERE id > 7 → rows 8, 9, 10')
+    print('PASS: SELECT * WHERE id > 7 -> rows 8, 9, 10')
 
     rc, out = run_commands(exe, db_file,
         "SELECT * FROM users WHERE id >= 8;\n.exit\n")
@@ -116,7 +116,7 @@ def run_test():
     if found != {8, 9, 10}:
         print(f'FAIL: WHERE id>=8 returned {sorted(found)}, expected [8,9,10]')
         sys.exit(1)
-    print('PASS: SELECT * WHERE id >= 8 → rows 8, 9, 10')
+    print('PASS: SELECT * WHERE id >= 8 -> rows 8, 9, 10')
 
     rc, out = run_commands(exe, db_file,
         "SELECT * FROM users WHERE id < 4;\n.exit\n")
@@ -124,7 +124,7 @@ def run_test():
     if found != {1, 2, 3}:
         print(f'FAIL: WHERE id<4 returned {sorted(found)}, expected [1,2,3]')
         sys.exit(1)
-    print('PASS: SELECT * WHERE id < 4 → rows 1, 2, 3')
+    print('PASS: SELECT * WHERE id < 4 -> rows 1, 2, 3')
 
     rc, out = run_commands(exe, db_file,
         "SELECT * FROM users WHERE id <= 3;\n.exit\n")
@@ -132,7 +132,7 @@ def run_test():
     if found != {1, 2, 3}:
         print(f'FAIL: WHERE id<=3 returned {sorted(found)}, expected [1,2,3]')
         sys.exit(1)
-    print('PASS: SELECT * WHERE id <= 3 → rows 1, 2, 3')
+    print('PASS: SELECT * WHERE id <= 3 -> rows 1, 2, 3')
 
     # ── Range + LIMIT combined ────────────────────────────────────
     rc, out = run_commands(exe, db_file,
@@ -141,7 +141,7 @@ def run_test():
     if found != {5, 6, 7}:
         print(f'FAIL: WHERE id>=5 LIMIT 3 returned {sorted(found)}, expected [5,6,7]')
         sys.exit(1)
-    print('PASS: SELECT * WHERE id >= 5 LIMIT 3 → rows 5, 6, 7')
+    print('PASS: SELECT * WHERE id >= 5 LIMIT 3 -> rows 5, 6, 7')
 
     # ── EXPLAIN for range scan ────────────────────────────────────
     rc, out = run_commands(exe, db_file,
@@ -149,7 +149,7 @@ def run_test():
     if 'PLAN: PRIMARY KEY RANGE SCAN (id > 5)' not in out:
         print(f'FAIL: EXPLAIN range scan output wrong:\n{out}')
         sys.exit(1)
-    print('PASS: EXPLAIN SELECT WHERE id > 5 → PRIMARY KEY RANGE SCAN')
+    print('PASS: EXPLAIN SELECT WHERE id > 5 -> PRIMARY KEY RANGE SCAN')
 
     rc, out = run_commands(exe, db_file,
         "EXPLAIN SELECT COUNT(*) FROM users LIMIT 5;\n.exit\n")
