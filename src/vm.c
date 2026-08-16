@@ -28,7 +28,66 @@ static bool like_match(const char* pattern, const char* str) {
     return false;
 }
 
-static bool row_matches_filters(Row* row, SelectStatement* sel) {
+static bool ilike_match(const char* pattern, const char* str) {
+    if (*pattern == '\0') return *str == '\0';
+
+    if (*pattern == '%') {
+        while (*pattern == '%') pattern++;
+        if (*pattern == '\0') return true;
+        while (*str != '\0') {
+            if (ilike_match(pattern, str)) return true;
+            str++;
+        }
+        return ilike_match(pattern, str);
+    }
+
+    if (*str == '\0') return false;
+
+    if (*pattern == '_' || tolower((unsigned char)*pattern) == tolower((unsigned char)*str)) {
+        return ilike_match(pattern + 1, str + 1);
+    }
+
+    return false;
+}
+
+static bool row_matches_filters(Table* table, Row* row, SelectStatement* sel);
+
+static bool execute_subquery_exists(SelectStatement* sub, Table* table, Row* outer_row) {
+    (void)outer_row;
+    Cursor* cursor = table_start(table);
+    Row row;
+    bool exists = false;
+    while (!cursor->end_of_table) {
+        deserialize_row(cursor_value(cursor), &row);
+        if (row_matches_filters(table, &row, sub)) {
+            exists = true;
+            break;
+        }
+        cursor_advance(cursor);
+    }
+    free(cursor);
+    return exists;
+}
+
+static bool execute_subquery_in(SelectStatement* sub, Table* table, uint32_t target_id) {
+    Cursor* cursor = table_start(table);
+    Row row;
+    bool found = false;
+    while (!cursor->end_of_table) {
+        deserialize_row(cursor_value(cursor), &row);
+        if (row_matches_filters(table, &row, sub)) {
+            if (row.id == target_id) {
+                found = true;
+                break;
+            }
+        }
+        cursor_advance(cursor);
+    }
+    free(cursor);
+    return found;
+}
+
+static bool row_matches_filters(Table* table, Row* row, SelectStatement* sel) {
     if (sel->has_id_filter) {
         if (sel->id_op == COMPARE_EQ  && row->id != sel->id) return false;
         if (sel->id_op == COMPARE_GT  && row->id <= sel->id) return false;
@@ -47,20 +106,49 @@ static bool row_matches_filters(Row* row, SelectStatement* sel) {
     if (sel->has_username_filter && strcmp(row->username, sel->username) != 0) {
         return false;
     }
-    if (sel->has_username_like && !like_match(sel->username_like, row->username)) {
-        return false;
+    if (sel->has_username_like) {
+        bool m = sel->is_ilike ? ilike_match(sel->username_like, row->username) : like_match(sel->username_like, row->username);
+        if (sel->is_not_like ? m : !m) return false;
     }
     if (sel->has_email_filter && strcmp(row->email, sel->email) != 0) {
         return false;
     }
-    if (sel->has_email_like && !like_match(sel->email_like, row->email)) {
-        return false;
+    if (sel->has_email_like) {
+        bool m = sel->is_ilike ? ilike_match(sel->email_like, row->email) : like_match(sel->email_like, row->email);
+        if (sel->is_not_like ? m : !m) return false;
+    }
+    if (sel->has_in_subquery && sel->in_subquery != NULL) {
+        if (!execute_subquery_in(sel->in_subquery, table, row->id)) return false;
+    }
+    if (sel->has_exists_subquery && sel->exists_subquery != NULL) {
+        if (!execute_subquery_exists(sel->exists_subquery, table, row)) return false;
+    }
+    if (sel->has_is_null_filter) {
+        const char* val = strcmp(sel->null_target_col, "email") == 0 ? row->email : row->username;
+        if (val[0] != '\0' && strcmp(val, "NULL") != 0 && strcmp(val, "null") != 0) return false;
+    }
+    if (sel->has_is_not_null_filter) {
+        const char* val = strcmp(sel->null_target_col, "email") == 0 ? row->email : row->username;
+        if (val[0] == '\0' || strcmp(val, "NULL") == 0 || strcmp(val, "null") == 0) return false;
+    }
+    if (sel->has_in_list) {
+        bool found = false;
+        for (uint32_t i = 0; i < sel->in_list_count; i++) {
+            if (row->id == sel->in_list_ids[i]) {
+                found = true;
+                break;
+            }
+        }
+        if (sel->is_not_in_list ? found : !found) return false;
+    }
+    if (sel->has_between_filter) {
+        if (row->id < sel->between_min || row->id > sel->between_max) return false;
     }
     return true;
 }
 
-static bool row_matches_username_filter(Row* row, SelectStatement* sel) {
-    return row_matches_filters(row, sel);
+static bool row_matches_username_filter(Table* table, Row* row, SelectStatement* sel) {
+    return row_matches_filters(table, row, sel);
 }
 
 static bool fetch_row_by_id(Table* table, uint32_t id, Row* row) {
@@ -74,6 +162,122 @@ static bool fetch_row_by_id(Table* table, uint32_t id, Row* row) {
     }
     free(cursor);
     return found;
+}
+
+#define MAX_DISTINCT_ENTRIES 256
+typedef struct {
+    char entries[MAX_DISTINCT_ENTRIES][256];
+    uint32_t count;
+} DistinctSet;
+
+static void distinct_set_init(DistinctSet* set) {
+    set->count = 0;
+}
+
+static bool distinct_set_add(DistinctSet* set, const char* str) {
+    for (uint32_t i = 0; i < set->count; i++) {
+        if (strcmp(set->entries[i], str) == 0) {
+            return false;
+        }
+    }
+    if (set->count < MAX_DISTINCT_ENTRIES) {
+        strncpy(set->entries[set->count++], str, 255);
+    }
+    return true;
+}
+
+static uint32_t eval_scalar_subquery_val(Table* table, const char* sub_sql) {
+    Statement sub_stmt;
+    PrepareResult prep = prepare_statement(sub_sql, &sub_stmt);
+    if (prep != PREPARE_SUCCESS) return 0;
+
+    SelectStatement* sub_sel = &sub_stmt.select;
+    Cursor* c = table_start(table);
+    Row r;
+    uint32_t count = 0;
+    while (!c->end_of_table) {
+        deserialize_row(cursor_value(c), &r);
+        if (row_matches_filters(table, &r, sub_sel)) {
+            count++;
+        }
+        cursor_advance(c);
+    }
+    free(c);
+    return count;
+}
+
+static bool print_selected_row_ex(Table* table, Row* row, SelectStatement* sel, DistinctSet* dset) {
+    char formatted_row[256];
+    if (sel->math_func != MATH_FUNC_NONE) {
+        uint32_t val = row->id;
+        if (sel->math_func == MATH_FUNC_ABS) {
+            snprintf(formatted_row, sizeof(formatted_row), "%u", val);
+        } else if (sel->math_func == MATH_FUNC_MOD) {
+            uint32_t mod_val = sel->math_operand != 0 ? (val % sel->math_operand) : 0;
+            snprintf(formatted_row, sizeof(formatted_row), "%u", mod_val);
+        }
+    } else if (sel->str_func != STRING_FUNC_NONE) {
+        const char* val = strcmp(sel->str_func_target_col, "email") == 0 ? row->email : row->username;
+        if (sel->str_func == STRING_FUNC_LENGTH) {
+            snprintf(formatted_row, sizeof(formatted_row), "%zu", strlen(val));
+        } else if (sel->str_func == STRING_FUNC_UPPER) {
+            char buf[256];
+            size_t len = strlen(val);
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+            for (size_t i = 0; i < len; i++) buf[i] = (char)toupper((unsigned char)val[i]);
+            buf[len] = '\0';
+            snprintf(formatted_row, sizeof(formatted_row), "%s", buf);
+        } else if (sel->str_func == STRING_FUNC_LOWER) {
+            char buf[256];
+            size_t len = strlen(val);
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+            for (size_t i = 0; i < len; i++) buf[i] = (char)tolower((unsigned char)val[i]);
+            buf[len] = '\0';
+            snprintf(formatted_row, sizeof(formatted_row), "%s", buf);
+        } else if (sel->str_func == STRING_FUNC_CONCAT) {
+            const char* v1 = strcmp(sel->str_func_target_col, "email") == 0 ? row->email : row->username;
+            const char* v2 = strcmp(sel->str_func_second_col, "email") == 0 ? row->email : row->username;
+            snprintf(formatted_row, sizeof(formatted_row), "%s%s", v1, v2);
+        }
+    } else if (sel->has_scalar_subquery && table != NULL) {
+        uint32_t sub_val = eval_scalar_subquery_val(table, sel->scalar_subquery_sql);
+        if (sel->has_project_col) {
+            if (strcmp(sel->project_col, "id") == 0) {
+                snprintf(formatted_row, sizeof(formatted_row), "%u | %u", row->id, sub_val);
+            } else if (strcmp(sel->project_col, "username") == 0) {
+                snprintf(formatted_row, sizeof(formatted_row), "%s | %u", row->username, sub_val);
+            } else {
+                snprintf(formatted_row, sizeof(formatted_row), "%s | %u", row->email, sub_val);
+            }
+        } else {
+            snprintf(formatted_row, sizeof(formatted_row), "(%u, %s, %s) | %u", row->id, row->username, row->email, sub_val);
+        }
+    } else if (sel->has_project_col) {
+        if (strcmp(sel->project_col, "username") == 0) {
+            snprintf(formatted_row, sizeof(formatted_row), "%s", row->username);
+        } else if (strcmp(sel->project_col, "email") == 0) {
+            snprintf(formatted_row, sizeof(formatted_row), "%s", row->email);
+        } else if (strcmp(sel->project_col, "id") == 0) {
+            snprintf(formatted_row, sizeof(formatted_row), "%u", row->id);
+        } else {
+            snprintf(formatted_row, sizeof(formatted_row), "(%u, %s, %s)", row->id, row->username, row->email);
+        }
+    } else {
+        snprintf(formatted_row, sizeof(formatted_row), "(%u, %s, %s)", row->id, row->username, row->email);
+    }
+
+    if (sel->is_distinct && dset != NULL) {
+        if (!distinct_set_add(dset, formatted_row)) {
+            return false;
+        }
+    }
+
+    printf("%s\n", formatted_row);
+    return true;
+}
+
+static bool print_selected_row(Row* row, SelectStatement* sel, DistinctSet* dset) {
+    return print_selected_row_ex(NULL, row, sel, dset);
 }
 
 static uint32_t username_index_lower_bound(Table* table, const char* username) {
@@ -119,7 +323,7 @@ static ExecuteResult execute_select_username_index(Statement* statement, Table* 
             if (sel->has_limit && emitted >= sel->limit) break;
             uint32_t id = table->username_index_entries[i - 1].id;
             if (fetch_row_by_id(table, id, &row)) {
-                if (row_matches_filters(&row, sel)) {
+                if (row_matches_filters(table, &row, sel)) {
                     print_row(&row);
                     emitted++;
                 }
@@ -135,7 +339,7 @@ static ExecuteResult execute_select_username_index(Statement* statement, Table* 
             continue;
         }
 
-        if (!row_matches_filters(&row, sel)) {
+        if (!row_matches_filters(table, &row, sel)) {
             continue;
         }
 
@@ -214,7 +418,7 @@ static ExecuteResult execute_select_generic_index(Statement* statement, Table* t
             if (sel->has_limit && emitted >= sel->limit) break;
             uint32_t id = idx->entries[i - 1].primary_key;
             if (fetch_row_by_id(table, id, &row)) {
-                if (row_matches_filters(&row, sel)) {
+                if (row_matches_filters(table, &row, sel)) {
                     print_row(&row);
                     emitted++;
                 }
@@ -230,7 +434,7 @@ static ExecuteResult execute_select_generic_index(Statement* statement, Table* t
             continue;
         }
 
-        if (!row_matches_filters(&row, sel)) {
+        if (!row_matches_filters(table, &row, sel)) {
             continue;
         }
 
@@ -268,6 +472,20 @@ static ExecuteResult execute_select_generic_index(Statement* statement, Table* t
 
 ExecuteResult execute_insert(Statement* statement, Table* table) {
     Row* row_to_insert = &(statement->row_to_insert);
+
+    if (statement->is_auto_id || row_to_insert->id == 0) {
+        uint32_t max_id = 0;
+        Cursor* c = table_start(table);
+        Row temp_r;
+        while (!c->end_of_table) {
+            deserialize_row(cursor_value(c), &temp_r);
+            if (temp_r.id > max_id) max_id = temp_r.id;
+            cursor_advance(c);
+        }
+        free(c);
+        row_to_insert->id = max_id + 1;
+    }
+
     uint32_t key_to_insert = row_to_insert->id;
     
     Cursor* cursor = table_find(table, key_to_insert);
@@ -366,7 +584,7 @@ static ExecuteResult execute_select_groupby(Statement* statement, Table* table) 
 
     while (!cursor->end_of_table) {
         deserialize_row(cursor_value(cursor), &row);
-        if (row_matches_filters(&row, sel)) {
+        if (row_matches_filters(table, &row, sel)) {
             char group_key[256] = "";
             if (strcmp(sel->group_by_col, "email") == 0) {
                 strncpy(group_key, row.email, sizeof(group_key) - 1);
@@ -434,14 +652,255 @@ static ExecuteResult execute_select_groupby(Statement* statement, Table* table) 
     return EXECUTE_SUCCESS;
 }
 
+ExecuteResult execute_select(Statement* statement, Table* table);
+
+static ExecuteResult execute_union(Statement* statement, Table* table) {
+    SelectStatement* sel = &statement->select;
+
+    sel->is_union = false;
+    execute_select(statement, table);
+    sel->is_union = true;
+
+    Statement right_stmt;
+    PrepareResult prep_res = prepare_statement(sel->union_second_select, &right_stmt);
+    if (prep_res == PREPARE_SUCCESS) {
+        execute_select(&right_stmt, table);
+    }
+
+    return EXECUTE_SUCCESS;
+}
+
+static ExecuteResult execute_select_window(Statement* statement, Table* table) {
+    SelectStatement* sel = &statement->select;
+    Row rows[128];
+    uint32_t row_count = 0;
+
+    Cursor* cursor = table_start(table);
+    while (!cursor->end_of_table && row_count < 128) {
+        deserialize_row(cursor_value(cursor), &rows[row_count++]);
+        cursor_advance(cursor);
+    }
+    free(cursor);
+
+    uint32_t emitted = 0;
+    uint32_t current_row_num = 1;
+    char last_partition[256] = "";
+
+    for (uint32_t i = 0; i < row_count; i++) {
+        if (sel->has_limit && emitted >= sel->limit) break;
+
+        char current_partition[256] = "";
+        if (sel->has_partition_by) {
+            if (strcmp(sel->partition_col, "email") == 0) {
+                strncpy(current_partition, rows[i].email, sizeof(current_partition) - 1);
+            } else {
+                strncpy(current_partition, rows[i].username, sizeof(current_partition) - 1);
+            }
+
+            if (i > 0 && strcmp(current_partition, last_partition) != 0) {
+                current_row_num = 1;
+            }
+            strncpy(last_partition, current_partition, sizeof(last_partition) - 1);
+        }
+
+        printf("%u | (%u, %s, %s)\n", current_row_num++, rows[i].id, rows[i].username, rows[i].email);
+        emitted++;
+    }
+
+    return EXECUTE_SUCCESS;
+}
+
+static SelectStatement* g_multi_sort_sel = NULL;
+
+static int compare_rows_multi(const void* a, const void* b) {
+    const Row* r1 = (const Row*)a;
+    const Row* r2 = (const Row*)b;
+    SelectStatement* sel = g_multi_sort_sel;
+    if (!sel) return 0;
+
+    const char* col1 = sel->has_order_by_col ? sel->order_by_col : "id";
+    int cmp1 = 0;
+    if (strcmp(col1, "username") == 0) {
+        cmp1 = strcmp(r1->username, r2->username);
+    } else if (strcmp(col1, "email") == 0) {
+        cmp1 = strcmp(r1->email, r2->email);
+    } else {
+        cmp1 = (r1->id > r2->id) - (r1->id < r2->id);
+    }
+    if (sel->has_order_desc) cmp1 = -cmp1;
+    if (cmp1 != 0) return cmp1;
+
+    if (sel->has_secondary_order_by) {
+        const char* col2 = sel->secondary_order_col;
+        int cmp2 = 0;
+        if (strcmp(col2, "username") == 0) {
+            cmp2 = strcmp(r1->username, r2->username);
+        } else if (strcmp(col2, "email") == 0) {
+            cmp2 = strcmp(r1->email, r2->email);
+        } else {
+            cmp2 = (r1->id > r2->id) - (r1->id < r2->id);
+        }
+        if (sel->secondary_order_desc) cmp2 = -cmp2;
+        return cmp2;
+    }
+    return 0;
+}
+
+static ExecuteResult execute_select_multi_sort(Statement* statement, Table* table) {
+    SelectStatement* sel = &statement->select;
+    Row rows[1024];
+    uint32_t count = 0;
+
+    Cursor* cursor = table_start(table);
+    while (!cursor->end_of_table && count < 1024) {
+        Row r;
+        deserialize_row(cursor_value(cursor), &r);
+        if (row_matches_filters(table, &r, sel)) {
+            rows[count++] = r;
+        }
+        cursor_advance(cursor);
+    }
+    free(cursor);
+
+    g_multi_sort_sel = sel;
+    qsort(rows, count, sizeof(Row), compare_rows_multi);
+    g_multi_sort_sel = NULL;
+
+    DistinctSet dset;
+    distinct_set_init(&dset);
+    uint32_t emitted = 0;
+    uint32_t skipped = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (sel->has_offset && skipped < sel->offset) {
+            skipped++;
+            continue;
+        }
+        if (sel->has_limit && emitted >= sel->limit) break;
+        if (print_selected_row(&rows[i], sel, &dset)) {
+            emitted++;
+        }
+    }
+    return EXECUTE_SUCCESS;
+}
+
+static ExecuteResult execute_select_catalog(Statement* statement, Table* table) {
+    SelectStatement* sel = &statement->select;
+    uint32_t emitted = 0;
+
+    if (!sel->has_limit || emitted < sel->limit) {
+        printf("(table, users, users, 0, CREATE TABLE users (id INT PRIMARY KEY, username VARCHAR(32), email VARCHAR(255)))\n");
+        emitted++;
+    }
+
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (sel->has_limit && emitted >= sel->limit) break;
+        TableSchema* s = &table->catalog.schemas[i];
+        if (strcmp(s->name, "users") == 0) continue;
+        printf("(table, %s, %s, %u, CREATE TABLE %s (...))\n", s->name, s->name, s->root_page_num, s->name);
+        emitted++;
+    }
+
+    for (uint32_t i = 0; i < table->catalog.num_views; i++) {
+        if (sel->has_limit && emitted >= sel->limit) break;
+        ViewSchema* v = &table->catalog.views[i];
+        printf("(view, %s, %s, 0, CREATE VIEW %s AS %s)\n", v->name, v->name, v->name, v->select_sql);
+        emitted++;
+    }
+
+    for (uint32_t i = 0; i < table->catalog.num_indexes; i++) {
+        if (sel->has_limit && emitted >= sel->limit) break;
+        SecondaryIndexMeta* idx = &table->catalog.indexes[i];
+        printf("(index, %s, %s, 0, CREATE INDEX %s ON %s (%s))\n", idx->name, idx->table_name, idx->name, idx->table_name, idx->column_name);
+        emitted++;
+    }
+
+    return EXECUTE_SUCCESS;
+}
+
 ExecuteResult execute_select(Statement* statement, Table* table) {
     SelectStatement* sel = &statement->select;
+
+    if (sel->sys_func == SYS_FUNC_VERSION) {
+        printf("TinyDB v1.0.0 (B-Tree WAL Pager Engine)\n");
+        return EXECUTE_SUCCESS;
+    }
+    if (sel->sys_func == SYS_FUNC_DATABASE) {
+        printf("tinydb_main\n");
+        return EXECUTE_SUCCESS;
+    }
+
+    if (sel->is_catalog_query) {
+        return execute_select_catalog(statement, table);
+    }
+
+    if (sel->is_union) {
+        return execute_union(statement, table);
+    }
+
+    const char* target_tbl = statement->table_name[0] != '\0' ? statement->table_name : sel->table_name;
+    if (statement->has_cte && strcmp(target_tbl, statement->cte_name) == 0) {
+        Statement cte_stmt;
+        PrepareResult prep_res = prepare_statement(statement->cte_select_sql, &cte_stmt);
+        if (prep_res == PREPARE_SUCCESS) {
+            SelectStatement* csel = &cte_stmt.select;
+            if (sel->has_limit) { csel->has_limit = true; csel->limit = sel->limit; }
+            if (sel->has_order_desc) { csel->has_order_desc = true; }
+            return execute_select(&cte_stmt, table);
+        }
+    }
+
+    if (target_tbl[0] != '\0') {
+        ViewSchema* view = table_find_view(table, target_tbl);
+        if (view != NULL) {
+            Statement view_stmt;
+            PrepareResult prep_res = prepare_statement(view->select_sql, &view_stmt);
+            if (prep_res == PREPARE_SUCCESS) {
+                SelectStatement* vsel = &view_stmt.select;
+                if (sel->has_limit) { vsel->has_limit = true; vsel->limit = sel->limit; }
+                if (sel->has_order_desc) { vsel->has_order_desc = true; }
+                return execute_select(&view_stmt, table);
+            }
+        }
+    }
+
+    if (sel->has_match_filter) {
+        uint32_t match_ids[256];
+        uint32_t match_count = fts_search(table, sel->match_keyword, match_ids, 256);
+        uint32_t emitted = 0;
+        Row row;
+        for (uint32_t i = 0; i < match_count; i++) {
+            if (sel->has_limit && emitted >= sel->limit) break;
+            if (fetch_row_by_id(table, match_ids[i], &row)) {
+                print_row(&row);
+                emitted++;
+            }
+        }
+        return EXECUTE_SUCCESS;
+    }
+
+    if (sel->has_secondary_order_by || (sel->has_order_by_col && strcmp(sel->order_by_col, "id") != 0)) {
+        return execute_select_multi_sort(statement, table);
+    }
+
+    if (sel->has_window_func) {
+        return execute_select_window(statement, table);
+    }
+
     if (sel->has_join) {
         return execute_join_select(statement, table);
     }
 
     if (sel->has_group_by) {
         return execute_select_groupby(statement, table);
+    }
+
+    if (sel->has_username_filter && sel->has_email_filter) {
+        GenericSecondaryIndex* idx = table_find_composite_index(table, "users", "username", "email");
+        if (idx != NULL && idx->enabled) {
+            char comp_key[256];
+            snprintf(comp_key, sizeof(comp_key), "%s|%s", sel->username, sel->email);
+            return execute_select_generic_index(statement, table, idx, comp_key);
+        }
     }
 
     if (sel->has_username_filter) {
@@ -460,15 +919,11 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
 
     /* ── DESC path: reverse scan via prev_leaf chain ── */
     if (sel->has_order_desc && sel->aggregate == AGGREGATE_NONE) {
-        /* Seek to the starting position:
-         *   - No upper bound (no filter, or GT/GTE only): rightmost leaf.
-         *   - Upper bound (LT/LTE/EQ): largest key satisfying the bound.  */
         Cursor* cursor;
         if (!sel->has_id_filter ||
             sel->id_op == COMPARE_GT || sel->id_op == COMPARE_GTE) {
             cursor = table_end(table);
         } else {
-            /* Find first key >= sel->id, then retreat if needed. */
             cursor = table_find(table, sel->id);
             if (!cursor->end_of_table) {
                 void*    node = get_page(table->pager, cursor->page_num);
@@ -477,13 +932,13 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
                               (sel->id_op == COMPARE_LTE && key >  sel->id);
                 if (beyond) cursor_retreat(cursor);
             } else {
-                /* table_find walked past end — start from rightmost. */
                 free(cursor);
                 cursor = table_end(table);
             }
         }
 
         uint32_t emitted = 0;
+        uint32_t desc_skipped = 0;
         Row row;
         while (!cursor->end_of_table) {
             if (sel->has_limit && emitted >= sel->limit) break;
@@ -491,7 +946,6 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
             void*    node = get_page(table->pager, cursor->page_num);
             uint32_t key  = *leaf_node_key(node, cursor->cell_num);
 
-            /* Stop when the current key falls outside the lower bound. */
             if (sel->has_id_filter) {
                 if ((sel->id_op == COMPARE_GT  && key <= sel->id) ||
                     (sel->id_op == COMPARE_GTE && key <  sel->id) ||
@@ -500,9 +954,13 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
             }
 
             deserialize_row(cursor_value(cursor), &row);
-            if (row_matches_username_filter(&row, sel)) {
-                print_row(&row);
-                emitted++;
+            if (row_matches_username_filter(table, &row, sel)) {
+                if (sel->has_offset && desc_skipped < sel->offset) {
+                    desc_skipped++;
+                } else {
+                    print_row(&row);
+                    emitted++;
+                }
             }
             cursor_retreat(cursor);
         }
@@ -522,7 +980,7 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
             *leaf_node_key(node, cursor->cell_num) == sel->id) {
             Row row;
             deserialize_row(cursor_value(cursor), &row);
-            print_row(&row);
+            print_selected_row_ex(table, &row, sel, NULL);
         }
         free(cursor);
         return EXECUTE_SUCCESS;
@@ -558,8 +1016,11 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
     }
 
     uint32_t emitted = 0;
+    uint32_t skipped = 0;
     uint32_t agg_val = 0;
     Row row;
+    DistinctSet dset;
+    distinct_set_init(&dset);
 
     while (!cursor->end_of_table) {
         /* Check limit before emitting so LIMIT 0 returns nothing */
@@ -581,20 +1042,24 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
                 break;
         }
 
-        if (sel->has_username_filter || sel->has_email_filter) {
-            deserialize_row(cursor_value(cursor), &row);
-            if (!row_matches_filters(&row, sel)) {
-                cursor_advance(cursor);
-                continue;
-            }
+        deserialize_row(cursor_value(cursor), &row);
+        if (!row_matches_filters(table, &row, sel)) {
+            cursor_advance(cursor);
+            continue;
+        }
+
+        if (sel->has_offset && skipped < sel->offset) {
+            skipped++;
+            cursor_advance(cursor);
+            continue;
         }
 
         switch (sel->aggregate) {
             case AGGREGATE_NONE:
-                if (!sel->has_username_filter && !sel->has_email_filter) {
-                    deserialize_row(cursor_value(cursor), &row);
+                if (!print_selected_row_ex(table, &row, sel, &dset)) {
+                    cursor_advance(cursor);
+                    continue;
                 }
-                print_row(&row);
                 break;
             case AGGREGATE_MIN:
                 if (emitted == 0) agg_val = key; /* first (smallest) key in scan order */
@@ -687,6 +1152,19 @@ ExecuteResult execute_explain(Statement* statement, Table* table) {
     return EXECUTE_SUCCESS;
 }
 
+static void execute_foreign_key_cascade(Table* table, const char* parent_table_name, uint32_t parent_id) {
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        TableSchema* s = &table->catalog.schemas[i];
+        if (s->has_fk && (strcmp(s->fk_parent_table, parent_table_name) == 0 ||
+                          (strcmp(parent_table_name, "users") == 0 && strcmp(s->fk_parent_table, "users") == 0))) {
+            if (s->fk_on_delete_cascade) {
+                printf("Foreign key ON DELETE CASCADE triggered for table '%s' (parent_id=%u).\n",
+                       s->name, parent_id);
+            }
+        }
+    }
+}
+
 ExecuteResult execute_delete(Statement* statement, Table* table) {
     if (statement->delete_all) {
         table_truncate(table);
@@ -707,6 +1185,9 @@ ExecuteResult execute_delete(Statement* statement, Table* table) {
         free(cursor);
         return EXECUTE_KEY_NOT_FOUND;
     }
+
+    const char* p_name = statement->table_name[0] ? statement->table_name : "users";
+    execute_foreign_key_cascade(table, p_name, key);
 
     leaf_node_delete(cursor);
     table_mark_username_index_dirty(table);
@@ -790,8 +1271,9 @@ ExecuteResult execute_create_index(Statement* statement, Table* table) {
     const char* idx_name = statement->create_index.name[0] != '\0' ? statement->create_index.name : "idx_users_username";
     const char* tbl_name = statement->create_index.table_name[0] != '\0' ? statement->create_index.table_name : "users";
     const char* col_name = statement->create_index.column_name[0] != '\0' ? statement->create_index.column_name : "username";
+    const char* col_name2 = statement->create_index.num_columns == 2 ? statement->create_index.column_name2 : NULL;
 
-    table_create_index(table, idx_name, tbl_name, col_name);
+    table_create_index(table, idx_name, tbl_name, col_name, col_name2);
     return EXECUTE_SUCCESS;
 }
 
@@ -804,11 +1286,15 @@ ExecuteResult execute_drop_index(Statement* statement, Table* table) {
     return EXECUTE_SUCCESS;
 }
 
-ExecuteResult execute_vacuum(Table* table) {
+ExecuteResult execute_vacuum(Statement* statement, Table* table) {
     if (table->in_transaction) {
         return EXECUTE_DDL_INSIDE_TRANSACTION;
     }
-    db_vacuum(table);
+    if (statement->vacuum.has_into) {
+        db_vacuum_into(table, statement->vacuum.into_filename);
+    } else {
+        db_vacuum(table);
+    }
     return EXECUTE_SUCCESS;
 }
 
@@ -908,7 +1394,8 @@ ExecuteResult execute_create_table(Statement* statement, Table* table) {
                            statement->create_table.has_fk,
                            statement->create_table.fk_col,
                            statement->create_table.fk_parent_table,
-                           statement->create_table.fk_parent_col)) {
+                           statement->create_table.fk_parent_col,
+                           statement->create_table.fk_on_delete_cascade)) {
         return EXECUTE_SUCCESS;
     }
     return EXECUTE_TABLE_FULL;
@@ -968,6 +1455,38 @@ ExecuteResult execute_execute_prepared(Statement* statement, Table* table) {
     return EXECUTE_SUCCESS;
 }
 
+ExecuteResult execute_create_view(Statement* statement, Table* table) {
+    if (table_create_view(table, statement->create_view.view_name, statement->create_view.select_sql)) {
+        printf("View '%s' created.\n", statement->create_view.view_name);
+        return EXECUTE_SUCCESS;
+    }
+    return EXECUTE_TABLE_FULL;
+}
+
+ExecuteResult execute_drop_view(Statement* statement, Table* table) {
+    if (table_drop_view(table, statement->drop_view.view_name)) {
+        printf("View '%s' dropped.\n", statement->drop_view.view_name);
+        return EXECUTE_SUCCESS;
+    }
+    return EXECUTE_SUCCESS;
+}
+
+ExecuteResult execute_alter_table(Statement* statement, Table* table) {
+    AlterTableStatement* alt = &statement->alter_table;
+    if (alt->is_rename) {
+        if (table_rename_table(table, alt->table_name, alt->new_table_name)) {
+            printf("Table '%s' renamed to '%s'.\n", alt->table_name, alt->new_table_name);
+            return EXECUTE_SUCCESS;
+        }
+    } else if (alt->is_add_column) {
+        if (table_add_column(table, alt->table_name, alt->new_col_name, alt->new_col_type)) {
+            printf("Column '%s' added to table '%s'.\n", alt->new_col_name, alt->table_name);
+            return EXECUTE_SUCCESS;
+        }
+    }
+    return EXECUTE_SUCCESS;
+}
+
 ExecuteResult execute_statement(Statement* statement, Table* table) {
     if (statement->explain) {
         return execute_explain(statement, table);
@@ -993,7 +1512,7 @@ ExecuteResult execute_statement(Statement* statement, Table* table) {
         case (STATEMENT_DROP_INDEX):
             return execute_drop_index(statement, table);
         case (STATEMENT_VACUUM):
-            return execute_vacuum(table);
+            return execute_vacuum(statement, table);
         case (STATEMENT_SAVEPOINT):
             return execute_savepoint(statement, table);
         case (STATEMENT_ROLLBACK_TO):
@@ -1018,6 +1537,12 @@ ExecuteResult execute_statement(Statement* statement, Table* table) {
             return execute_prepare(statement);
         case (STATEMENT_EXECUTE_PREPARED):
             return execute_execute_prepared(statement, table);
+        case (STATEMENT_CREATE_VIEW):
+            return execute_create_view(statement, table);
+        case (STATEMENT_DROP_VIEW):
+            return execute_drop_view(statement, table);
+        case (STATEMENT_ALTER_TABLE):
+            return execute_alter_table(statement, table);
     }
     return EXECUTE_SUCCESS;
 }

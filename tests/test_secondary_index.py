@@ -55,7 +55,7 @@ def write_catalog_wal(db_file, include_commit):
             0,
             0,
         )
-        wal.write(header.ljust(820, b'\x00'))
+        wal.write(header.ljust(1108, b'\x00'))
         if include_commit:
             wal.write(struct.pack('<I', INDEX_CATALOG_WAL_COMMIT_MAGIC))
 

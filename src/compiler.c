@@ -58,6 +58,12 @@ static bool consume_statement_end(Parser* parser) {
     return *parser->current == '\0';
 }
 
+static bool check_query_end(Parser* parser) {
+    skip_spaces(parser);
+    if (*parser->current == ')') return true;
+    return consume_statement_end(parser);
+}
+
 static bool parse_identifier(Parser* parser) {
     skip_spaces(parser);
     if (!isalpha((unsigned char)*parser->current) && *parser->current != '_') {
@@ -184,8 +190,19 @@ static bool parse_sql_string(Parser* parser, char* destination, size_t capacity)
 }
 
 static bool parse_legacy_insert(Parser* parser, Statement* statement) {
-    return parse_uint32(parser, &statement->row_to_insert.id) &&
-           parse_token(parser, statement->row_to_insert.username,
+    Parser backup = *parser;
+    if (parse_uint32(parser, &statement->row_to_insert.id) &&
+        parse_token(parser, statement->row_to_insert.username,
+                    sizeof(statement->row_to_insert.username)) &&
+        parse_token(parser, statement->row_to_insert.email,
+                    sizeof(statement->row_to_insert.email)) &&
+        consume_statement_end(parser)) {
+        return true;
+    }
+
+    *parser = backup;
+    statement->is_auto_id = true;
+    return parse_token(parser, statement->row_to_insert.username,
                        sizeof(statement->row_to_insert.username)) &&
            parse_token(parser, statement->row_to_insert.email,
                        sizeof(statement->row_to_insert.email)) &&
@@ -271,6 +288,10 @@ static bool parse_update(Parser* parser, Statement* statement) {
 static bool parse_select(Parser* parser, Statement* statement) {
     statement->type = STATEMENT_SELECT;
 
+    if (consume_keyword(parser, "distinct")) {
+        statement->select.is_distinct = true;
+    }
+
     /* Bare "select" with nothing following */
     if (consume_statement_end(parser)) return true;
 
@@ -316,8 +337,123 @@ static bool parse_select(Parser* parser, Statement* statement) {
             !consume_character(parser, ')'))
             return false;
         statement->select.aggregate = AGGREGATE_AVG;
+    } else if (consume_keyword(parser, "row_number")) {
+        if (!consume_character(parser, '(') || !consume_character(parser, ')')) return false;
+        statement->select.has_window_func = true;
+        strncpy(statement->select.window_func_name, "row_number", sizeof(statement->select.window_func_name) - 1);
+        if (consume_keyword(parser, "over")) {
+            if (!consume_character(parser, '(')) return false;
+            if (consume_keyword(parser, "partition")) {
+                if (!consume_keyword(parser, "by")) return false;
+                if (!parse_identifier_into(parser, statement->select.partition_col, sizeof(statement->select.partition_col))) return false;
+                statement->select.has_partition_by = true;
+            }
+            if (consume_keyword(parser, "order")) {
+                if (!consume_keyword(parser, "by")) return false;
+                if (!parse_identifier_into(parser, statement->select.window_order_col, sizeof(statement->select.window_order_col))) return false;
+                statement->select.has_window_order_by = true;
+            }
+            if (!consume_character(parser, ')')) return false;
+        }
+    } else if (consume_keyword(parser, "length")) {
+        if (!consume_character(parser, '(') ||
+            !parse_identifier_into(parser, statement->select.str_func_target_col, sizeof(statement->select.str_func_target_col)) ||
+            !consume_character(parser, ')')) return false;
+        statement->select.str_func = STRING_FUNC_LENGTH;
+    } else if (consume_keyword(parser, "upper")) {
+        if (!consume_character(parser, '(') ||
+            !parse_identifier_into(parser, statement->select.str_func_target_col, sizeof(statement->select.str_func_target_col)) ||
+            !consume_character(parser, ')')) return false;
+        statement->select.str_func = STRING_FUNC_UPPER;
+    } else if (consume_keyword(parser, "lower")) {
+        if (!consume_character(parser, '(') ||
+            !parse_identifier_into(parser, statement->select.str_func_target_col, sizeof(statement->select.str_func_target_col)) ||
+            !consume_character(parser, ')')) return false;
+        statement->select.str_func = STRING_FUNC_LOWER;
+    } else if (consume_keyword(parser, "concat")) {
+        if (!consume_character(parser, '(') ||
+            !parse_identifier_into(parser, statement->select.str_func_target_col, sizeof(statement->select.str_func_target_col)) ||
+            !consume_character(parser, ',') ||
+            !parse_identifier_into(parser, statement->select.str_func_second_col, sizeof(statement->select.str_func_second_col)) ||
+            !consume_character(parser, ')')) return false;
+        statement->select.str_func = STRING_FUNC_CONCAT;
+    } else if (consume_keyword(parser, "version")) {
+        if (!consume_character(parser, '(') || !consume_character(parser, ')')) return false;
+        statement->select.sys_func = SYS_FUNC_VERSION;
+    } else if (consume_keyword(parser, "database")) {
+        if (!consume_character(parser, '(') || !consume_character(parser, ')')) return false;
+        statement->select.sys_func = SYS_FUNC_DATABASE;
+    } else if (consume_keyword(parser, "abs")) {
+        if (!consume_character(parser, '(') ||
+            !parse_identifier_into(parser, statement->select.math_target_col, sizeof(statement->select.math_target_col)) ||
+            !consume_character(parser, ')')) return false;
+        statement->select.math_func = MATH_FUNC_ABS;
+    } else if (consume_keyword(parser, "mod")) {
+        if (!consume_character(parser, '(') ||
+            !parse_identifier_into(parser, statement->select.math_target_col, sizeof(statement->select.math_target_col)) ||
+            !consume_character(parser, ',') ||
+            !parse_uint32(parser, &statement->select.math_operand) ||
+            !consume_character(parser, ')')) return false;
+        statement->select.math_func = MATH_FUNC_MOD;
     } else {
-        if (!consume_character(parser, '*')) return false;
+        if (!consume_character(parser, '*')) {
+            if (consume_character(parser, '(')) {
+                skip_spaces(parser);
+                const char* sub_start = parser->current;
+                int paren_count = 1;
+                while (*parser->current != '\0' && paren_count > 0) {
+                    if (*parser->current == '(') paren_count++;
+                    else if (*parser->current == ')') paren_count--;
+                    if (paren_count > 0) parser->current++;
+                }
+                size_t sub_len = parser->current - sub_start;
+                if (sub_len >= sizeof(statement->select.scalar_subquery_sql)) return false;
+                memcpy(statement->select.scalar_subquery_sql, sub_start, sub_len);
+                statement->select.scalar_subquery_sql[sub_len] = '\0';
+                statement->select.has_scalar_subquery = true;
+                if (!consume_character(parser, ')')) return false;
+            } else if (!parse_identifier_into(parser, statement->select.project_col, sizeof(statement->select.project_col))) {
+                return false;
+            } else {
+                statement->select.has_project_col = true;
+                if (consume_character(parser, ',')) {
+                    if (consume_character(parser, '(')) {
+                        skip_spaces(parser);
+                        const char* sub_start = parser->current;
+                        int paren_count = 1;
+                        while (*parser->current != '\0' && paren_count > 0) {
+                            if (*parser->current == '(') paren_count++;
+                            else if (*parser->current == ')') paren_count--;
+                            if (paren_count > 0) parser->current++;
+                        }
+                        size_t sub_len = parser->current - sub_start;
+                        if (sub_len >= sizeof(statement->select.scalar_subquery_sql)) return false;
+                        memcpy(statement->select.scalar_subquery_sql, sub_start, sub_len);
+                        statement->select.scalar_subquery_sql[sub_len] = '\0';
+                        statement->select.has_scalar_subquery = true;
+                        if (!consume_character(parser, ')')) return false;
+                    }
+                }
+            }
+        }
+    }
+
+    if (statement->select.sys_func != SYS_FUNC_NONE) {
+        if (consume_keyword(parser, "from")) {
+            skip_spaces(parser);
+            const char* tstart = parser->current;
+            while (isalnum((unsigned char)*parser->current) || *parser->current == '_') {
+                parser->current++;
+            }
+            size_t tlen = parser->current - tstart;
+            if (tlen > 0 && tlen < sizeof(statement->select.table_name)) {
+                memcpy(statement->select.table_name, tstart, tlen);
+                statement->select.table_name[tlen] = '\0';
+                memcpy(statement->table_name, tstart, tlen);
+                statement->table_name[tlen] = '\0';
+            }
+        }
+        return check_query_end(parser);
     }
 
     if (!consume_keyword(parser, "from")) return false;
@@ -330,6 +466,14 @@ static bool parse_select(Parser* parser, Statement* statement) {
     if (tlen == 0 || tlen >= sizeof(statement->select.table_name)) return false;
     memcpy(statement->select.table_name, tstart, tlen);
     statement->select.table_name[tlen] = '\0';
+    memcpy(statement->table_name, tstart, tlen);
+    statement->table_name[tlen] = '\0';
+
+    if (strcmp(statement->select.table_name, "sqlite_master") == 0 ||
+        strcmp(statement->select.table_name, "sqlite_schema") == 0 ||
+        strcmp(statement->select.table_name, "information_schema") == 0) {
+        statement->select.is_catalog_query = true;
+    }
 
     if (consume_keyword(parser, "join")) {
         skip_spaces(parser);
@@ -370,31 +514,121 @@ static bool parse_select(Parser* parser, Statement* statement) {
         }
     }
 
-    if (consume_statement_end(parser)) return true;
+    if (check_query_end(parser)) return true;
 
     /* Optional WHERE clause: id <op> N, username = 'val', or email = 'val' (supports AND chaining) */
     if (consume_keyword(parser, "where")) {
         while (true) {
-            if (consume_keyword(parser, "id")) {
-                CompareOp op;
-                uint32_t id_val;
-                if (!consume_compare_op(parser, &op)) return false;
-                if (!parse_uint32(parser, &id_val)) return false;
-                statement->select.has_id_filter = true;
-                statement->select.id = id_val;
-                statement->select.id_op = op;
+            if (consume_keyword(parser, "exists")) {
+                if (!consume_character(parser, '(')) return false;
+                if (!consume_keyword(parser, "select")) return false;
+                Statement sub_stmt;
+                memset(&sub_stmt, 0, sizeof(sub_stmt));
+                if (!parse_select(parser, &sub_stmt)) return false;
+                if (!consume_character(parser, ')')) return false;
 
-                if (op == COMPARE_GT || op == COMPARE_GTE) {
-                    statement->select.has_id_min_filter = true;
-                    statement->select.id_min = id_val;
-                    statement->select.id_min_op = op;
-                } else if (op == COMPARE_LT || op == COMPARE_LTE) {
-                    statement->select.has_id_max_filter = true;
-                    statement->select.id_max = id_val;
-                    statement->select.id_max_op = op;
+                SelectStatement* heap_sub = (SelectStatement*)calloc(1, sizeof(SelectStatement));
+                *heap_sub = sub_stmt.select;
+                statement->select.has_exists_subquery = true;
+                statement->select.exists_subquery = heap_sub;
+            } else if (consume_keyword(parser, "id")) {
+                if (consume_keyword(parser, "between")) {
+                    uint32_t min_val, max_val;
+                    if (!parse_uint32(parser, &min_val)) return false;
+                    if (!consume_keyword(parser, "and")) return false;
+                    if (!parse_uint32(parser, &max_val)) return false;
+                    statement->select.has_between_filter = true;
+                    statement->select.between_min = min_val;
+                    statement->select.between_max = max_val;
+                } else if (consume_keyword(parser, "not")) {
+                    if (!consume_keyword(parser, "in")) return false;
+                    if (!consume_character(parser, '(')) return false;
+                    uint32_t count = 0;
+                    while (count < 32) {
+                        uint32_t val;
+                        if (!parse_uint32(parser, &val)) return false;
+                        statement->select.in_list_ids[count++] = val;
+                        if (consume_character(parser, ',')) continue;
+                        break;
+                    }
+                    if (!consume_character(parser, ')')) return false;
+                    statement->select.has_in_list = true;
+                    statement->select.in_list_count = count;
+                    statement->select.is_not_in_list = true;
+                } else if (consume_keyword(parser, "in")) {
+                    if (!consume_character(parser, '(')) return false;
+                    if (consume_keyword(parser, "select")) {
+                        Statement sub_stmt;
+                        memset(&sub_stmt, 0, sizeof(sub_stmt));
+                        if (!parse_select(parser, &sub_stmt)) return false;
+                        if (!consume_character(parser, ')')) return false;
+
+                        SelectStatement* heap_sub = (SelectStatement*)calloc(1, sizeof(SelectStatement));
+                        *heap_sub = sub_stmt.select;
+                        statement->select.has_in_subquery = true;
+                        statement->select.in_subquery = heap_sub;
+                    } else {
+                        uint32_t count = 0;
+                        while (count < 32) {
+                            uint32_t val;
+                            if (!parse_uint32(parser, &val)) return false;
+                            statement->select.in_list_ids[count++] = val;
+                            if (consume_character(parser, ',')) continue;
+                            break;
+                        }
+                        if (!consume_character(parser, ')')) return false;
+                        statement->select.has_in_list = true;
+                        statement->select.in_list_count = count;
+                    }
+                } else {
+                    CompareOp op;
+                    uint32_t id_val;
+                    if (!consume_compare_op(parser, &op)) return false;
+                    if (!parse_uint32(parser, &id_val)) return false;
+                    statement->select.has_id_filter = true;
+                    statement->select.id = id_val;
+                    statement->select.id_op = op;
+
+                    if (op == COMPARE_GT || op == COMPARE_GTE) {
+                        statement->select.has_id_min_filter = true;
+                        statement->select.id_min = id_val;
+                        statement->select.id_min_op = op;
+                    } else if (op == COMPARE_LT || op == COMPARE_LTE) {
+                        statement->select.has_id_max_filter = true;
+                        statement->select.id_max = id_val;
+                        statement->select.id_max_op = op;
+                    }
                 }
+            } else if (consume_keyword(parser, "match")) {
+                if (!parse_sql_string(parser, statement->select.match_keyword,
+                                      sizeof(statement->select.match_keyword))) return false;
+                statement->select.has_match_filter = true;
             } else if (consume_keyword(parser, "username")) {
-                if (consume_keyword(parser, "like")) {
+                if (consume_keyword(parser, "is")) {
+                    strncpy(statement->select.null_target_col, "username", sizeof(statement->select.null_target_col) - 1);
+                    if (consume_keyword(parser, "not")) {
+                        if (!consume_keyword(parser, "null")) return false;
+                        statement->select.has_is_not_null_filter = true;
+                    } else {
+                        if (!consume_keyword(parser, "null")) return false;
+                        statement->select.has_is_null_filter = true;
+                    }
+                } else if (consume_keyword(parser, "match")) {
+                    if (!parse_sql_string(parser, statement->select.match_keyword,
+                                          sizeof(statement->select.match_keyword))) return false;
+                    statement->select.has_match_filter = true;
+                } else if (consume_keyword(parser, "not")) {
+                    if (!consume_keyword(parser, "like")) return false;
+                    if (!parse_sql_string(parser, statement->select.username_like,
+                                          sizeof(statement->select.username_like))) return false;
+                    statement->select.has_username_like = true;
+                    statement->select.is_not_like = true;
+                } else if (consume_keyword(parser, "ilike")) {
+                    if (!parse_sql_string(parser, statement->select.username_like,
+                                          sizeof(statement->select.username_like))) return false;
+                    statement->select.has_username_like = true;
+                    statement->select.is_ilike = true;
+                } else if (consume_keyword(parser, "like")) {
                     if (!parse_sql_string(parser, statement->select.username_like,
                                           sizeof(statement->select.username_like))) return false;
                     statement->select.has_username_like = true;
@@ -405,7 +639,31 @@ static bool parse_select(Parser* parser, Statement* statement) {
                     statement->select.has_username_filter = true;
                 }
             } else if (consume_keyword(parser, "email")) {
-                if (consume_keyword(parser, "like")) {
+                if (consume_keyword(parser, "is")) {
+                    strncpy(statement->select.null_target_col, "email", sizeof(statement->select.null_target_col) - 1);
+                    if (consume_keyword(parser, "not")) {
+                        if (!consume_keyword(parser, "null")) return false;
+                        statement->select.has_is_not_null_filter = true;
+                    } else {
+                        if (!consume_keyword(parser, "null")) return false;
+                        statement->select.has_is_null_filter = true;
+                    }
+                } else if (consume_keyword(parser, "match")) {
+                    if (!parse_sql_string(parser, statement->select.match_keyword,
+                                          sizeof(statement->select.match_keyword))) return false;
+                    statement->select.has_match_filter = true;
+                } else if (consume_keyword(parser, "not")) {
+                    if (!consume_keyword(parser, "like")) return false;
+                    if (!parse_sql_string(parser, statement->select.email_like,
+                                          sizeof(statement->select.email_like))) return false;
+                    statement->select.has_email_like = true;
+                    statement->select.is_not_like = true;
+                } else if (consume_keyword(parser, "ilike")) {
+                    if (!parse_sql_string(parser, statement->select.email_like,
+                                          sizeof(statement->select.email_like))) return false;
+                    statement->select.has_email_like = true;
+                    statement->select.is_ilike = true;
+                } else if (consume_keyword(parser, "like")) {
                     if (!parse_sql_string(parser, statement->select.email_like,
                                           sizeof(statement->select.email_like))) return false;
                     statement->select.has_email_like = true;
@@ -468,40 +726,116 @@ static bool parse_select(Parser* parser, Statement* statement) {
         statement->select.having_val = h_val;
     }
 
-    /* Optional ORDER BY id DESC */
+    /* Optional ORDER BY clause */
     if (consume_keyword(parser, "order")) {
-        if (!consume_keyword(parser, "by") ||
-            !consume_keyword(parser, "id") ||
-            !consume_keyword(parser, "desc"))
-            return false;
-        statement->select.has_order_desc = true;
+        if (!consume_keyword(parser, "by")) return false;
+        char ord_first_col[32] = "";
+        if (!parse_identifier_into(parser, ord_first_col, sizeof(ord_first_col))) return false;
+        statement->select.has_order_by_col = true;
+        strncpy(statement->select.order_by_col, ord_first_col, sizeof(statement->select.order_by_col) - 1);
+
+        if (consume_keyword(parser, "desc")) {
+            statement->select.has_order_desc = true;
+        } else {
+            consume_keyword(parser, "asc");
+        }
+
+        if (consume_character(parser, ',')) {
+            char sec_col[32] = "";
+            if (!parse_identifier_into(parser, sec_col, sizeof(sec_col))) return false;
+            statement->select.has_secondary_order_by = true;
+            strncpy(statement->select.secondary_order_col, sec_col, sizeof(statement->select.secondary_order_col) - 1);
+
+            if (consume_keyword(parser, "desc")) {
+                statement->select.secondary_order_desc = true;
+            } else {
+                consume_keyword(parser, "asc");
+            }
+        }
     }
 
-    /* Optional LIMIT N */
+    /* Optional LIMIT N OFFSET M */
     if (consume_keyword(parser, "limit")) {
         if (!parse_uint32(parser, &statement->select.limit)) return false;
         statement->select.has_limit = true;
+        if (consume_keyword(parser, "offset")) {
+            if (!parse_uint32(parser, &statement->select.offset)) return false;
+            statement->select.has_offset = true;
+        }
+    } else if (consume_keyword(parser, "offset")) {
+        if (!parse_uint32(parser, &statement->select.offset)) return false;
+        statement->select.has_offset = true;
     }
 
-    return consume_statement_end(parser);
+    if (consume_keyword(parser, "union")) {
+        statement->select.is_union = true;
+        if (consume_keyword(parser, "all")) {
+            statement->select.is_union_all = true;
+        }
+        if (!consume_keyword(parser, "select")) return false;
+        skip_spaces(parser);
+        snprintf(statement->select.union_second_select, sizeof(statement->select.union_second_select), "select %s", parser->current);
+        size_t len = strlen(statement->select.union_second_select);
+        while (len > 0 && (statement->select.union_second_select[len - 1] == ';' || statement->select.union_second_select[len - 1] == ' ' || statement->select.union_second_select[len - 1] == '\n')) {
+            statement->select.union_second_select[--len] = '\0';
+        }
+        return true;
+    }
+
+    return check_query_end(parser);
 }
 
 static bool parse_create_index(Parser* parser, Statement* statement) {
     statement->type = STATEMENT_CREATE_INDEX;
-    return consume_keyword(parser, "index") &&
-           parse_identifier_into(parser, statement->create_index.name, sizeof(statement->create_index.name)) &&
-           consume_keyword(parser, "on") &&
-           parse_identifier_into(parser, statement->create_index.table_name, sizeof(statement->create_index.table_name)) &&
-           consume_character(parser, '(') &&
-           parse_identifier_into(parser, statement->create_index.column_name, sizeof(statement->create_index.column_name)) &&
-           consume_character(parser, ')') &&
-           consume_statement_end(parser);
+    if (!consume_keyword(parser, "index") ||
+        !parse_identifier_into(parser, statement->create_index.name, sizeof(statement->create_index.name)) ||
+        !consume_keyword(parser, "on") ||
+        !parse_identifier_into(parser, statement->create_index.table_name, sizeof(statement->create_index.table_name)) ||
+        !consume_character(parser, '(') ||
+        !parse_identifier_into(parser, statement->create_index.column_name, sizeof(statement->create_index.column_name))) {
+        return false;
+    }
+
+    skip_spaces(parser);
+    if (consume_character(parser, ',')) {
+        if (!parse_identifier_into(parser, statement->create_index.column_name2, sizeof(statement->create_index.column_name2))) {
+            return false;
+        }
+        statement->create_index.num_columns = 2;
+    } else {
+        statement->create_index.num_columns = 1;
+    }
+
+    return consume_character(parser, ')') && consume_statement_end(parser);
 }
 
 static bool parse_drop_index(Parser* parser, Statement* statement) {
     statement->type = STATEMENT_DROP_INDEX;
     return consume_keyword(parser, "index") &&
            parse_identifier_into(parser, statement->drop_index.name, sizeof(statement->drop_index.name)) &&
+           consume_statement_end(parser);
+}
+
+static bool parse_create_view(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_CREATE_VIEW;
+    if (!consume_keyword(parser, "view")) return false;
+    if (!parse_identifier_into(parser, statement->create_view.view_name, sizeof(statement->create_view.view_name))) {
+        return false;
+    }
+    if (!consume_keyword(parser, "as")) return false;
+    skip_spaces(parser);
+    strncpy(statement->create_view.select_sql, parser->current, sizeof(statement->create_view.select_sql) - 1);
+    size_t len = strlen(statement->create_view.select_sql);
+    while (len > 0 && (statement->create_view.select_sql[len - 1] == ';' || statement->create_view.select_sql[len - 1] == ' ' || statement->create_view.select_sql[len - 1] == '\n')) {
+        statement->create_view.select_sql[--len] = '\0';
+    }
+    return len > 0;
+}
+
+static bool parse_drop_view(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_DROP_VIEW;
+    if (!consume_keyword(parser, "view")) return false;
+    return parse_identifier_into(parser, statement->drop_view.view_name, sizeof(statement->drop_view.view_name)) &&
            consume_statement_end(parser);
 }
 
@@ -630,6 +964,12 @@ static bool parse_create_table(Parser* parser, Statement* statement) {
                 }
                 consume_character(parser, ')');
             }
+
+            if (consume_keyword(parser, "on")) {
+                if (consume_keyword(parser, "delete") && consume_keyword(parser, "cascade")) {
+                    statement->create_table.fk_on_delete_cascade = true;
+                }
+            }
         }
 
         col_idx++;
@@ -687,11 +1027,71 @@ static bool parse_execute_prepared(Parser* parser, Statement* statement) {
     return true;
 }
 
+static bool parse_alter_table(Parser* parser, Statement* statement) {
+    statement->type = STATEMENT_ALTER_TABLE;
+    if (!consume_keyword(parser, "table")) return false;
+    if (!parse_identifier_into(parser, statement->alter_table.table_name, sizeof(statement->alter_table.table_name))) return false;
+
+    if (consume_keyword(parser, "rename")) {
+        if (!consume_keyword(parser, "to")) return false;
+        if (!parse_identifier_into(parser, statement->alter_table.new_table_name, sizeof(statement->alter_table.new_table_name))) return false;
+        statement->alter_table.is_rename = true;
+        return consume_statement_end(parser);
+    }
+
+    if (consume_keyword(parser, "add")) {
+        if (!consume_keyword(parser, "column")) return false;
+        if (!parse_identifier_into(parser, statement->alter_table.new_col_name, sizeof(statement->alter_table.new_col_name))) return false;
+        if (!parse_identifier_into(parser, statement->alter_table.new_col_type, sizeof(statement->alter_table.new_col_type))) return false;
+        statement->alter_table.is_add_column = true;
+        return consume_statement_end(parser);
+    }
+
+    return false;
+}
+
+static bool parse_with_cte(Parser* parser, Statement* statement) {
+    if (!parse_identifier_into(parser, statement->cte_name, sizeof(statement->cte_name))) {
+        return false;
+    }
+    if (!consume_keyword(parser, "as")) return false;
+    if (!consume_character(parser, '(')) return false;
+    if (!consume_keyword(parser, "select")) return false;
+
+    skip_spaces(parser);
+    const char* start = parser->current;
+    int paren_depth = 1;
+    while (*parser->current != '\0') {
+        if (*parser->current == '(') paren_depth++;
+        else if (*parser->current == ')') {
+            paren_depth--;
+            if (paren_depth == 0) break;
+        }
+        parser->current++;
+    }
+    if (paren_depth != 0) return false;
+
+    size_t len = parser->current - start;
+    if (len >= sizeof(statement->cte_select_sql)) return false;
+    snprintf(statement->cte_select_sql, sizeof(statement->cte_select_sql), "select %.*s", (int)len, start);
+    parser->current++; /* skip ')' */
+
+    statement->has_cte = true;
+    if (!consume_keyword(parser, "select")) return false;
+    return parse_select(parser, statement);
+}
+
 PrepareResult prepare_statement(const char* input, Statement* statement) {
     Parser parser;
 
     memset(statement, 0, sizeof(*statement));
     parser.current = input;
+
+    if (consume_keyword(&parser, "with")) {
+        return parse_with_cte(&parser, statement)
+            ? PREPARE_SUCCESS
+            : PREPARE_SYNTAX_ERROR;
+    }
 
     if (consume_keyword(&parser, "prepare")) {
         return parse_prepare(&parser, statement) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
@@ -711,6 +1111,9 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
     }
 
     if (consume_keyword(&parser, "create")) {
+        if (parse_create_view(&parser, statement)) {
+            return PREPARE_SUCCESS;
+        }
         if (parse_create_index(&parser, statement)) {
             return PREPARE_SUCCESS;
         }
@@ -779,13 +1182,25 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
     }
 
     if (consume_keyword(&parser, "drop")) {
-        return parse_drop_index(&parser, statement)
-            ? PREPARE_SUCCESS
-            : PREPARE_SYNTAX_ERROR;
+        if (parse_drop_view(&parser, statement)) {
+            return PREPARE_SUCCESS;
+        }
+        if (parse_drop_index(&parser, statement)) {
+            return PREPARE_SUCCESS;
+        }
+        return PREPARE_SYNTAX_ERROR;
     }
 
     if (consume_keyword(&parser, "vacuum")) {
         statement->type = STATEMENT_VACUUM;
+        if (consume_keyword(&parser, "into")) {
+            if (!parse_sql_string(&parser, statement->vacuum.into_filename, sizeof(statement->vacuum.into_filename))) {
+                if (!parse_token(&parser, statement->vacuum.into_filename, sizeof(statement->vacuum.into_filename))) {
+                    return PREPARE_SYNTAX_ERROR;
+                }
+            }
+            statement->vacuum.has_into = true;
+        }
         return consume_statement_end(&parser) ? PREPARE_SUCCESS : PREPARE_SYNTAX_ERROR;
     }
 
@@ -796,6 +1211,12 @@ PrepareResult prepare_statement(const char* input, Statement* statement) {
 
     if (consume_keyword(&parser, "pragma")) {
         return parse_pragma(&parser, statement)
+            ? PREPARE_SUCCESS
+            : PREPARE_SYNTAX_ERROR;
+    }
+
+    if (consume_keyword(&parser, "alter")) {
+        return parse_alter_table(&parser, statement)
             ? PREPARE_SUCCESS
             : PREPARE_SYNTAX_ERROR;
     }

@@ -322,6 +322,8 @@ Pager* pager_open(const char* filename) {
         pager->is_dirty[i] = false;
     }
 
+    db_rwlock_init(&pager->pager_lock);
+
     for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
         pager->frames[i].page_num = INVALID_PAGE_NUM;
         pager->frames[i].data = calloc(1, PAGE_SIZE);
@@ -329,6 +331,7 @@ Pager* pager_open(const char* filename) {
         pager->frames[i].pin_count = 0;
         pager->frames[i].lru_prev = -1;
         pager->frames[i].lru_next = -1;
+        db_rwlock_init(&pager->frames[i].rwlock);
     }
 
     return pager;
@@ -341,12 +344,16 @@ void* get_page(Pager* pager, uint32_t page_num) {
         exit(EXIT_FAILURE);
     }
 
+    db_rwlock_wrlock(&pager->pager_lock);
+
     int frame_idx = pager->page_table[page_num];
 
     if (frame_idx != -1) {
         pager->cache_hits++;
         lru_touch(pager, frame_idx);
-        return pager->frames[frame_idx].data;
+        void* data = pager->frames[frame_idx].data;
+        db_rwlock_wrunlock(&pager->pager_lock);
+        return data;
     }
 
     pager->cache_misses++;
@@ -387,6 +394,7 @@ void* get_page(Pager* pager, uint32_t page_num) {
 
     lru_touch(pager, frame_idx);
 
+    db_rwlock_wrunlock(&pager->pager_lock);
     return page_data;
 }
 
@@ -624,7 +632,9 @@ void pager_close(Pager* pager) {
             free(pager->frames[i].data);
             pager->frames[i].data = NULL;
         }
+        db_rwlock_destroy(&pager->frames[i].rwlock);
     }
+    db_rwlock_destroy(&pager->pager_lock);
     fclose(pager->file);
     free(pager);
 }
@@ -697,4 +707,44 @@ bool pager_release_savepoint(Pager* pager, const char* name) {
     }
     pager->savepoint_count = target_idx;
     return true;
+}
+
+void pager_acquire_read_lock(Pager* pager, uint32_t page_num) {
+    if (page_num >= TABLE_MAX_PAGES) return;
+    db_rwlock_rdlock(&pager->pager_lock);
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) {
+        db_rwlock_rdlock(&pager->frames[frame_idx].rwlock);
+    }
+    db_rwlock_rdunlock(&pager->pager_lock);
+}
+
+void pager_release_read_lock(Pager* pager, uint32_t page_num) {
+    if (page_num >= TABLE_MAX_PAGES) return;
+    db_rwlock_rdlock(&pager->pager_lock);
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) {
+        db_rwlock_rdunlock(&pager->frames[frame_idx].rwlock);
+    }
+    db_rwlock_rdunlock(&pager->pager_lock);
+}
+
+void pager_acquire_write_lock(Pager* pager, uint32_t page_num) {
+    if (page_num >= TABLE_MAX_PAGES) return;
+    db_rwlock_rdlock(&pager->pager_lock);
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) {
+        db_rwlock_wrlock(&pager->frames[frame_idx].rwlock);
+    }
+    db_rwlock_rdunlock(&pager->pager_lock);
+}
+
+void pager_release_write_lock(Pager* pager, uint32_t page_num) {
+    if (page_num >= TABLE_MAX_PAGES) return;
+    db_rwlock_rdlock(&pager->pager_lock);
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) {
+        db_rwlock_wrunlock(&pager->frames[frame_idx].rwlock);
+    }
+    db_rwlock_rdunlock(&pager->pager_lock);
 }

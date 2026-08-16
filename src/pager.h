@@ -22,6 +22,7 @@ typedef struct Frame {
     uint32_t pin_count;       /* Active reference count */
     int      lru_prev;        /* Index of previous frame in LRU list */
     int      lru_next;        /* Index of next frame in LRU list */
+    db_rwlock_t rwlock;       /* Per-frame Read-Write lock */
 } Frame;
 
 typedef struct {
@@ -51,6 +52,7 @@ typedef struct {
     int      page_table[TABLE_MAX_PAGES]; /* maps page_num -> frame_index (-1 if evicted) */
     int      lru_head;                    /* Most Recently Used (MRU) frame index */
     int      lru_tail;                    /* Least Recently Used (LRU) frame index */
+    db_rwlock_t pager_lock;               /* Global Pager lock protecting buffer pool metadata */
     
     /* Statistics */
     uint32_t cache_hits;
@@ -81,5 +83,11 @@ void pager_checkpoint(Pager* pager);
 bool pager_savepoint(Pager* pager, const char* name);
 bool pager_rollback_to_savepoint(Pager* pager, const char* name);
 bool pager_release_savepoint(Pager* pager, const char* name);
+
+/* Multi-threaded Page RW Lock API */
+void pager_acquire_read_lock(Pager* pager, uint32_t page_num);
+void pager_release_read_lock(Pager* pager, uint32_t page_num);
+void pager_acquire_write_lock(Pager* pager, uint32_t page_num);
+void pager_release_write_lock(Pager* pager, uint32_t page_num);
 
 #endif // PAGER_H

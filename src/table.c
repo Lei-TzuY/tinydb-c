@@ -332,7 +332,7 @@ TableSchema* table_get_schema(Table* table, const char* name) {
     return &table->catalog.schemas[0];
 }
 
-bool table_create_table(Table* table, const char* name, uint32_t num_cols, char col_names[][32], char col_types[][16], bool has_fk, const char* fk_col, const char* fk_parent_table, const char* fk_parent_col) {
+bool table_create_table(Table* table, const char* name, uint32_t num_cols, char col_names[][32], char col_types[][16], bool has_fk, const char* fk_col, const char* fk_parent_table, const char* fk_parent_col, bool fk_on_delete_cascade) {
     if (table->catalog.num_tables >= MAX_TABLES) {
         printf("Error: Catalog full (max %d tables).\n", MAX_TABLES);
         return false;
@@ -356,6 +356,7 @@ bool table_create_table(Table* table, const char* name, uint32_t num_cols, char 
     s->root_page_num = new_root_page;
     s->num_columns = num_cols;
     s->has_fk = has_fk;
+    s->fk_on_delete_cascade = fk_on_delete_cascade;
     if (has_fk) {
         if (fk_col) strncpy(s->fk_col, fk_col, MAX_NAME_SIZE - 1);
         if (fk_parent_table) strncpy(s->fk_parent_table, fk_parent_table, MAX_NAME_SIZE - 1);
@@ -384,6 +385,74 @@ void table_print_tables(Table* table) {
     for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
         printf("%s\n", table->catalog.schemas[i].name);
     }
+}
+
+bool table_rename_table(Table* table, const char* old_name, const char* new_name) {
+    /* Check that new name doesn't already exist */
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (strcmp(table->catalog.schemas[i].name, new_name) == 0) {
+            printf("Error: Table '%s' already exists.\n", new_name);
+            return false;
+        }
+    }
+    /* Find and rename */
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (strcmp(table->catalog.schemas[i].name, old_name) == 0) {
+            memset(table->catalog.schemas[i].name, 0, MAX_NAME_SIZE);
+            strncpy(table->catalog.schemas[i].name, new_name, MAX_NAME_SIZE - 1);
+            return true;
+        }
+    }
+    printf("Error: Table '%s' not found.\n", old_name);
+    return false;
+}
+
+bool table_add_column(Table* table, const char* table_name, const char* col_name, const char* col_type) {
+    /* Reject for built-in 'users' table (hardcoded Row layout) */
+    if (strcmp(table_name, "users") == 0) {
+        printf("Error: Cannot add columns to built-in 'users' table (fixed row layout).\n");
+        return false;
+    }
+
+    TableSchema* schema = NULL;
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (strcmp(table->catalog.schemas[i].name, table_name) == 0) {
+            schema = &table->catalog.schemas[i];
+            break;
+        }
+    }
+    if (schema == NULL) {
+        printf("Error: Table '%s' not found.\n", table_name);
+        return false;
+    }
+    if (schema->num_columns >= MAX_COLUMNS_PER_TABLE) {
+        printf("Error: Table '%s' already has maximum columns (%d).\n", table_name, MAX_COLUMNS_PER_TABLE);
+        return false;
+    }
+    /* Check for duplicate column name */
+    for (uint32_t i = 0; i < schema->num_columns; i++) {
+        if (strcmp(schema->columns[i].name, col_name) == 0) {
+            printf("Error: Column '%s' already exists in table '%s'.\n", col_name, table_name);
+            return false;
+        }
+    }
+
+    TableColumn* col = &schema->columns[schema->num_columns];
+    memset(col, 0, sizeof(*col));
+    strncpy(col->name, col_name, MAX_NAME_SIZE - 1);
+    col->offset = schema->row_size;
+
+    if (db_strcasecmp(col_type, "INT") == 0 || db_strcasecmp(col_type, "INTEGER") == 0) {
+        col->type = COL_TYPE_INT;
+        col->size = 4;
+    } else {
+        col->type = COL_TYPE_VARCHAR;
+        col->size = 256;
+    }
+
+    schema->row_size += col->size;
+    schema->num_columns++;
+    return true;
 }
 
 void db_close(Table* table) {
@@ -905,6 +974,8 @@ static void table_load_index_catalog(Table* table) {
             strncpy(idx->name, catalog.indexes[i].name, MAX_NAME_SIZE - 1);
             strncpy(idx->table_name, catalog.indexes[i].table_name, MAX_NAME_SIZE - 1);
             strncpy(idx->column_name, catalog.indexes[i].column_name, MAX_NAME_SIZE - 1);
+            strncpy(idx->column_name2, catalog.indexes[i].column_name2, MAX_NAME_SIZE - 1);
+            idx->num_columns = catalog.indexes[i].num_columns;
             idx->enabled = true;
             idx->dirty = true;
             build_index_filename(idx->index_filename, sizeof(idx->index_filename),
@@ -930,6 +1001,8 @@ static void table_save_index_catalog_state(Table* table, bool entries_valid) {
             strncpy(catalog.indexes[i].name, table->sec_indexes[i].name, MAX_NAME_SIZE - 1);
             strncpy(catalog.indexes[i].table_name, table->sec_indexes[i].table_name, MAX_NAME_SIZE - 1);
             strncpy(catalog.indexes[i].column_name, table->sec_indexes[i].column_name, MAX_NAME_SIZE - 1);
+            strncpy(catalog.indexes[i].column_name2, table->sec_indexes[i].column_name2, MAX_NAME_SIZE - 1);
+            catalog.indexes[i].num_columns = table->sec_indexes[i].num_columns;
             catalog.indexes[i].enabled = 1u;
         }
     }
@@ -1096,7 +1169,20 @@ GenericSecondaryIndex* table_find_index_by_column(Table* table, const char* tabl
     return NULL;
 }
 
-bool table_create_index(Table* table, const char* index_name, const char* table_name, const char* column_name) {
+GenericSecondaryIndex* table_find_composite_index(Table* table, const char* table_name, const char* col1, const char* col2) {
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        GenericSecondaryIndex* idx = &table->sec_indexes[i];
+        if (idx->enabled && idx->num_columns == 2 &&
+            (table_name == NULL || strcmp(idx->table_name, table_name) == 0) &&
+            strcmp(idx->column_name, col1) == 0 &&
+            strcmp(idx->column_name2, col2) == 0) {
+            return idx;
+        }
+    }
+    return NULL;
+}
+
+bool table_create_index(Table* table, const char* index_name, const char* table_name, const char* column_name, const char* column_name2) {
     if (table->num_sec_indexes >= MAX_INDEXES) {
         printf("Error: Maximum number of indexes (%d) reached.\n", MAX_INDEXES);
         return false;
@@ -1112,6 +1198,12 @@ bool table_create_index(Table* table, const char* index_name, const char* table_
     strncpy(idx->name, index_name, sizeof(idx->name) - 1);
     strncpy(idx->table_name, table_name, sizeof(idx->table_name) - 1);
     strncpy(idx->column_name, column_name, sizeof(idx->column_name) - 1);
+    if (column_name2 != NULL && column_name2[0] != '\0') {
+        strncpy(idx->column_name2, column_name2, sizeof(idx->column_name2) - 1);
+        idx->num_columns = 2;
+    } else {
+        idx->num_columns = 1;
+    }
     idx->enabled = true;
     idx->dirty = true;
 
@@ -1187,7 +1279,15 @@ void table_ensure_all_indexes(Table* table) {
             }
 
             GenericIndexEntry* entry = &idx->entries[idx->count++];
-            extract_column_value(&row, schema, idx->column_name, entry->key_val, sizeof(entry->key_val));
+            if (idx->num_columns == 2) {
+                char val1[256] = "";
+                char val2[256] = "";
+                extract_column_value(&row, schema, idx->column_name, val1, sizeof(val1));
+                extract_column_value(&row, schema, idx->column_name2, val2, sizeof(val2));
+                snprintf(entry->key_val, sizeof(entry->key_val), "%s|%s", val1, val2);
+            } else {
+                extract_column_value(&row, schema, idx->column_name, entry->key_val, sizeof(entry->key_val));
+            }
             entry->primary_key = row.id;
 
             cursor_advance(cursor);
@@ -1976,6 +2076,25 @@ void db_vacuum(Table* table) {
     pager_checkpoint(table->pager);
 }
 
+void db_vacuum_into(Table* table, const char* dest_filename) {
+    db_checkpoint(table);
+    FILE* src = fopen(table->pager->filename, "rb");
+    if (!src) return;
+    FILE* dst = fopen(dest_filename, "wb");
+    if (!dst) {
+        fclose(src);
+        return;
+    }
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+        fwrite(buf, 1, n, dst);
+    }
+    fclose(src);
+    fclose(dst);
+    printf("Database backed up to '%s'.\n", dest_filename);
+}
+
 uint32_t db_get_user_version(Table* table) {
     if (table->pager->num_pages == 0) return 0;
     void* root = get_page(table->pager, table->root_page_num);
@@ -2059,4 +2178,127 @@ void db_checkpoint(Table* table) {
         table_finalize_username_index_commit(table);
     }
     printf("Checkpoint complete.\n");
+}
+
+ViewSchema* table_find_view(Table* table, const char* name) {
+    for (uint32_t i = 0; i < table->catalog.num_views; i++) {
+        if (strcmp(table->catalog.views[i].name, name) == 0) {
+            return &table->catalog.views[i];
+        }
+    }
+    return NULL;
+}
+
+bool table_create_view(Table* table, const char* name, const char* select_sql) {
+    if (table->catalog.num_views >= MAX_VIEWS) {
+        printf("Error: View catalog full (max %d views).\n", MAX_VIEWS);
+        return false;
+    }
+    if (table_find_view(table, name) != NULL) {
+        printf("Error: View '%s' already exists.\n", name);
+        return false;
+    }
+    ViewSchema* v = &table->catalog.views[table->catalog.num_views++];
+    memset(v, 0, sizeof(*v));
+    strncpy(v->name, name, MAX_NAME_SIZE - 1);
+    strncpy(v->select_sql, select_sql, sizeof(v->select_sql) - 1);
+    return true;
+}
+
+bool table_drop_view(Table* table, const char* name) {
+    for (uint32_t i = 0; i < table->catalog.num_views; i++) {
+        if (strcmp(table->catalog.views[i].name, name) == 0) {
+            for (uint32_t j = i; j < table->catalog.num_views - 1; j++) {
+                table->catalog.views[j] = table->catalog.views[j + 1];
+            }
+            table->catalog.num_views--;
+            return true;
+        }
+    }
+    printf("Error: View '%s' does not exist.\n", name);
+    return false;
+}
+
+static void fts_add_token(FTSInvertedIndex* fts, const char* token, uint32_t doc_id) {
+    if (token == NULL || token[0] == '\0') return;
+    char lower_term[64];
+    size_t i = 0;
+    for (; token[i] && i < sizeof(lower_term) - 1; i++) {
+        lower_term[i] = (char)tolower((unsigned char)token[i]);
+    }
+    lower_term[i] = '\0';
+
+    for (uint32_t t = 0; t < fts->term_count; t++) {
+        if (strcmp(fts->terms[t].term, lower_term) == 0) {
+            for (uint32_t d = 0; d < fts->terms[t].doc_count; d++) {
+                if (fts->terms[t].doc_ids[d] == doc_id) return;
+            }
+            if (fts->terms[t].doc_count < FTS_MAX_DOCS_PER_TERM) {
+                fts->terms[t].doc_ids[fts->terms[t].doc_count++] = doc_id;
+            }
+            return;
+        }
+    }
+
+    if (fts->term_count < FTS_MAX_TERMS) {
+        FTSTermEntry* entry = &fts->terms[fts->term_count++];
+        memset(entry, 0, sizeof(*entry));
+        strncpy(entry->term, lower_term, sizeof(entry->term) - 1);
+        entry->doc_ids[0] = doc_id;
+        entry->doc_count = 1;
+    }
+}
+
+static void fts_tokenize_text(FTSInvertedIndex* fts, uint32_t doc_id, const char* text) {
+    if (text == NULL) return;
+    char buf[512];
+    strncpy(buf, text, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char* token = strtok(buf, " \t\n\r@.,;:-_");
+    while (token != NULL) {
+        fts_add_token(fts, token, doc_id);
+        token = strtok(NULL, " \t\n\r@.,;:-_");
+    }
+}
+
+void fts_build_index(Table* table) {
+    memset(&table->fts_index, 0, sizeof(table->fts_index));
+    Cursor* cursor = table_start(table);
+    Row row;
+    while (!cursor->end_of_table) {
+        deserialize_row(cursor_value(cursor), &row);
+        fts_tokenize_text(&table->fts_index, row.id, row.username);
+        fts_tokenize_text(&table->fts_index, row.id, row.email);
+        cursor_advance(cursor);
+    }
+    free(cursor);
+    table->fts_index.built = true;
+}
+
+uint32_t fts_search(Table* table, const char* keyword, uint32_t* out_doc_ids, uint32_t max_out) {
+    fts_build_index(table);
+    char lower_kw[64];
+    size_t i = 0;
+    for (; keyword[i] && i < sizeof(lower_kw) - 1; i++) {
+        lower_kw[i] = (char)tolower((unsigned char)keyword[i]);
+    }
+    lower_kw[i] = '\0';
+
+    uint32_t found = 0;
+    for (uint32_t t = 0; t < table->fts_index.term_count; t++) {
+        if (strstr(table->fts_index.terms[t].term, lower_kw) != NULL) {
+            for (uint32_t d = 0; d < table->fts_index.terms[t].doc_count; d++) {
+                uint32_t id = table->fts_index.terms[t].doc_ids[d];
+                bool exists = false;
+                for (uint32_t k = 0; k < found; k++) {
+                    if (out_doc_ids[k] == id) { exists = true; break; }
+                }
+                if (!exists && found < max_out) {
+                    out_doc_ids[found++] = id;
+                }
+            }
+        }
+    }
+    return found;
 }

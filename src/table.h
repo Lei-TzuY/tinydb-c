@@ -177,6 +177,7 @@ typedef struct {
     char        fk_col[MAX_NAME_SIZE];
     char        fk_parent_table[MAX_NAME_SIZE];
     char        fk_parent_col[MAX_NAME_SIZE];
+    bool        fk_on_delete_cascade;
 } TableSchema;
 
 #define MAX_INDEXES 8
@@ -185,6 +186,8 @@ typedef struct {
     char name[MAX_NAME_SIZE];        /* e.g., "idx_users_email" */
     char table_name[MAX_NAME_SIZE];  /* e.g., "users" */
     char column_name[MAX_NAME_SIZE]; /* e.g., "email" */
+    char column_name2[MAX_NAME_SIZE];
+    uint32_t num_columns;
     uint32_t enabled;
 } SecondaryIndexMeta;
 
@@ -197,6 +200,8 @@ typedef struct {
     char name[MAX_NAME_SIZE];
     char table_name[MAX_NAME_SIZE];
     char column_name[MAX_NAME_SIZE];
+    char column_name2[MAX_NAME_SIZE];
+    uint32_t num_columns;
     bool enabled;
     bool dirty;
     GenericIndexEntry* entries;
@@ -206,14 +211,38 @@ typedef struct {
     char index_wal_filename[512];
 } GenericSecondaryIndex;
 
+#define MAX_VIEWS 8
+
+typedef struct {
+    char name[MAX_NAME_SIZE];
+    char select_sql[256];
+} ViewSchema;
+
 typedef struct {
     uint32_t           num_tables;
     TableSchema        schemas[MAX_TABLES];
     uint32_t           num_indexes;
     SecondaryIndexMeta indexes[MAX_INDEXES];
+    uint32_t           num_views;
+    ViewSchema         views[MAX_VIEWS];
 } Catalog;
 
 /* ─── Table & Cursor ─────────────────────────────────────────── */
+
+#define FTS_MAX_TERMS 256
+#define FTS_MAX_DOCS_PER_TERM 256
+
+typedef struct {
+    char term[64];
+    uint32_t doc_ids[FTS_MAX_DOCS_PER_TERM];
+    uint32_t doc_count;
+} FTSTermEntry;
+
+typedef struct {
+    FTSTermEntry terms[FTS_MAX_TERMS];
+    uint32_t term_count;
+    bool built;
+} FTSInvertedIndex;
 
 typedef struct {
     uint32_t root_page_num;
@@ -232,6 +261,7 @@ typedef struct {
 
     uint32_t              num_sec_indexes;
     GenericSecondaryIndex sec_indexes[MAX_INDEXES];
+    FTSInvertedIndex      fts_index;
 } Table;
 
 typedef struct {
@@ -254,11 +284,12 @@ typedef struct {
 Table*  db_open(const char* filename);
 void    db_close(Table* table);
 void    db_get_stats(Table* table, TableStats* stats);
-bool    table_create_table(Table* table, const char* name, uint32_t num_cols, char col_names[][32], char col_types[][16], bool has_fk, const char* fk_col, const char* fk_parent_table, const char* fk_parent_col);
+bool    table_create_table(Table* table, const char* name, uint32_t num_cols, char col_names[][32], char col_types[][16], bool has_fk, const char* fk_col, const char* fk_parent_table, const char* fk_parent_col, bool fk_on_delete_cascade);
 TableSchema* table_get_schema(Table* table, const char* name);
 void    table_print_tables(Table* table);
 void    print_page(Table* table, uint32_t page_num);
 void    db_vacuum(Table* table);
+void    db_vacuum_into(Table* table, const char* dest_filename);
 bool    db_integrity_check(Table* table);
 void    db_checkpoint(Table* table);
 uint32_t db_get_user_version(Table* table);
@@ -274,9 +305,10 @@ void    table_prepare_username_index_commit(Table* table);
 void    table_finalize_username_index_commit(Table* table);
 
 /* Generic secondary index API */
-bool    table_create_index(Table* table, const char* index_name, const char* table_name, const char* column_name);
+bool    table_create_index(Table* table, const char* index_name, const char* table_name, const char* column_name, const char* column_name2);
 bool    table_drop_index(Table* table, const char* index_name);
 GenericSecondaryIndex* table_find_index_by_column(Table* table, const char* table_name, const char* column_name);
+GenericSecondaryIndex* table_find_composite_index(Table* table, const char* table_name, const char* col1, const char* col2);
 GenericSecondaryIndex* table_find_index_by_name(Table* table, const char* index_name);
 void    table_mark_indexes_dirty(Table* table);
 void    table_ensure_all_indexes(Table* table);
@@ -322,5 +354,18 @@ void print_tree(Pager* pager, uint32_t page_num, uint32_t indentation_level);
 void serialize_row(Row* source, void* destination);
 void deserialize_row(void* source, Row* destination);
 void print_row(Row* row);
+
+/* ALTER TABLE operations */
+bool table_rename_table(Table* table, const char* old_name, const char* new_name);
+bool table_add_column(Table* table, const char* table_name, const char* col_name, const char* col_type);
+
+/* VIEW operations */
+bool table_create_view(Table* table, const char* name, const char* select_sql);
+bool table_drop_view(Table* table, const char* name);
+ViewSchema* table_find_view(Table* table, const char* name);
+
+/* FTS operations */
+void fts_build_index(Table* table);
+uint32_t fts_search(Table* table, const char* keyword, uint32_t* out_doc_ids, uint32_t max_out);
 
 #endif /* TABLE_H */

@@ -1,75 +1,132 @@
 # TinyDB C
 
-A small SQLite-inspired relational database implemented in C.
+A high-performance, SQLite-inspired relational database engine written in C, featuring B+ Tree indexing, Write-Ahead Logging (WAL) for ACID compliance, Buffer Pool LRU caching, Full-Text Search (FTS), View/CTE engines, Window Functions, and a rich SQL Virtual Machine.
 
-The project focuses on database internals rather than SQL coverage. It includes:
+[![Build & Test](https://img.shields.io/badge/Tests-66%20Passed%20(100%25)-brightgreen.svg)](#test)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-- A pager and on-disk table storage
-- B+ tree leaf/internal node behavior
-- SQL parsing and VM execution for a compact statement set
-- Inserts, selects, updates, deletes, ordering, and aggregates
-- Transactions, WAL recovery, and checksum coverage
-- Secondary-index experiments with durability tests
+---
 
-## Build
+## Key Architecture & Features
+
+### 📦 Storage Engine & Memory Management
+- **B+ Tree Storage Engine**: Variable-capacity internal & leaf node splitting, borrowing, and merging.
+- **Buffer Pool Manager**: Dynamic LRU cache eviction policy for page pin/unpin and disk I/O reduction.
+- **Write-Ahead Logging (WAL)**: Full ACID transaction guarantees, crash-recovery log replay, and frame checkpointing.
+- **Checksum & Integrity Verification**: 32-bit CRC checksums per page and physical node invariant verifier (`PRAGMA integrity_check`).
+- **Disk Defragmentation (`VACUUM`)**: Dynamic B+ tree repacking and online database hot backups (`VACUUM INTO 'backup.db'`).
+
+### ⚡ Query Engine & SQL Compiler
+- **Primary & Secondary B+ Tree Indexing**: Automatic index selection, composite multi-column indexing, and secondary index persistence (`CREATE INDEX`).
+- **Common Table Expressions (CTE)**: Virtual `WITH cte_name AS (...)` query evaluation.
+- **Database Views**: System catalog-backed `CREATE VIEW` and `DROP VIEW` execution.
+- **Window Functions**: Partitioned analytics with `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`.
+- **Full-Text Search (FTS)**: Inverted term index posting lists with instant keyword lookup (`WHERE MATCH 'term'`).
+- **Set Operations**: `UNION` and `UNION ALL` result set merging.
+- **Subquery Engine**: Embedded scalar subqueries in `SELECT` projections and filter predicates (`WHERE id IN (SELECT ...)` / `WHERE EXISTS (...)`).
+- **Rich Predicates**: `BETWEEN ... AND ...`, `IN (...)`, `NOT IN (...)`, `IS NULL`, `IS NOT NULL`, `LIKE`, `NOT LIKE`, `ILIKE` (case-folded matching).
+- **Pagination & Sorting**: Multi-column sorting (`ORDER BY col1 ASC, col2 DESC`) and `LIMIT N OFFSET M` pagination.
+- **Built-in Functions**:
+  - **String**: `LENGTH()`, `UPPER()`, `LOWER()`, `CONCAT()`
+  - **Math**: `ABS()`, `MOD()`
+  - **System**: `VERSION()`, `DATABASE()`, `sqlite_master` catalog tables
+
+---
+
+## Build & Usage
+
+### 1. Building the Project (CMake + MSVC/GCC/Clang)
 
 ```powershell
 cmake -S . -B build
 cmake --build build
 ```
 
-## Run
+### 2. Running the REPL Interface
 
 ```powershell
-.\build\Debug\tinydb.exe test.db
+.\build\Debug\tinydb.exe my_database.db
 ```
 
-## Test
-
-Run all 40 Python test suites:
+### 3. Running All 66 Test Suites
 
 ```powershell
 python tests\run_all.py
 ```
 
-Current local audit: 40 test scripts passing (100% pass rate).
+> **Test Coverage Summary**: All **66 / 66** automated Python test suites pass with 100% success rate.
 
-## Features & Commands
+---
+
+## REPL Commands & SQL Syntax Reference
 
 ### REPL Meta Commands
 
-- `.tables`: List database tables
-- `.schema`: Print table & index schema
-- `.btree`: Print visual B+ Tree structure
-- `.constants`: Display storage engine constants (PAGE_SIZE, CELL_SIZE, MAX_KEYS)
-- `.stats`: Display live database stats (pages, rows, WAL, transactions)
-- `.buffer_pool` / `.cache`: Display Buffer Pool Manager & LRU eviction statistics
+- `.tables`: List active database tables
+- `.schema`: Display catalog table schemas & indexes
+- `.btree`: Visualize physical B+ Tree page hierarchy
+- `.constants`: Show storage engine page/cell layout constants
+- `.stats`: Display live page, row, WAL, and transaction metrics
+- `.buffer_pool` / `.cache`: Inspect Buffer Pool Manager hit rates & LRU cache status
 - `.page <n>`: Inspect physical page `<n>` headers, cell layout, and keys
-- `.checkpoint`: Truncate WAL log file, flush dirty frames to database file, and reclaim space
-- `.check`: Run full B+ tree, sibling links, and checksum integrity verifier
-- `.help`: Display REPL help
-- `.exit`: Save and exit database
+- `.checkpoint`: Manual Write-Ahead Log truncation and page flushing
+- `.check`: Execute deep B+ tree invariant, sibling link, and checksum verifier
+- `.help`: Display command list
+- `.exit`: Flush changes and close database cleanly
 
-### SQL Statements
+### Supported SQL Expressions
 
-- `INSERT INTO users VALUES (id, 'username', 'email');`
-- `SELECT * FROM users [WHERE id >= A AND id <= B AND username LIKE 'p%' AND email LIKE '%s'] [ORDER BY id DESC] [LIMIT N];`
-- `SELECT [<col>,] COUNT(*)|MIN(id)|MAX(id)|SUM(id)|AVG(id) FROM users [GROUP BY <col>] [HAVING <agg> <op> <val>];`
-- `UPDATE users SET username = 'x' [, email = 'y'] WHERE id = N;`
-- `DELETE FROM users WHERE id = N;` / `DELETE FROM users;`
-- `CREATE INDEX <index_name> ON <table_name>(<column_name>);`
-- `DROP INDEX <index_name>;`
-- `VACUUM;`: Re-pack B+ tree pages and defragment disk storage
-- `BEGIN;` / `COMMIT;` / `ROLLBACK;`: ACID Transactions via Write-Ahead Logging (WAL)
-- `SAVEPOINT sp1;` / `ROLLBACK TO sp1;` / `RELEASE sp1;`: Nested Transaction Savepoints
-- `CHECKPOINT;`: Manual Write-Ahead Log truncation and page flushing
-- `PRAGMA integrity_check;`: Verify B+ tree node invariants, key sorting, and leaf pointer integrity
-- `PRAGMA table_info;` / `PRAGMA table_info(users);`: Inspect table column schema catalog
-- `PRAGMA index_list;` / `PRAGMA index_list(users);`: Inspect active secondary indexes metadata
-- `PRAGMA user_version;` / `PRAGMA user_version = N;`: Read & write 4-byte database version metadata
-- `EXPLAIN SELECT ...`: Show query plan
+```sql
+-- DDL & Views
+CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR(32), price INT);
+CREATE VIEW v_users AS SELECT * FROM users;
+DROP VIEW v_users;
+CREATE INDEX idx_users_email ON users(email);
+DROP INDEX idx_users_email;
 
-## Notes
+-- DML & Auto Increment
+INSERT INTO users VALUES (1, 'alice', 'alice@example.com');
+INSERT INTO users (username, email) VALUES ('bob', 'bob@example.com'); -- AUTO_INCREMENT ID
+UPDATE users SET username = 'alice_new' WHERE id = 1;
+DELETE FROM users WHERE id = 1;
 
-This is an educational C database engine. It exposes storage-engine and query-execution mechanics including B+ Tree node splitting/merging, WAL crash recovery, page checksums, and secondary index persistence.
+-- Advanced Querying & Functions
+SELECT id, (SELECT COUNT(*) FROM users) FROM users;
+SELECT CONCAT(username, email), UPPER(username), LENGTH(email) FROM users;
+SELECT ABS(id), MOD(id, 2) FROM users;
+SELECT VERSION(), DATABASE();
+SELECT * FROM sqlite_master;
 
+-- Filtering & Pagination
+SELECT * FROM users WHERE username ILIKE '%alice%' LIMIT 10 OFFSET 5;
+SELECT * FROM users WHERE id BETWEEN 1 AND 100 AND username NOT IN ('charlie', 'david');
+SELECT username, COUNT(*) FROM users GROUP BY username HAVING COUNT(*) > 1 ORDER BY username ASC, id DESC;
+
+-- Set Operations & CTEs
+WITH active_users AS (SELECT * FROM users WHERE id > 0) SELECT * FROM active_users;
+SELECT * FROM users WHERE id = 1 UNION ALL SELECT * FROM users WHERE id = 2;
+
+-- Window Functions
+SELECT id, username, ROW_NUMBER() OVER (PARTITION BY username ORDER BY id ASC) FROM users;
+
+-- Transactions & Savepoints
+BEGIN;
+SAVEPOINT sp1;
+ROLLBACK TO sp1;
+RELEASE sp1;
+COMMIT;
+
+-- Maintenance & Backup
+VACUUM;
+VACUUM INTO 'backup.db';
+PRAGMA integrity_check;
+PRAGMA table_info(users);
+PRAGMA index_list(users);
+PRAGMA user_version = 1;
+```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
