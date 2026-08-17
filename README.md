@@ -1,132 +1,196 @@
 # TinyDB C
 
-A high-performance, SQLite-inspired relational database engine written in C, featuring B+ Tree indexing, Write-Ahead Logging (WAL) for ACID compliance, Buffer Pool LRU caching, Full-Text Search (FTS), View/CTE engines, Window Functions, and a rich SQL Virtual Machine.
+An educational relational database engine written in C. TinyDB implements a disk-backed B+ tree, write-ahead logging, transactions, secondary indexes, a buffer pool, a SQL execution layer, and a growing set of relational features in one compact codebase.
 
-[![Build & Test](https://img.shields.io/badge/Tests-66%20Passed%20(100%25)-brightgreen.svg)](#test)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+> **Goal:** explore how storage, recovery, indexing and query execution fit together — not replace SQLite or claim production-level performance.
 
----
+## Verification at a glance
 
-## Key Architecture & Features
+- **66 / 66 automated test suites passing** in the current project checkpoint
+- persistent B+ tree storage with split / merge behavior
+- WAL-based recovery and explicit checkpointing
+- secondary and composite indexes
+- transactions and savepoints
+- page checksums and integrity verification
+- REPL inspection commands for pages, B+ trees, cache state and schema metadata
 
-### 📦 Storage Engine & Memory Management
-- **B+ Tree Storage Engine**: Variable-capacity internal & leaf node splitting, borrowing, and merging.
-- **Buffer Pool Manager**: Dynamic LRU cache eviction policy for page pin/unpin and disk I/O reduction.
-- **Write-Ahead Logging (WAL)**: Full ACID transaction guarantees, crash-recovery log replay, and frame checkpointing.
-- **Checksum & Integrity Verification**: 32-bit CRC checksums per page and physical node invariant verifier (`PRAGMA integrity_check`).
-- **Disk Defragmentation (`VACUUM`)**: Dynamic B+ tree repacking and online database hot backups (`VACUUM INTO 'backup.db'`).
+Run the complete suite with:
 
-### ⚡ Query Engine & SQL Compiler
-- **Primary & Secondary B+ Tree Indexing**: Automatic index selection, composite multi-column indexing, and secondary index persistence (`CREATE INDEX`).
-- **Common Table Expressions (CTE)**: Virtual `WITH cte_name AS (...)` query evaluation.
-- **Database Views**: System catalog-backed `CREATE VIEW` and `DROP VIEW` execution.
-- **Window Functions**: Partitioned analytics with `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`.
-- **Full-Text Search (FTS)**: Inverted term index posting lists with instant keyword lookup (`WHERE MATCH 'term'`).
-- **Set Operations**: `UNION` and `UNION ALL` result set merging.
-- **Subquery Engine**: Embedded scalar subqueries in `SELECT` projections and filter predicates (`WHERE id IN (SELECT ...)` / `WHERE EXISTS (...)`).
-- **Rich Predicates**: `BETWEEN ... AND ...`, `IN (...)`, `NOT IN (...)`, `IS NULL`, `IS NOT NULL`, `LIKE`, `NOT LIKE`, `ILIKE` (case-folded matching).
-- **Pagination & Sorting**: Multi-column sorting (`ORDER BY col1 ASC, col2 DESC`) and `LIMIT N OFFSET M` pagination.
-- **Built-in Functions**:
-  - **String**: `LENGTH()`, `UPPER()`, `LOWER()`, `CONCAT()`
-  - **Math**: `ABS()`, `MOD()`
-  - **System**: `VERSION()`, `DATABASE()`, `sqlite_master` catalog tables
+```sh
+python tests/run_all.py
+```
 
----
+## Architecture
 
-## Build & Usage
+```text
+SQL / REPL
+    |
+    v
+Parser / planner / execution
+    |
+    +--------------------+
+    |                    |
+    v                    v
+Indexes / catalog    Transactions
+    |                    |
+    +---------+----------+
+              v
+        Buffer pool
+              |
+              v
+          B+ tree
+              |
+       +------+------+
+       |             |
+       v             v
+     WAL          DB pages
+```
 
-### 1. Building the Project (CMake + MSVC/GCC/Clang)
+The interesting part of the project is the interaction between these layers. A feature is only useful if the storage engine, index metadata, transaction path and recovery behavior agree on the same state.
 
-```powershell
+## Core subsystems
+
+### Storage engine
+
+- disk-backed B+ tree
+- internal / leaf node splitting, borrowing and merging
+- page-level checksums
+- physical integrity checking
+- buffer-pool LRU caching
+- page inspection and B+ tree visualization from the REPL
+
+### Transactions and recovery
+
+- write-ahead logging (WAL)
+- commit / rollback
+- savepoints
+- log replay for recovery
+- manual checkpointing
+- backup / compaction workflows such as `VACUUM` and `VACUUM INTO`
+
+### Indexing and catalog
+
+- primary and secondary B+ tree indexes
+- composite indexes
+- persisted schema / index metadata
+- `sqlite_master`-style catalog inspection
+- automatic index selection where supported by the current query path
+
+### Query layer
+
+The SQL layer includes common DDL / DML operations plus selected higher-level features such as:
+
+- `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`, `SELECT`
+- joins and predicates
+- `ORDER BY`, `GROUP BY`, `HAVING`, `LIMIT` / `OFFSET`
+- scalar subqueries and `IN` / `EXISTS`
+- views and common table expressions
+- `UNION` / `UNION ALL`
+- window functions such as `ROW_NUMBER()`
+- a small full-text-search path
+- built-in string, math and system functions
+
+This is intentionally a teaching-oriented SQL surface rather than a claim of SQL-standard completeness.
+
+## Build
+
+CMake is used for the native build.
+
+```sh
 cmake -S . -B build
 cmake --build build
 ```
 
-### 2. Running the REPL Interface
+Example REPL launch on Windows:
 
 ```powershell
 .\build\Debug\tinydb.exe my_database.db
 ```
 
-### 3. Running All 66 Test Suites
+The exact executable path depends on the generator / platform used by CMake.
 
-```powershell
-python tests\run_all.py
-```
-
-> **Test Coverage Summary**: All **66 / 66** automated Python test suites pass with 100% success rate.
-
----
-
-## REPL Commands & SQL Syntax Reference
-
-### REPL Meta Commands
-
-- `.tables`: List active database tables
-- `.schema`: Display catalog table schemas & indexes
-- `.btree`: Visualize physical B+ Tree page hierarchy
-- `.constants`: Show storage engine page/cell layout constants
-- `.stats`: Display live page, row, WAL, and transaction metrics
-- `.buffer_pool` / `.cache`: Inspect Buffer Pool Manager hit rates & LRU cache status
-- `.page <n>`: Inspect physical page `<n>` headers, cell layout, and keys
-- `.checkpoint`: Manual Write-Ahead Log truncation and page flushing
-- `.check`: Execute deep B+ tree invariant, sibling link, and checksum verifier
-- `.help`: Display command list
-- `.exit`: Flush changes and close database cleanly
-
-### Supported SQL Expressions
+## Example
 
 ```sql
--- DDL & Views
-CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR(32), price INT);
-CREATE VIEW v_users AS SELECT * FROM users;
-DROP VIEW v_users;
+CREATE TABLE users (
+    id INT PRIMARY KEY,
+    username VARCHAR(32),
+    email VARCHAR(64)
+);
+
 CREATE INDEX idx_users_email ON users(email);
-DROP INDEX idx_users_email;
 
--- DML & Auto Increment
 INSERT INTO users VALUES (1, 'alice', 'alice@example.com');
-INSERT INTO users (username, email) VALUES ('bob', 'bob@example.com'); -- AUTO_INCREMENT ID
-UPDATE users SET username = 'alice_new' WHERE id = 1;
-DELETE FROM users WHERE id = 1;
+INSERT INTO users VALUES (2, 'bob',   'bob@example.com');
 
--- Advanced Querying & Functions
-SELECT id, (SELECT COUNT(*) FROM users) FROM users;
-SELECT CONCAT(username, email), UPPER(username), LENGTH(email) FROM users;
-SELECT ABS(id), MOD(id, 2) FROM users;
-SELECT VERSION(), DATABASE();
-SELECT * FROM sqlite_master;
+SELECT *
+FROM users
+WHERE id BETWEEN 1 AND 100
+ORDER BY id DESC;
+```
 
--- Filtering & Pagination
-SELECT * FROM users WHERE username ILIKE '%alice%' LIMIT 10 OFFSET 5;
-SELECT * FROM users WHERE id BETWEEN 1 AND 100 AND username NOT IN ('charlie', 'david');
-SELECT username, COUNT(*) FROM users GROUP BY username HAVING COUNT(*) > 1 ORDER BY username ASC, id DESC;
+Transactions and savepoints:
 
--- Set Operations & CTEs
-WITH active_users AS (SELECT * FROM users WHERE id > 0) SELECT * FROM active_users;
-SELECT * FROM users WHERE id = 1 UNION ALL SELECT * FROM users WHERE id = 2;
-
--- Window Functions
-SELECT id, username, ROW_NUMBER() OVER (PARTITION BY username ORDER BY id ASC) FROM users;
-
--- Transactions & Savepoints
+```sql
 BEGIN;
-SAVEPOINT sp1;
-ROLLBACK TO sp1;
-RELEASE sp1;
+SAVEPOINT before_update;
+UPDATE users SET username = 'alice_new' WHERE id = 1;
+ROLLBACK TO before_update;
 COMMIT;
+```
 
--- Maintenance & Backup
+## REPL inspection tools
+
+TinyDB exposes internal state instead of hiding it, which makes the project easier to debug and learn from.
+
+```text
+.tables                 list tables
+.schema                 inspect schemas and indexes
+.btree                  visualize B+ tree structure
+.page <n>               inspect a physical page
+.stats                  show storage / WAL / transaction metrics
+.buffer_pool / .cache   inspect cache state
+.check                   run structural / checksum verification
+.checkpoint              flush / checkpoint WAL state
+```
+
+## Selected SQL examples
+
+```sql
+CREATE VIEW active_users AS
+SELECT * FROM users WHERE id > 0;
+
+WITH active AS (
+    SELECT * FROM users WHERE id > 0
+)
+SELECT * FROM active;
+
+SELECT id,
+       ROW_NUMBER() OVER (PARTITION BY username ORDER BY id)
+FROM users;
+
+SELECT *
+FROM users
+WHERE id IN (SELECT id FROM users WHERE id > 10);
+
 VACUUM;
 VACUUM INTO 'backup.db';
 PRAGMA integrity_check;
-PRAGMA table_info(users);
-PRAGMA index_list(users);
-PRAGMA user_version = 1;
 ```
 
----
+## Scope and limitations
+
+TinyDB is an educational database engine. The project is useful for studying implementation tradeoffs, but it should not be described as a drop-in SQLite replacement or a production database.
+
+In particular:
+
+- SQL coverage is intentionally incomplete.
+- durability / crash semantics should be evaluated against the tests and documented recovery paths, not inferred from feature names alone.
+- performance claims require benchmarks against defined workloads; this README deliberately avoids calling the engine "high-performance" without that evidence.
+- concurrency, locking and production-hardening expectations are different from mature database systems.
+
+The strongest signal in this repository is the implementation + testable invariants, not the number of supported SQL keywords.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT — see [LICENSE](LICENSE).
