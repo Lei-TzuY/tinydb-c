@@ -81,7 +81,7 @@ The interesting part of the project is the interaction between these layers. A f
 The SQL layer includes common DDL / DML operations plus selected higher-level features such as:
 
 - `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`, `SELECT`
-- joins and predicates
+- filtering predicates
 - `ORDER BY`, `GROUP BY`, `HAVING`, `LIMIT` / `OFFSET`
 - scalar subqueries and `IN` / `EXISTS`
 - views and common table expressions
