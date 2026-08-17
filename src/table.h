@@ -47,6 +47,8 @@
 #ifndef TABLE_H
 #define TABLE_H
 
+#include <ctype.h>
+
 #include "common.h"
 #include "pager.h"
 
@@ -86,7 +88,7 @@ typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
 #define IS_ROOT_SIZE            sizeof(uint8_t)
 #define IS_ROOT_OFFSET          (NODE_TYPE_OFFSET + NODE_TYPE_SIZE)
 #define PARENT_POINTER_SIZE     sizeof(uint32_t)
-#define PARENT_POINTER_OFFSET   (IS_ROOT_OFFSET + IS_ROOT_SIZE)
+#define PARENT_POINTER_OFFSET   (IS_ROOT_SIZE + IS_ROOT_OFFSET)
 #define COMMON_NODE_HEADER_SIZE (NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE)
 
 /* ─── Leaf node layout ───────────────────────────────────────── */
@@ -191,9 +193,11 @@ typedef struct {
     uint32_t enabled;
 } SecondaryIndexMeta;
 
+#define GENERIC_INDEX_KEY_SIZE ((COLUMN_EMAIL_SIZE * 2) + 2)
+
 typedef struct {
-    char key_val[256];      /* Column value as string or binary payload */
-    uint32_t primary_key;   /* Row ID */
+    char key_val[GENERIC_INDEX_KEY_SIZE]; /* two max-width values + separator + NUL */
+    uint32_t primary_key;                 /* Row ID */
 } GenericIndexEntry;
 
 typedef struct {

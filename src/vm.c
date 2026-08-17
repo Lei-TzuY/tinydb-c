@@ -1,5 +1,7 @@
 #include "vm.h"
 
+#define MAX_FORMATTED_ROW_SIZE GENERIC_INDEX_KEY_SIZE
+
 static void commit_table_changes(Table* table) {
     table_prepare_all_indexes_commit(table);
     pager_commit(table->pager);
@@ -166,7 +168,7 @@ static bool fetch_row_by_id(Table* table, uint32_t id, Row* row) {
 
 #define MAX_DISTINCT_ENTRIES 256
 typedef struct {
-    char entries[MAX_DISTINCT_ENTRIES][256];
+    char entries[MAX_DISTINCT_ENTRIES][MAX_FORMATTED_ROW_SIZE];
     uint32_t count;
 } DistinctSet;
 
@@ -181,7 +183,11 @@ static bool distinct_set_add(DistinctSet* set, const char* str) {
         }
     }
     if (set->count < MAX_DISTINCT_ENTRIES) {
-        strncpy(set->entries[set->count++], str, 255);
+        size_t len = strlen(str);
+        if (len >= MAX_FORMATTED_ROW_SIZE) len = MAX_FORMATTED_ROW_SIZE - 1;
+        memcpy(set->entries[set->count], str, len);
+        set->entries[set->count][len] = '\0';
+        set->count++;
     }
     return true;
 }
@@ -207,7 +213,7 @@ static uint32_t eval_scalar_subquery_val(Table* table, const char* sub_sql) {
 }
 
 static bool print_selected_row_ex(Table* table, Row* row, SelectStatement* sel, DistinctSet* dset) {
-    char formatted_row[256];
+    char formatted_row[MAX_FORMATTED_ROW_SIZE];
     if (sel->math_func != MATH_FUNC_NONE) {
         uint32_t val = row->id;
         if (sel->math_func == MATH_FUNC_ABS) {
@@ -897,7 +903,7 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
     if (sel->has_username_filter && sel->has_email_filter) {
         GenericSecondaryIndex* idx = table_find_composite_index(table, "users", "username", "email");
         if (idx != NULL && idx->enabled) {
-            char comp_key[256];
+            char comp_key[GENERIC_INDEX_KEY_SIZE];
             snprintf(comp_key, sizeof(comp_key), "%s|%s", sel->username, sel->email);
             return execute_select_generic_index(statement, table, idx, comp_key);
         }
