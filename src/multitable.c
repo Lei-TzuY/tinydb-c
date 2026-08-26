@@ -22,14 +22,12 @@ typedef struct {
     ViewSchema views[MAX_VIEWS];
 } SchemaCatalogDisk;
 
-static void sync_catalog_file(FILE* file) {
-    if (fflush(file) != 0) {
-        return;
-    }
+static bool sync_catalog_file(FILE* file) {
+    if (fflush(file) != 0) return false;
 #ifdef _WIN32
-    (void)_commit(_fileno(file));
+    return _commit(_fileno(file)) == 0;
 #else
-    (void)fsync(fileno(file));
+    return fsync(fileno(file)) == 0;
 #endif
 }
 
@@ -61,7 +59,7 @@ static bool write_schema_catalog_file(const char* path, const SchemaCatalogDisk*
     FILE* file = fopen(path, "wb");
     if (file == NULL) return false;
     bool ok = write_schema_catalog_payload(file, disk);
-    if (ok) sync_catalog_file(file);
+    if (ok) ok = sync_catalog_file(file);
     if (fclose(file) != 0) ok = false;
     return ok;
 }
@@ -170,7 +168,7 @@ bool multitable_catalog_save(Table* table, const char* database_filename) {
     uint32_t commit_magic = SCHEMA_CATALOG_WAL_COMMIT_MAGIC;
     bool ok = write_schema_catalog_payload(wal, &disk) &&
               fwrite(&commit_magic, sizeof(commit_magic), 1, wal) == 1;
-    if (ok) sync_catalog_file(wal);
+    if (ok) ok = sync_catalog_file(wal);
     if (fclose(wal) != 0) ok = false;
     if (!ok) {
         printf("Unable to write schema catalog WAL.\n");
@@ -311,35 +309,66 @@ static bool schema_is_row_compatible(const TableSchema* schema) {
            schema->columns[2].type == COL_TYPE_VARCHAR;
 }
 
-static bool select_uses_other_root(Table* table,
-                                   const SelectStatement* sel,
-                                   uint32_t root_page_num) {
-    if (sel->has_join && sel->join_table[0] != '\0') {
-        TableSchema* join_schema = resolve_schema_name(table, sel->join_table, 0);
-        if (join_schema != NULL && join_schema->root_page_num != root_page_num) return true;
+static bool nested_name_uses_other_or_unknown_root(Table* table,
+                                                    const char* name,
+                                                    uint32_t root_page_num) {
+    if (name == NULL || name[0] == '\0') return true;
+    TableSchema* schema = resolve_schema_name(table, name, 0);
+    return schema == NULL || schema->root_page_num != root_page_num;
+}
+
+static bool nested_select_sql_uses_other_or_unknown_root(Table* table,
+                                                         const char* sql,
+                                                         uint32_t root_page_num) {
+    if (sql == NULL || sql[0] == '\0') return true;
+    Statement nested_statement;
+    memset(&nested_statement, 0, sizeof(nested_statement));
+    if (prepare_statement(sql, &nested_statement) != PREPARE_SUCCESS ||
+        nested_statement.type != STATEMENT_SELECT) {
+        return true;
     }
-    if (sel->has_in_subquery && sel->in_subquery != NULL &&
-        sel->in_subquery->table_name[0] != '\0') {
-        TableSchema* sub = resolve_schema_name(table, sel->in_subquery->table_name, 0);
-        if (sub != NULL && sub->root_page_num != root_page_num) return true;
+    const char* nested = nested_statement.table_name[0] != '\0'
+        ? nested_statement.table_name
+        : nested_statement.select.table_name;
+    return nested_name_uses_other_or_unknown_root(table, nested, root_page_num);
+}
+
+static bool select_uses_other_or_unknown_root(Table* table,
+                                              const SelectStatement* sel,
+                                              uint32_t root_page_num) {
+    if (sel->has_join &&
+        nested_name_uses_other_or_unknown_root(table, sel->join_table, root_page_num)) {
+        return true;
     }
-    if (sel->has_exists_subquery && sel->exists_subquery != NULL &&
-        sel->exists_subquery->table_name[0] != '\0') {
-        TableSchema* sub = resolve_schema_name(table, sel->exists_subquery->table_name, 0);
-        if (sub != NULL && sub->root_page_num != root_page_num) return true;
-    }
-    if (sel->has_scalar_subquery && sel->scalar_subquery_sql[0] != '\0') {
-        Statement sub_statement;
-        memset(&sub_statement, 0, sizeof(sub_statement));
-        if (prepare_statement(sel->scalar_subquery_sql, &sub_statement) == PREPARE_SUCCESS &&
-            sub_statement.type == STATEMENT_SELECT) {
-            const char* nested = sub_statement.table_name[0] != '\0'
-                ? sub_statement.table_name
-                : sub_statement.select.table_name;
-            TableSchema* sub = resolve_schema_name(table, nested, 0);
-            if (sub != NULL && sub->root_page_num != root_page_num) return true;
+
+    if (sel->has_in_subquery && sel->in_subquery != NULL) {
+        const char* nested = sel->in_subquery->table_name;
+        if (nested_name_uses_other_or_unknown_root(table, nested, root_page_num)) {
+            return true;
         }
     }
+
+    if (sel->has_exists_subquery && sel->exists_subquery != NULL) {
+        const char* nested = sel->exists_subquery->table_name;
+        if (nested_name_uses_other_or_unknown_root(table, nested, root_page_num)) {
+            return true;
+        }
+    }
+
+    if (sel->has_scalar_subquery &&
+        nested_select_sql_uses_other_or_unknown_root(table,
+                                                     sel->scalar_subquery_sql,
+                                                     root_page_num)) {
+        return true;
+    }
+
+    if (sel->is_union && sel->union_second_select[0] != '\0' &&
+        nested_select_sql_uses_other_or_unknown_root(table,
+                                                     sel->union_second_select,
+                                                     root_page_num)) {
+        return true;
+    }
+
     return false;
 }
 
@@ -393,7 +422,9 @@ static MultiTableRouteResult resolve_statement_schema(Table* table,
         if (schema->root_page_num != 0 && statement->select.has_match_filter) {
             return MULTITABLE_ROUTE_UNSUPPORTED_QUERY;
         }
-        if (select_uses_other_root(table, &statement->select, schema->root_page_num)) {
+        if (select_uses_other_or_unknown_root(table,
+                                              &statement->select,
+                                              schema->root_page_num)) {
             return MULTITABLE_ROUTE_UNSUPPORTED_QUERY;
         }
     }
