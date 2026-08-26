@@ -33,6 +33,13 @@ MultiTableRouteResult multitable_begin_statement_scope(
 );
 void multitable_end_statement_scope(Table* table, MultiTableRouteScope* scope);
 
+MultiTableRouteResult multitable_execute_join(
+    Table* table,
+    Statement* statement,
+    bool* handled,
+    ExecuteResult* execute_result
+);
+
 ExecuteResult multitable_execute_delete_all(
     Statement* statement,
     Table* table,
