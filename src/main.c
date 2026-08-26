@@ -1,10 +1,10 @@
 #include "common.h"
 #include "compiler.h"
+#include "profile.h"
 #include "vm.h"
 #include "table.h"
 
 #include <ctype.h>
-#include <time.h>
 
 typedef struct {
     char* buffer;
@@ -73,15 +73,8 @@ static bool consume_ci_word(const char** input, const char* word) {
 static bool try_execute_explain_analyze(const char* input, Table* table) {
     const char* query = input;
     Statement statement;
-    Statement plan_statement;
     PrepareResult prepare_result;
-    ExecuteResult execute_result;
-    uint32_t hits_before;
-    uint32_t misses_before;
-    uint32_t evictions_before;
-    clock_t started;
-    clock_t finished;
-    double elapsed_ms;
+    QueryProfile profile;
 
     if (!consume_ci_word(&query, "explain") ||
         !consume_ci_word(&query, "analyze")) {
@@ -95,38 +88,28 @@ static bool try_execute_explain_analyze(const char* input, Table* table) {
         return true;
     }
 
-    plan_statement = statement;
-    plan_statement.explain = true;
-    printf("QUERY PLAN\n");
-    execute_result = execute_statement(&plan_statement, table);
-    if (execute_result != EXECUTE_SUCCESS) {
+    if (!query_profile_execute(&statement, table, &profile)) {
+        printf("EXPLAIN ANALYZE could not profile this statement.\n");
+        return true;
+    }
+
+    if (profile.plan_result != EXECUTE_SUCCESS) {
         printf("EXPLAIN ANALYZE failed while producing the plan.\n");
         return true;
     }
 
-    hits_before = table->pager->cache_hits;
-    misses_before = table->pager->cache_misses;
-    evictions_before = table->pager->evictions;
-
-    printf("ACTUAL RESULT\n");
-    started = clock();
-    execute_result = execute_statement(&statement, table);
-    finished = clock();
-
-    elapsed_ms = 1000.0 * (double)(finished - started) / (double)CLOCKS_PER_SEC;
     printf("ANALYZE: execution_time_ms=%.3f cache_hits=%u cache_misses=%u evictions=%u page_accesses=%u\n",
-           elapsed_ms,
-           table->pager->cache_hits - hits_before,
-           table->pager->cache_misses - misses_before,
-           table->pager->evictions - evictions_before,
-           (table->pager->cache_hits - hits_before) +
-               (table->pager->cache_misses - misses_before));
+           profile.execution_time_ms,
+           profile.cache_hits,
+           profile.cache_misses,
+           profile.evictions,
+           profile.page_accesses);
 
-    if (execute_result == EXECUTE_SUCCESS) {
+    if (profile.execute_result == EXECUTE_SUCCESS) {
         printf("Executed.\n");
     } else {
         printf("EXPLAIN ANALYZE query execution failed with code %d.\n",
-               (int)execute_result);
+               (int)profile.execute_result);
     }
     return true;
 }
