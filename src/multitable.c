@@ -469,6 +469,125 @@ void multitable_end_statement_scope(Table* table, MultiTableRouteScope* scope) {
     scope->active = false;
 }
 
+static const char* join_column_basename(const char* column) {
+    const char* dot = strrchr(column, '.');
+    return dot == NULL ? column : dot + 1;
+}
+
+static bool simple_primary_key_join_supported(const SelectStatement* sel) {
+    return sel->aggregate == AGGREGATE_NONE &&
+           !sel->has_project_col &&
+           !sel->has_id_filter &&
+           !sel->has_id_min_filter &&
+           !sel->has_id_max_filter &&
+           !sel->has_username_filter &&
+           !sel->has_username_like &&
+           !sel->has_email_filter &&
+           !sel->has_email_like &&
+           !sel->has_group_by &&
+           !sel->has_having &&
+           !sel->has_in_subquery &&
+           !sel->has_exists_subquery &&
+           !sel->is_distinct &&
+           !sel->has_match_filter &&
+           !sel->has_window_func &&
+           !sel->is_union &&
+           !sel->has_is_null_filter &&
+           !sel->has_is_not_null_filter &&
+           !sel->has_order_by_col &&
+           !sel->has_secondary_order_by &&
+           !sel->has_in_list &&
+           !sel->has_between_filter &&
+           !sel->has_scalar_subquery &&
+           sel->str_func == STRING_FUNC_NONE &&
+           sel->math_func == MATH_FUNC_NONE &&
+           !sel->has_order_desc &&
+           ci_equal(join_column_basename(sel->join_left_col), "id") &&
+           ci_equal(join_column_basename(sel->join_right_col), "id");
+}
+
+MultiTableRouteResult multitable_execute_join(Table* table,
+                                               Statement* statement,
+                                               bool* handled,
+                                               ExecuteResult* execute_result) {
+    *handled = false;
+    *execute_result = EXECUTE_SUCCESS;
+
+    if (statement->type != STATEMENT_SELECT || !statement->select.has_join) {
+        return MULTITABLE_ROUTE_NOT_APPLICABLE;
+    }
+
+    SelectStatement* sel = &statement->select;
+    const char* left_name = statement->table_name[0] != '\0'
+        ? statement->table_name
+        : sel->table_name;
+    TableSchema* left_schema = resolve_schema_name(table, left_name, 0);
+    TableSchema* right_schema = resolve_schema_name(table, sel->join_table, 0);
+
+    if (left_schema == NULL || right_schema == NULL) {
+        *handled = true;
+        return MULTITABLE_ROUTE_TABLE_NOT_FOUND;
+    }
+    if (!schema_is_row_compatible(left_schema) ||
+        !schema_is_row_compatible(right_schema)) {
+        *handled = true;
+        return MULTITABLE_ROUTE_INCOMPATIBLE_SCHEMA;
+    }
+
+    if (left_schema->root_page_num == right_schema->root_page_num) {
+        return MULTITABLE_ROUTE_NOT_APPLICABLE;
+    }
+
+    *handled = true;
+    if (!simple_primary_key_join_supported(sel)) {
+        return MULTITABLE_ROUTE_UNSUPPORTED_QUERY;
+    }
+
+    uint32_t original_root = table->root_page_num;
+    uint32_t emitted = 0;
+    uint32_t skipped = 0;
+
+    table->root_page_num = left_schema->root_page_num;
+    Cursor* left_cursor = table_start(table);
+    while (!left_cursor->end_of_table) {
+        Row left_row;
+        deserialize_row(cursor_value(left_cursor), &left_row);
+
+        table->root_page_num = right_schema->root_page_num;
+        Cursor* right_cursor = table_find(table, left_row.id);
+        void* right_node = get_page(table->pager, right_cursor->page_num);
+        uint32_t right_cells = *leaf_node_num_cells(right_node);
+
+        if (right_cursor->cell_num < right_cells &&
+            *leaf_node_key(right_node, right_cursor->cell_num) == left_row.id) {
+            Row right_row;
+            deserialize_row(cursor_value(right_cursor), &right_row);
+            if (sel->has_offset && skipped < sel->offset) {
+                skipped++;
+            } else if (!sel->has_limit || emitted < sel->limit) {
+                printf("(%u, %s, %s) | (%u, %s, %s)\n",
+                       left_row.id,
+                       left_row.username,
+                       left_row.email,
+                       right_row.id,
+                       right_row.username,
+                       right_row.email);
+                emitted++;
+            }
+        }
+        free(right_cursor);
+
+        table->root_page_num = left_schema->root_page_num;
+        cursor_advance(left_cursor);
+        if (sel->has_limit && emitted >= sel->limit) break;
+    }
+    free(left_cursor);
+    table->root_page_num = original_root;
+
+    *execute_result = EXECUTE_SUCCESS;
+    return MULTITABLE_ROUTE_OK;
+}
+
 ExecuteResult multitable_execute_delete_all(Statement* statement,
                                              Table* table,
                                              const MultiTableRouteScope* scope) {
