@@ -12,6 +12,18 @@ else()
     add_compile_options(-Wall -Wextra -Werror)
 endif()
 
-file(GLOB SOURCES "src/*.c")
+set(TINYDB_CORE_SOURCES
+    src/compiler.c
+    src/pager.c
+    src/table.c
+    src/vm.c
+)
 
-add_executable(tinydb ${SOURCES})
+add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
+target_include_directories(tinydb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_executable(tinydb src/main.c)
+target_link_libraries(tinydb PRIVATE tinydb_core)
+
+add_executable(tinydb_bench bench/benchmark.c)
+target_link_libraries(tinydb_bench PRIVATE tinydb_core)
