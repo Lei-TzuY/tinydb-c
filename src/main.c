@@ -297,6 +297,24 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        if (statement.type == STATEMENT_SELECT && statement.select.has_join) {
+            bool join_handled = false;
+            ExecuteResult join_execute_result = EXECUTE_SUCCESS;
+            MultiTableRouteResult join_route_result = multitable_execute_join(
+                table, &statement, &join_handled, &join_execute_result);
+            if (join_handled) {
+                if (join_route_result != MULTITABLE_ROUTE_OK) {
+                    printf("Error: %s.\n", multitable_route_error(join_route_result));
+                } else if (join_execute_result == EXECUTE_SUCCESS) {
+                    printf("Executed.\n");
+                } else {
+                    printf("Error: JOIN execution failed with code %d.\n",
+                           (int)join_execute_result);
+                }
+                continue;
+            }
+        }
+
         MultiTableRouteScope route_scope;
         MultiTableRouteResult route_result = multitable_begin_statement_scope(
             table, &statement, input_buffer->buffer, &route_scope);
