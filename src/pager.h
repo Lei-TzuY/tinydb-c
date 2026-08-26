@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <errno.h>
 
-#define TABLE_MAX_PAGES   100
+#ifndef TABLE_MAX_PAGES
+#define TABLE_MAX_PAGES   4096
+#endif
 #define PAGE_SIZE         4096
 #define PAGE_CHECKSUM_SIZE 4                          /* FNV-1a stored at page end */
 #define PAGE_USABLE_SIZE  (PAGE_SIZE - PAGE_CHECKSUM_SIZE)
