@@ -15,6 +15,7 @@ An educational relational database engine written in C. TinyDB implements a disk
 - native benchmark runner with a cross-platform smoke test
 - deterministic repeated crash/recovery stress runner
 - offline binary page/checksum inspector that does not depend on opening the DB through TinyDB
+- `EXPLAIN ANALYZE` query profiling with execution time and buffer-pool deltas
 - REPL inspection commands for pages, B+ trees, cache state and schema metadata
 
 Run the complete suite with:
@@ -92,6 +93,7 @@ The SQL layer includes common DDL / DML operations plus selected higher-level fe
 - views and common table expressions
 - `UNION` / `UNION ALL`
 - window functions such as `ROW_NUMBER()`
+- `EXPLAIN` and `EXPLAIN ANALYZE`
 - a small full-text-search path
 - built-in string, math and system functions
 
@@ -143,6 +145,43 @@ BENCHMARK_OK
 ```
 
 Use the benchmark for before/after comparisons on the same machine, compiler, build type, dataset size and storage device. Cross-machine numbers are not directly comparable without controlling those variables.
+
+## Query profiling with EXPLAIN ANALYZE
+
+Plain `EXPLAIN` only reports the chosen execution path and does not run the query:
+
+```sql
+EXPLAIN SELECT * FROM users WHERE id = 42;
+```
+
+`EXPLAIN ANALYZE` prints the same plan, executes the `SELECT`, and then reports execution-time and buffer-pool deltas measured around the real VM execution path:
+
+```sql
+EXPLAIN ANALYZE SELECT * FROM users WHERE id = 42;
+```
+
+Representative output:
+
+```text
+QUERY PLAN
+PLAN: PRIMARY KEY LOOKUP (id = 42)
+ACTUAL RESULT
+(42, user42, u42@example.com)
+ANALYZE: execution_time_ms=... cache_hits=... cache_misses=... evictions=... page_accesses=...
+Executed.
+```
+
+The counters are deltas for that query execution, not process-lifetime totals. `page_accesses` is the sum of buffer-pool hits and misses during the measured query. This makes it useful for controlled before/after comparisons such as creating an index and checking whether the selected path and page-access profile change.
+
+For example:
+
+```sql
+EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
+CREATE INDEX idx_users_email ON users(email);
+EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
+```
+
+Timing uses the C runtime clock and should be treated as local diagnostic evidence rather than a cross-machine benchmark. Use `tinydb_bench` for larger repeatable workload comparisons.
 
 ## Crash / recovery stress runner
 
