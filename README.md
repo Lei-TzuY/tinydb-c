@@ -13,6 +13,8 @@ An educational relational database engine written in C. TinyDB implements a disk
 - transactions and savepoints
 - page checksums and integrity verification
 - native benchmark runner with a cross-platform smoke test
+- deterministic repeated crash/recovery stress runner
+- offline binary page/checksum inspector that does not depend on opening the DB through TinyDB
 - REPL inspection commands for pages, B+ trees, cache state and schema metadata
 
 Run the complete suite with:
@@ -69,6 +71,7 @@ The interesting part of the project is the interaction between these layers. A f
 - log replay for recovery
 - manual checkpointing
 - backup / compaction workflows such as `VACUUM` and `VACUUM INTO`
+- deterministic crash/recovery stress testing for committed and uncommitted transactions
 
 ### Indexing and catalog
 
@@ -140,6 +143,55 @@ BENCHMARK_OK
 ```
 
 Use the benchmark for before/after comparisons on the same machine, compiler, build type, dataset size and storage device. Cross-machine numbers are not directly comparable without controlling those variables.
+
+## Crash / recovery stress runner
+
+`tools/recovery_stress.py` repeatedly injects hard process kills against the same database. Every round has two phases:
+
+1. `BEGIN` + inserts + `COMMIT`, followed by an immediate kill without graceful `.exit`; all committed rows must survive recovery.
+2. `BEGIN` + inserts, followed by a kill before `COMMIT`; none of those rows may become visible.
+
+After each recovery it reopens the database, checks the complete expected/forbidden row set, and runs `PRAGMA integrity_check`. The workload uses a fixed seed by default so failures are reproducible.
+
+```sh
+python tools/recovery_stress.py --iterations 20 --rows-per-round 2 --seed 1337
+```
+
+For a shorter smoke run:
+
+```sh
+python tools/recovery_stress.py --iterations 3 --rows-per-round 2
+```
+
+The runner creates a temporary database unless `--db` is supplied and refuses to overwrite an existing explicit database path.
+
+## Offline page inspector
+
+`tools/page_inspect.py` reads a TinyDB file directly without going through the pager. This is useful for damaged-database inspection because it can still report page metadata even when TinyDB itself refuses to open the file.
+
+It currently checks:
+
+- file/page alignment
+- per-page FNV-1a checksum
+- root/internal/leaf page type and header fields
+- leaf key ordering and duplicate keys
+- internal separator ordering
+- basic leaf sibling and internal child pointer bounds
+- total rows, page counts and checksum failures
+
+Text summary:
+
+```sh
+python tools/page_inspect.py my_database.db --pages --strict
+```
+
+Machine-readable report:
+
+```sh
+python tools/page_inspect.py my_database.db --json --strict
+```
+
+`--strict` returns a non-zero exit code when the inspector finds a checksum, header, key-order or pointer-range problem.
 
 ## Example
 
@@ -219,6 +271,7 @@ In particular:
 - SQL coverage is intentionally incomplete.
 - durability / crash semantics should be evaluated against the tests and documented recovery paths, not inferred from feature names alone.
 - performance claims require benchmarks against defined workloads; this repository now includes a benchmark harness, but results still depend on hardware, compiler settings, build type and workload.
+- the offline inspector performs structural sanity checks but is not a formal proof that every possible B+ tree invariant holds.
 - concurrency, locking and production-hardening expectations are different from mature database systems.
 
 The strongest signal in this repository is the implementation + testable invariants, not the number of supported SQL keywords.
