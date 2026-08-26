@@ -274,6 +274,23 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        if (table->catalog.num_tables > 1 && statement.type == STATEMENT_VACUUM) {
+            printf("Error: VACUUM/VACUUM INTO is disabled for multi-table databases until compaction preserves every table root and schema sidecar.\n");
+            continue;
+        }
+
+        if (table->catalog.num_tables > 1 && statement.type == STATEMENT_EXECUTE_PREPARED) {
+            printf("Error: EXECUTE PREPARED is disabled for multi-table databases until bound SQL participates in root routing.\n");
+            continue;
+        }
+
+        if (table->catalog.num_tables > 1 &&
+            statement.type == STATEMENT_ALTER_TABLE &&
+            statement.alter_table.is_add_column) {
+            printf("Error: ALTER TABLE ADD COLUMN is disabled for multi-table fixed-Row storage until physical row migration is implemented.\n");
+            continue;
+        }
+
         if (statement.type == STATEMENT_CREATE_INDEX &&
             !multitable_index_target_supported(table, statement.create_index.table_name)) {
             printf("Error: Secondary indexes on non-primary table roots are not routed safely yet.\n");
