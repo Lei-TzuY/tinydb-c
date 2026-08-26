@@ -64,6 +64,15 @@ typedef struct {
     uint32_t transaction_free_page_count; /* snapshot taken at BEGIN */
     uint32_t* transaction_free_pages;
 
+    /*
+     * No-steal shadow storage.
+     * dirty_page_spills keeps uncommitted pages that had to leave the small
+     * buffer pool. committed_pages keeps the latest WAL-committed image until
+     * checkpoint writes it to the main database file.
+     */
+    void** dirty_page_spills;
+    void** committed_pages;
+
     /* Buffer Pool Manager */
     Frame frames[MAX_BUFFER_POOL_SIZE];
     int*  page_table; /* maps page_num -> frame_index (-1 if evicted) */
