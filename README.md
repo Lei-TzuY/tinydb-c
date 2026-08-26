@@ -8,12 +8,16 @@ An educational relational database engine written in C. TinyDB implements a disk
 
 - automated regression suites covering SQL, B+ tree, WAL, checksums, indexes and recovery paths
 - persistent B+ tree storage with split / merge behavior
+- growable heap-backed Pager metadata instead of a fixed page-table ceiling
+- no-steal buffer eviction: uncommitted dirty pages are never evicted into the main database file
 - WAL-based recovery and explicit checkpointing
 - secondary and composite indexes
 - transactions and savepoints
 - page checksums and integrity verification
-- native benchmark runner with a cross-platform smoke test
+- native benchmark runner with text and JSON output
 - deterministic repeated crash/recovery stress runner
+- regression coverage that writes and reopens more than 4096 database pages
+- large uncommitted-transaction crash coverage that forces eviction beyond the 16-frame buffer pool
 - offline binary page/checksum inspector that does not depend on opening the DB through TinyDB
 - `EXPLAIN ANALYZE` query profiling with execution time and buffer-pool deltas
 - REPL inspection commands for pages, B+ trees, cache state and schema metadata
@@ -41,6 +45,13 @@ Indexes / catalog    Transactions
               v
         Buffer pool
               |
+       +------+------+
+       |             |
+       v             v
+  dirty spill     clean pages
+  (no-steal)          |
+       |              |
+       +------+-------+
               v
           B+ tree
               |
@@ -60,9 +71,14 @@ The interesting part of the project is the interaction between these layers. A f
 - internal / leaf node splitting, borrowing and merging
 - page-level checksums
 - physical integrity checking
-- buffer-pool LRU caching
+- 16-frame buffer-pool LRU caching
+- heap-backed page table, dirty map and free-page list that grow on demand
+- metadata capacity starts at `PAGER_INITIAL_CAPACITY` (64 pages by default) and doubles as required
+- 32-bit page numbers remain the logical page identifier; the old `TABLE_MAX_PAGES=4096` value is no longer the Pager's hard page ceiling
+- 64-bit file offsets for database positioning and truncation
 - page inspection and B+ tree visualization from the REPL
-- compile-time configurable page capacity (`TABLE_MAX_PAGES`, default 4096)
+
+`TABLE_MAX_PAGES` is currently retained as a legacy compatibility/sanity constant for older auxiliary-file validation. Code that needs the current Pager allocation should use `pager_metadata_capacity()` rather than treating `TABLE_MAX_PAGES` as database capacity.
 
 ### Transactions and recovery
 
@@ -71,6 +87,11 @@ The interesting part of the project is the interaction between these layers. A f
 - savepoints
 - log replay for recovery
 - manual checkpointing
+- no-steal dirty-page spill when an uncommitted page is evicted from the 16-frame buffer pool
+- committed shadow pages keep post-WAL state visible before checkpoint without writing uncommitted state to the main file
+- WAL transaction records include the final logical page count so shrink/truncate state can be recovered after a crash
+- backward recovery support for the repository's previous WAL record layout
+- exact transaction free-page-list snapshot/restore on rollback
 - backup / compaction workflows such as `VACUUM` and `VACUUM INTO`
 - deterministic crash/recovery stress testing for committed and uncommitted transactions
 
@@ -101,7 +122,7 @@ This is intentionally a teaching-oriented SQL surface rather than a claim of SQL
 
 ## Build
 
-CMake is used for the native build. The engine implementation is built as the reusable `tinydb_core` static library, with separate REPL and benchmark executables linked against it.
+CMake is used for the native build. The engine implementation is built as the reusable `tinydb_core` static library, with separate REPL, benchmark and pager-growth probe executables linked against it.
 
 ```sh
 cmake -S . -B build
@@ -134,15 +155,23 @@ Windows multi-config build layout:
 
 Arguments are `DATABASE ROWS LOOKUPS`. The benchmark refuses to overwrite an existing database path so a previous result cannot silently contaminate a new run.
 
-Example output fields include:
+Example text output fields include:
 
 ```text
 insert: inserted=5000 seconds=... rows_per_sec=...
 lookup: requested=20000 lookup_hits=20000 seconds=... lookups_per_sec=...
-storage: pages=... leaf_pages=... internal_pages=... rows=5000
+storage: pages=... leaf_pages=... internal_pages=... rows=5000 metadata_capacity=...
 cache_lookup_phase: hits=... misses=... evictions=...
 BENCHMARK_OK
 ```
+
+Machine-readable output is available with `--json`:
+
+```sh
+./build/tinydb_bench benchmark.db 5000 20000 --json
+```
+
+The JSON payload includes workload counts, throughput, storage-page counts, lookup cache metrics, `dynamic_page_table`, `initial_metadata_capacity`, current `metadata_capacity`, the retained `legacy_page_ceiling`, and an `ok` correctness flag. This is intended for automated before/after regression analysis.
 
 Use the benchmark for before/after comparisons on the same machine, compiler, build type, dataset size and storage device. Cross-machine numbers are not directly comparable without controlling those variables.
 
@@ -182,6 +211,14 @@ EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
 ```
 
 Timing uses the C runtime clock and should be treated as local diagnostic evidence rather than a cross-machine benchmark. Use `tinydb_bench` for larger repeatable workload comparisons.
+
+## Pager growth and eviction regression tests
+
+The test suite now contains two targeted storage regressions in addition to normal SQL tests.
+
+`tinydb_pager_growth_probe` writes pages `0..4128`, deliberately crossing the historical 4096-page boundary while a 16-frame buffer pool repeatedly evicts pages. It commits, checkpoints, reopens the database, and verifies markers on both sides of the old boundary. The Python wrapper also checks that the physical file contains all 4129 pages.
+
+`test_large_transaction_crash.py` seeds committed data, starts one explicit transaction, inserts 700 additional rows (enough to dirty far more pages than fit in the buffer pool), then hard-kills the process before `COMMIT`. Reopening must show only the previously committed rows and must still pass `PRAGMA integrity_check`. This specifically protects the no-steal invariant: buffer eviction must not make uncommitted state durable.
 
 ## Crash / recovery stress runner
 
@@ -272,7 +309,7 @@ TinyDB exposes internal state instead of hiding it, which makes the project easi
 .btree                  visualize B+ tree structure
 .page <n>               inspect a physical page
 .stats                  show storage / WAL / transaction metrics
-.buffer_pool / .cache   inspect cache state
+.buffer_pool / .cache   inspect cache state, including dynamic metadata capacity
 .check                   run structural / checksum verification
 .checkpoint              flush / checkpoint WAL state
 ```
@@ -308,8 +345,10 @@ TinyDB is an educational database engine. The project is useful for studying imp
 In particular:
 
 - SQL coverage is intentionally incomplete.
+- the Pager now grows its in-memory metadata on demand, but page identifiers are still 32-bit and mature databases use more sophisticated allocation/free-space structures.
+- the no-steal implementation uses heap-backed page shadows for educational clarity; it is not intended to model the memory efficiency of a production buffer manager.
 - durability / crash semantics should be evaluated against the tests and documented recovery paths, not inferred from feature names alone.
-- performance claims require benchmarks against defined workloads; this repository now includes a benchmark harness, but results still depend on hardware, compiler settings, build type and workload.
+- performance claims require benchmarks against defined workloads; this repository includes a benchmark harness, but results still depend on hardware, compiler settings, build type and workload.
 - the offline inspector performs structural sanity checks but is not a formal proof that every possible B+ tree invariant holds.
 - concurrency, locking and production-hardening expectations are different from mature database systems.
 
