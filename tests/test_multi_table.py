@@ -1,70 +1,124 @@
-import subprocess
+import glob
 import os
+import subprocess
 import sys
 
-def run_test():
-    base_dir = os.path.join(os.path.dirname(__file__), '..')
-    possible_paths = [
-        os.path.join(base_dir, 'build', 'Debug', 'tinydb.exe'),
-        os.path.join(base_dir, 'build', 'Release', 'tinydb.exe'),
-        os.path.join(base_dir, 'build', 'tinydb.exe'),
-        os.path.join(base_dir, 'build', 'tinydb')
+
+def find_executable(base_dir):
+    candidates = [
+        os.path.join(base_dir, "build", "Debug", "tinydb.exe"),
+        os.path.join(base_dir, "build", "Release", "tinydb.exe"),
+        os.path.join(base_dir, "build", "tinydb.exe"),
+        os.path.join(base_dir, "build", "tinydb"),
     ]
-    
-    executable_path = None
-    for path in possible_paths:
+    for path in candidates:
         if os.path.exists(path):
-            executable_path = path
-            break
-            
-    if not executable_path:
-        print("Could not find the tinydb executable.")
-        sys.exit(1)
-        
-    db_file = os.path.join(os.path.dirname(__file__), 'test_multi_tbl.db')
-    if os.path.exists(db_file):
-        try:
-            os.remove(db_file)
-        except Exception:
-            pass
+            return path
+    raise AssertionError("Could not find the tinydb executable")
 
-    commands = (
-        "create table posts (id INT, title VARCHAR, user_id INT);\n"
-        "create table orders (id INT, item VARCHAR, price INT);\n"
-        ".tables\n"
-        ".exit\n"
-    )
-    
-    process = subprocess.Popen(
-        [executable_path, db_file],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+
+def run_session(executable, db_file, commands):
+    result = subprocess.run(
+        [executable, db_file],
+        input="".join(command + "\n" for command in commands),
+        capture_output=True,
         text=True,
-        encoding='utf-8',
-        errors='ignore'
+        encoding="utf-8",
+        errors="ignore",
+        timeout=90,
     )
-    
-    stdout, stderr = process.communicate(input=commands)
-    
-    if process.returncode != 0:
-        print(f"FAIL: Multi-table test failed with return code {process.returncode}")
-        print("STDOUT:", stdout)
-        print("STDERR:", stderr)
-        sys.exit(1)
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
+    return result.stdout
 
-    if "users" not in stdout or "posts" not in stdout or "orders" not in stdout:
-        print("FAIL: Expected tables users, posts, orders in .tables output.")
-        print("STDOUT:", stdout)
-        sys.exit(1)
 
-    print("PASS: Dynamic Multi-Table Schema & System Catalog verified successfully!")
-
-    if os.path.exists(db_file):
+def cleanup(db_file):
+    for path in glob.glob(db_file + "*"):
         try:
-            os.remove(db_file)
-        except Exception:
+            os.remove(path)
+        except OSError:
             pass
+
+
+def main():
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    executable = find_executable(repo_root)
+    db_file = os.path.join(os.path.dirname(__file__), "test_multi_tbl.db")
+    cleanup(db_file)
+
+    try:
+        first = run_session(
+            executable,
+            db_file,
+            [
+                "CREATE TABLE archive (id INT, username VARCHAR, email VARCHAR);",
+                "CREATE TABLE posts (id INT, title VARCHAR, user_id INT);",
+                "INSERT INTO users VALUES (1, 'main-user', 'main@example.com');",
+                "INSERT INTO archive VALUES (1, 'archive-one', 'archive1@example.com');",
+                "INSERT INTO archive VALUES (2, 'archive-two', 'archive2@example.com');",
+                "UPDATE archive SET username = 'archive-two-updated' WHERE id = 2;",
+                "DELETE FROM archive WHERE id = 1;",
+                ".tables",
+                ".exit",
+            ],
+        )
+
+        assert "users" in first, first
+        assert "archive" in first, first
+        assert "posts" in first, first
+        assert "Duplicate key" not in first, first
+        assert "table or view not found" not in first, first
+
+        second = run_session(
+            executable,
+            db_file,
+            [
+                ".tables",
+                "SELECT * FROM users WHERE id = 1;",
+                "SELECT * FROM archive WHERE id = 2;",
+                "DELETE FROM archive;",
+                ".exit",
+            ],
+        )
+
+        assert "archive" in second and "posts" in second, second
+        assert "(1, main-user, main@example.com)" in second, second
+        assert "(2, archive-two-updated, archive2@example.com)" in second, second
+
+        third = run_session(
+            executable,
+            db_file,
+            [
+                "SELECT * FROM users WHERE id = 1;",
+                "SELECT * FROM archive;",
+                ".tables",
+                ".exit",
+            ],
+        )
+
+        assert "(1, main-user, main@example.com)" in third, third
+        assert "archive-two-updated" not in third, third
+        assert "archive" in third and "posts" in third, third
+
+        incompatible = run_session(
+            executable,
+            db_file,
+            [
+                "INSERT INTO posts VALUES (9, 'not-a-row-layout', 'ignored');",
+                "SELECT * FROM users WHERE id = 9;",
+                ".exit",
+            ],
+        )
+        assert "not compatible with the current fixed Row storage layout" in incompatible, incompatible
+        assert "(9," not in incompatible, incompatible
+
+        print("PASS: persistent independent multi-table B+ tree roots verified")
+    finally:
+        cleanup(db_file)
+
 
 if __name__ == "__main__":
-    run_test()
+    try:
+        main()
+    except AssertionError as exc:
+        print("FAIL:", exc)
+        sys.exit(1)
