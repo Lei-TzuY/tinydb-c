@@ -28,3 +28,6 @@ target_link_libraries(tinydb PRIVATE tinydb_core)
 
 add_executable(tinydb_bench bench/benchmark.c)
 target_link_libraries(tinydb_bench PRIVATE tinydb_core)
+
+add_executable(tinydb_pager_growth_probe tests/pager_growth_probe.c)
+target_link_libraries(tinydb_pager_growth_probe PRIVATE tinydb_core)
