@@ -119,6 +119,39 @@ def main():
         assert "not compatible with the current fixed Row storage layout" in incompatible, incompatible
         assert "(9," not in incompatible, incompatible
 
+        safety = run_session(
+            executable,
+            db_file,
+            [
+                "VACUUM;",
+                "ALTER TABLE archive ADD COLUMN extra VARCHAR;",
+                "SELECT * FROM archive UNION SELECT * FROM users;",
+                "SELECT * FROM missing_table;",
+                "INSERT INTO archive VALUES (99, 'still-safe', 'safe@example.com');",
+                "SELECT * FROM archive WHERE id = 99;",
+                ".exit",
+            ],
+        )
+        assert "VACUUM/VACUUM INTO is disabled for multi-table databases" in safety, safety
+        assert "ALTER TABLE ADD COLUMN is disabled for multi-table fixed-Row storage" in safety, safety
+        assert "query requires a cross-table/index path that is not routed safely yet" in safety, safety
+        assert "table or view not found" in safety, safety
+        assert "(99, still-safe, safe@example.com)" in safety, safety
+
+        final_reopen = run_session(
+            executable,
+            db_file,
+            [
+                "SELECT * FROM users WHERE id = 1;",
+                "SELECT * FROM archive WHERE id = 99;",
+                ".tables",
+                ".exit",
+            ],
+        )
+        assert "(1, main-user, main@example.com)" in final_reopen, final_reopen
+        assert "(99, still-safe, safe@example.com)" in final_reopen, final_reopen
+        assert "archive" in final_reopen and "posts" in final_reopen, final_reopen
+
         print("PASS: persistent independent multi-table B+ tree roots verified")
     finally:
         cleanup(db_file)
