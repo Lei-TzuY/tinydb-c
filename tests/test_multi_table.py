@@ -46,21 +46,26 @@ def main():
     cleanup(db_file)
 
     try:
-        first = run_session(
-            executable,
-            db_file,
+        archive_inserts = [
+            "INSERT INTO archive VALUES ({0}, 'archive-{0}', 'archive{0}@example.com');".format(i)
+            for i in range(1, 21)
+        ]
+        first_commands = [
+            "CREATE TABLE archive (id INT, username VARCHAR, email VARCHAR);",
+            "CREATE TABLE posts (id INT, title VARCHAR, user_id INT);",
+            "INSERT INTO users VALUES (1, 'main-user', 'main@example.com');",
+        ]
+        first_commands.extend(archive_inserts)
+        first_commands.extend(
             [
-                "CREATE TABLE archive (id INT, username VARCHAR, email VARCHAR);",
-                "CREATE TABLE posts (id INT, title VARCHAR, user_id INT);",
-                "INSERT INTO users VALUES (1, 'main-user', 'main@example.com');",
-                "INSERT INTO archive VALUES (1, 'archive-one', 'archive1@example.com');",
-                "INSERT INTO archive VALUES (2, 'archive-two', 'archive2@example.com');",
-                "UPDATE archive SET username = 'archive-two-updated' WHERE id = 2;",
+                "UPDATE archive SET username = 'archive-twenty-updated' WHERE id = 20;",
                 "DELETE FROM archive WHERE id = 1;",
                 ".tables",
                 ".exit",
-            ],
+            ]
         )
+
+        first = run_session(executable, db_file, first_commands)
 
         assert "users" in first, first
         assert "archive" in first, first
@@ -74,7 +79,8 @@ def main():
             [
                 ".tables",
                 "SELECT * FROM users WHERE id = 1;",
-                "SELECT * FROM archive WHERE id = 2;",
+                "SELECT COUNT(*) FROM archive;",
+                "SELECT * FROM archive WHERE id = 20;",
                 "DELETE FROM archive;",
                 ".exit",
             ],
@@ -82,22 +88,24 @@ def main():
 
         assert "archive" in second and "posts" in second, second
         assert "(1, main-user, main@example.com)" in second, second
-        assert "(2, archive-two-updated, archive2@example.com)" in second, second
+        assert "19" in second, second
+        assert "(20, archive-twenty-updated, archive20@example.com)" in second, second
 
         third = run_session(
             executable,
             db_file,
             [
                 "SELECT * FROM users WHERE id = 1;",
-                "SELECT * FROM archive;",
+                "SELECT COUNT(*) FROM archive;",
                 ".tables",
                 ".exit",
             ],
         )
 
         assert "(1, main-user, main@example.com)" in third, third
-        assert "archive-two-updated" not in third, third
+        assert "archive-twenty-updated" not in third, third
         assert "archive" in third and "posts" in third, third
+        assert "0" in third, third
 
         incompatible = run_session(
             executable,
