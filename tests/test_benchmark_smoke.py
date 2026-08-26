@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ def main():
     exe = benchmark_executable(repo_root)
     temp_dir = tempfile.mkdtemp(prefix="tinydb-bench-test-")
     db_path = os.path.join(temp_dir, "smoke.db")
+    json_db_path = os.path.join(temp_dir, "json.db")
 
     try:
         result = subprocess.run(
@@ -35,6 +37,25 @@ def main():
         assert "lookup_hits=500" in result.stdout, result.stdout
         assert "rows=200" in result.stdout, result.stdout
         assert "BENCHMARK_OK" in result.stdout, result.stdout
+
+        json_result = subprocess.run(
+            [exe, json_db_path, "50", "100", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert json_result.returncode == 0, json_result.stdout + "\n" + json_result.stderr
+        payload = json.loads(json_result.stdout.strip())
+        assert payload["rows"] == 50, payload
+        assert payload["lookups"] == 100, payload
+        assert payload["lookup_hits"] == 100, payload
+        assert payload["ok"] is True, payload
+        assert payload["page_capacity"] >= 100, payload
+        assert payload["pages"] >= 1, payload
+        assert payload["leaf_pages"] >= 1, payload
+        assert payload["cache_hits"] + payload["cache_misses"] >= 100, payload
+        assert payload["rows_per_sec"] >= 0.0, payload
+        assert payload["lookups_per_sec"] >= 0.0, payload
 
         # The benchmark intentionally refuses to overwrite an existing DB.
         second = subprocess.run(
