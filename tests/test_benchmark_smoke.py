@@ -36,6 +36,7 @@ def main():
         assert "inserted=200" in result.stdout, result.stdout
         assert "lookup_hits=500" in result.stdout, result.stdout
         assert "rows=200" in result.stdout, result.stdout
+        assert "metadata_capacity=" in result.stdout, result.stdout
         assert "BENCHMARK_OK" in result.stdout, result.stdout
 
         json_result = subprocess.run(
@@ -50,7 +51,10 @@ def main():
         assert payload["lookups"] == 100, payload
         assert payload["lookup_hits"] == 100, payload
         assert payload["ok"] is True, payload
-        assert payload["page_capacity"] >= 100, payload
+        assert payload["dynamic_page_table"] is True, payload
+        assert payload["initial_metadata_capacity"] == 64, payload
+        assert payload["metadata_capacity"] >= payload["pages"], payload
+        assert payload["legacy_page_ceiling"] == 4096, payload
         assert payload["pages"] >= 1, payload
         assert payload["leaf_pages"] >= 1, payload
         assert payload["cache_hits"] + payload["cache_misses"] >= 100, payload
