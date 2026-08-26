@@ -1,5 +1,6 @@
 #include "common.h"
 #include "compiler.h"
+#include "multitable.h"
 #include "profile.h"
 #include "vm.h"
 #include "table.h"
@@ -23,20 +24,19 @@ InputBuffer* new_input_buffer() {
 void print_prompt() { printf("db > "); }
 
 void read_input(InputBuffer* input_buffer) {
-    size_t capacity = 1024; // Simple fixed capacity for now
+    size_t capacity = 1024;
     if (input_buffer->buffer == NULL) {
         input_buffer->buffer = (char*)malloc(capacity);
         input_buffer->buffer_length = capacity;
     }
-    
+
     if (fgets(input_buffer->buffer, (int)input_buffer->buffer_length, stdin) == NULL) {
         printf("Error reading input\n");
         exit(EXIT_FAILURE);
     }
-    
+
     input_buffer->input_length = strlen(input_buffer->buffer);
-    
-    // Strip trailing newline
+
     if (input_buffer->input_length > 0 && input_buffer->buffer[input_buffer->input_length - 1] == '\n') {
         input_buffer->buffer[input_buffer->input_length - 1] = '\0';
         input_buffer->input_length--;
@@ -75,6 +75,7 @@ static bool try_execute_explain_analyze(const char* input, Table* table) {
     Statement statement;
     PrepareResult prepare_result;
     QueryProfile profile;
+    MultiTableRouteScope route_scope;
 
     if (!consume_ci_word(&query, "explain") ||
         !consume_ci_word(&query, "analyze")) {
@@ -88,7 +89,18 @@ static bool try_execute_explain_analyze(const char* input, Table* table) {
         return true;
     }
 
-    if (!query_profile_execute(&statement, table, &profile)) {
+    MultiTableRouteResult route_result = multitable_begin_statement_scope(
+        table, &statement, query, &route_scope);
+    if (route_result != MULTITABLE_ROUTE_OK &&
+        route_result != MULTITABLE_ROUTE_NOT_APPLICABLE) {
+        printf("Error: %s.\n", multitable_route_error(route_result));
+        return true;
+    }
+
+    bool profiled = query_profile_execute(&statement, table, &profile);
+    multitable_end_statement_scope(table, &route_scope);
+
+    if (!profiled) {
         printf("EXPLAIN ANALYZE could not profile this statement.\n");
         return true;
     }
@@ -217,15 +229,18 @@ int main(int argc, char* argv[]) {
         printf("Must supply a database filename.\n");
         exit(EXIT_FAILURE);
     }
-    
+
     char* filename = argv[1];
     Table* table = db_open(filename);
+    if (!multitable_catalog_load(table, filename)) {
+        printf("Warning: schema catalog could not be loaded; using in-memory catalog state.\n");
+    }
     InputBuffer* input_buffer = new_input_buffer();
-    
+
     while (true) {
         print_prompt();
         read_input(input_buffer);
-        
+
         if (input_buffer->input_length == 0) continue;
 
         if (input_buffer->buffer[0] == '.') {
@@ -254,7 +269,46 @@ int main(int argc, char* argv[]) {
                 continue;
         }
 
-        switch (execute_statement(&statement, table)) {
+        if (multitable_is_schema_ddl(statement.type) && table->in_transaction) {
+            printf("Error: Schema DDL is not allowed inside a transaction.\n");
+            continue;
+        }
+
+        if (statement.type == STATEMENT_CREATE_INDEX &&
+            !multitable_index_target_supported(table, statement.create_index.table_name)) {
+            printf("Error: Secondary indexes on non-primary table roots are not routed safely yet.\n");
+            continue;
+        }
+
+        MultiTableRouteScope route_scope;
+        MultiTableRouteResult route_result = multitable_begin_statement_scope(
+            table, &statement, input_buffer->buffer, &route_scope);
+        if (route_result != MULTITABLE_ROUTE_OK &&
+            route_result != MULTITABLE_ROUTE_NOT_APPLICABLE) {
+            printf("Error: %s.\n", multitable_route_error(route_result));
+            continue;
+        }
+
+        ExecuteResult execute_result;
+        if (statement.type == STATEMENT_DELETE &&
+            statement.delete_all &&
+            route_scope.active &&
+            table->catalog.num_tables > 1) {
+            execute_result = multitable_execute_delete_all(&statement, table, &route_scope);
+        } else {
+            execute_result = execute_statement(&statement, table);
+        }
+
+        multitable_end_statement_scope(table, &route_scope);
+
+        if (execute_result == EXECUTE_SUCCESS && multitable_is_schema_ddl(statement.type)) {
+            db_checkpoint(table);
+            if (!multitable_catalog_save(table, filename)) {
+                printf("Error: Schema catalog could not be persisted.\n");
+            }
+        }
+
+        switch (execute_result) {
             case (EXECUTE_SUCCESS):
                 printf("Executed.\n");
                 break;
