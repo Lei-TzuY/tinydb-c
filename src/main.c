@@ -3,6 +3,9 @@
 #include "vm.h"
 #include "table.h"
 
+#include <ctype.h>
+#include <time.h>
+
 typedef struct {
     char* buffer;
     size_t buffer_length;
@@ -49,6 +52,84 @@ typedef enum {
     META_COMMAND_SUCCESS,
     META_COMMAND_UNRECOGNIZED_COMMAND
 } MetaCommandResult;
+
+static bool consume_ci_word(const char** input, const char* word) {
+    const char* p = *input;
+    const char* w = word;
+
+    while (isspace((unsigned char)*p)) p++;
+    while (*w != '\0' &&
+           tolower((unsigned char)*p) == tolower((unsigned char)*w)) {
+        p++;
+        w++;
+    }
+    if (*w != '\0') return false;
+    if (isalnum((unsigned char)*p) || *p == '_') return false;
+
+    *input = p;
+    return true;
+}
+
+static bool try_execute_explain_analyze(const char* input, Table* table) {
+    const char* query = input;
+    Statement statement;
+    Statement plan_statement;
+    PrepareResult prepare_result;
+    ExecuteResult execute_result;
+    uint32_t hits_before;
+    uint32_t misses_before;
+    uint32_t evictions_before;
+    clock_t started;
+    clock_t finished;
+    double elapsed_ms;
+
+    if (!consume_ci_word(&query, "explain") ||
+        !consume_ci_word(&query, "analyze")) {
+        return false;
+    }
+
+    while (isspace((unsigned char)*query)) query++;
+    prepare_result = prepare_statement(query, &statement);
+    if (prepare_result != PREPARE_SUCCESS || statement.type != STATEMENT_SELECT) {
+        printf("Syntax error. EXPLAIN ANALYZE currently requires a SELECT statement.\n");
+        return true;
+    }
+
+    plan_statement = statement;
+    plan_statement.explain = true;
+    printf("QUERY PLAN\n");
+    execute_result = execute_statement(&plan_statement, table);
+    if (execute_result != EXECUTE_SUCCESS) {
+        printf("EXPLAIN ANALYZE failed while producing the plan.\n");
+        return true;
+    }
+
+    hits_before = table->pager->cache_hits;
+    misses_before = table->pager->cache_misses;
+    evictions_before = table->pager->evictions;
+
+    printf("ACTUAL RESULT\n");
+    started = clock();
+    execute_result = execute_statement(&statement, table);
+    finished = clock();
+
+    elapsed_ms = 1000.0 * (double)(finished - started) / (double)CLOCKS_PER_SEC;
+    printf("ANALYZE: execution_time_ms=%.3f cache_hits=%u cache_misses=%u evictions=%u page_accesses=%u\n",
+           elapsed_ms,
+           table->pager->cache_hits - hits_before,
+           table->pager->cache_misses - misses_before,
+           table->pager->evictions - evictions_before,
+           (table->pager->cache_hits - hits_before) +
+               (table->pager->cache_misses - misses_before));
+
+    if (execute_result == EXECUTE_SUCCESS) {
+        printf("Executed.\n");
+    } else {
+        printf("EXPLAIN ANALYZE query execution failed with code %d.\n",
+               (int)execute_result);
+    }
+    return true;
+}
 
 MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table* table) {
     if (strcmp(input_buffer->buffer, ".exit") == 0) {
@@ -141,6 +222,7 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table* table) {
         printf("  PRAGMA index_list; / PRAGMA index_list(users);\n");
         printf("  PRAGMA user_version; / PRAGMA user_version = N;\n");
         printf("  EXPLAIN SELECT ...;\n");
+        printf("  EXPLAIN ANALYZE SELECT ...;\n");
         return META_COMMAND_SUCCESS;
     } else {
         return META_COMMAND_UNRECOGNIZED_COMMAND;
@@ -171,6 +253,10 @@ int main(int argc, char* argv[]) {
                     printf("Unrecognized command '%s'\n", input_buffer->buffer);
                     continue;
             }
+        }
+
+        if (try_execute_explain_analyze(input_buffer->buffer, table)) {
+            continue;
         }
 
         Statement statement;
