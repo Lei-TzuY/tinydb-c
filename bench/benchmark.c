@@ -131,8 +131,8 @@ int main(int argc, char** argv) {
 
     if (!json_output) {
         printf("TinyDB benchmark\n");
-        printf("database=%s rows=%u lookups=%u page_capacity=%u\n",
-               database, rows, lookups, (unsigned)TABLE_MAX_PAGES);
+        printf("database=%s rows=%u lookups=%u initial_metadata_capacity=%u dynamic_page_table=yes\n",
+               database, rows, lookups, (unsigned)PAGER_INITIAL_CAPACITY);
     }
 
     Table* table = db_open(database);
@@ -162,20 +162,24 @@ int main(int argc, char** argv) {
     uint32_t lookup_cache_hits = table->pager->cache_hits - hits_before;
     uint32_t lookup_cache_misses = table->pager->cache_misses - misses_before;
     uint32_t lookup_evictions = table->pager->evictions - evictions_before;
+    uint32_t metadata_capacity = pager_metadata_capacity(table->pager);
 
     int status = (hits == lookups && stats.total_rows == rows) ? 0 : 1;
 
     if (json_output) {
         printf("{\"rows\":%u,\"lookups\":%u,\"lookup_hits\":%u,"
-               "\"page_capacity\":%u,\"insert_seconds\":%.6f,"
-               "\"rows_per_sec\":%.2f,\"lookup_seconds\":%.6f,"
-               "\"lookups_per_sec\":%.2f,\"pages\":%u,"
-               "\"leaf_pages\":%u,\"internal_pages\":%u,"
+               "\"dynamic_page_table\":true,\"initial_metadata_capacity\":%u,"
+               "\"metadata_capacity\":%u,\"legacy_page_ceiling\":%u,"
+               "\"insert_seconds\":%.6f,\"rows_per_sec\":%.2f,"
+               "\"lookup_seconds\":%.6f,\"lookups_per_sec\":%.2f,"
+               "\"pages\":%u,\"leaf_pages\":%u,\"internal_pages\":%u,"
                "\"cache_hits\":%u,\"cache_misses\":%u,"
                "\"evictions\":%u,\"ok\":%s}\n",
                rows,
                lookups,
                hits,
+               (unsigned)PAGER_INITIAL_CAPACITY,
+               metadata_capacity,
                (unsigned)TABLE_MAX_PAGES,
                insert_seconds,
                insert_rate,
@@ -193,8 +197,12 @@ int main(int argc, char** argv) {
                rows, insert_seconds, insert_rate);
         printf("lookup: requested=%u lookup_hits=%u seconds=%.6f lookups_per_sec=%.2f\n",
                lookups, hits, lookup_seconds, lookup_rate);
-        printf("storage: pages=%u leaf_pages=%u internal_pages=%u rows=%u\n",
-               stats.total_pages, stats.leaf_pages, stats.internal_pages, stats.total_rows);
+        printf("storage: pages=%u leaf_pages=%u internal_pages=%u rows=%u metadata_capacity=%u\n",
+               stats.total_pages,
+               stats.leaf_pages,
+               stats.internal_pages,
+               stats.total_rows,
+               metadata_capacity);
         printf("cache_lookup_phase: hits=%u misses=%u evictions=%u\n",
                lookup_cache_hits,
                lookup_cache_misses,
