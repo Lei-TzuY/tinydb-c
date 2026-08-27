@@ -19,6 +19,7 @@ set(TINYDB_CORE_SOURCES
     src/engine.c
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
+    src/generic_index_anchor_sql.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
@@ -47,10 +48,11 @@ set(TINYDB_CORE_SOURCES
 )
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
-# layer owns typed comparisons. Equality/range indexes and flat AND/OR handling
-# remain unchanged for ungrouped statements. The outer parenthesized layer only
-# intercepts WHERE expressions that actually contain boolean grouping, so the
-# established PK/index fast paths stay available to every ungrouped query.
+# layer owns typed comparisons. Equality/range indexes remain the proven
+# single-term paths. The compound-anchor layer sits immediately above them and
+# can narrow a flat AND expression with one indexed term before evaluating the
+# residual predicates. OR and parenthesized boolean handling stay outside that
+# layer and continue to fail closed to their established scan evaluators.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -106,9 +108,14 @@ set_source_files_properties(
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range_index_base"
 )
 set_source_files_properties(
+    src/generic_index_anchor_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_anchor_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_anchor_base"
+)
+set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_parenthesized_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_parenthesized_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_range_index_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_parenthesized_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_parenthesized_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_anchor_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_anchor_base"
 )
 set_source_files_properties(
     src/generic_or_mutation_sql.c
