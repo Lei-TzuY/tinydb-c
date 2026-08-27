@@ -1,3 +1,4 @@
+#include "analyze_sql.h"
 #include "diagnostics.h"
 #include "engine.h"
 
@@ -35,6 +36,45 @@ static void initialize_error_result(TinyDBSqlResult* result,
     result->statement_type_valid = true;
     result->executed = false;
     snprintf(result->message, sizeof(result->message), "%s", message);
+}
+
+static TinyDBSqlStatus map_analyze_result(
+    TinyDBAnalyzeStatus analyze_status,
+    const TinyDBAnalyzeResult* analyze_result,
+    TinyDBSqlResult* result) {
+    TinyDBSqlResult local_result;
+    TinyDBSqlResult* output = result != NULL ? result : &local_result;
+    memset(output, 0, sizeof(*output));
+    output->prepare_result = PREPARE_SUCCESS;
+    output->execute_result = EXECUTE_SUCCESS;
+    output->route_result = MULTITABLE_ROUTE_NOT_APPLICABLE;
+    output->statement_type_valid = false;
+    output->executed = analyze_status == TINYDB_ANALYZE_SUCCESS;
+    snprintf(output->message,
+             sizeof(output->message),
+             "%s",
+             analyze_result->message);
+
+    switch (analyze_status) {
+        case TINYDB_ANALYZE_SUCCESS:
+            output->status = TINYDB_SQL_SUCCESS;
+            break;
+        case TINYDB_ANALYZE_SYNTAX_ERROR:
+            output->status = TINYDB_SQL_SYNTAX_ERROR;
+            output->prepare_result = PREPARE_SYNTAX_ERROR;
+            break;
+        case TINYDB_ANALYZE_POLICY_ERROR:
+            output->status = TINYDB_SQL_POLICY_ERROR;
+            break;
+        case TINYDB_ANALYZE_EXECUTE_ERROR:
+            output->status = TINYDB_SQL_EXECUTE_ERROR;
+            break;
+        case TINYDB_ANALYZE_NOT_APPLICABLE:
+        default:
+            output->status = TINYDB_SQL_UNRECOGNIZED_STATEMENT;
+            break;
+    }
+    return output->status;
 }
 
 static TinyDBSqlStatus execute_integrity_check(TinyDB* database,
@@ -138,6 +178,13 @@ static TinyDBSqlStatus execute_with_prepared_routing(
     uint32_t depth) {
     if (database == NULL || database->table == NULL || sql == NULL) {
         return tinydb_execute_sql_prepared_delegate_base(database, sql, result);
+    }
+
+    TinyDBAnalyzeResult analyze_result;
+    TinyDBAnalyzeStatus analyze_status = tinydb_analyze_try_execute(
+        database->table, sql, &analyze_result);
+    if (analyze_status != TINYDB_ANALYZE_NOT_APPLICABLE) {
+        return map_analyze_result(analyze_status, &analyze_result, result);
     }
 
     Statement statement;
