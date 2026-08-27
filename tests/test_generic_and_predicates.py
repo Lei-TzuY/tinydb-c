@@ -138,7 +138,7 @@ def run_test():
     require(second, "db > 3\nExecuted.")
     require_count(second, "db > 50\nExecuted.", 2)
     require(second, "db > 2\nExecuted.")
-    require(second, "db > 20\n21\n22\n23\nExecuted.")
+    require(second, "db > 5\n20\n21\n22\nExecuted.")
     require_count(second, "Syntax error. Could not parse statement.", 2)
     require(second, "ok")
 
@@ -160,7 +160,7 @@ def run_test():
     require(third, "db > 50\nExecuted.")
     require(third, "db > 2\nExecuted.")
     require(third, "db > 13\nExecuted.")
-    require(third, "db > 10\nExecuted.")
+    require(third, "db > 11\nExecuted.")
     require(third, "ok")
 
     cleanup(db_file)
