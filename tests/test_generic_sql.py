@@ -69,32 +69,43 @@ def run_test():
             "INSERT INTO products VALUES (3, 'O''Reilly cable', 399);",
             "INSERT INTO orders VALUES (10, 1, 2);",
             "INSERT INTO orders VALUES (11, 2, 5);",
+            "UPDATE products SET name = 'keyboard pro', price = 2599 WHERE id = 1;",
+            "DELETE FROM orders WHERE id = 10;",
             "SELECT * FROM products WHERE id = 1;",
             "SELECT * FROM orders WHERE id = 11;",
             "SELECT COUNT(*) FROM products;",
+            "SELECT COUNT(*) FROM orders;",
             "SELECT * FROM products LIMIT 1 OFFSET 1;",
             "BEGIN;",
             "INSERT INTO products VALUES (99, 'ghost', 9999);",
+            "UPDATE products SET price = 1 WHERE id = 2;",
+            "DELETE FROM orders WHERE id = 11;",
             "ROLLBACK;",
             "SELECT COUNT(*) FROM products WHERE id = 99;",
+            "SELECT * FROM products WHERE id = 2;",
+            "SELECT * FROM orders WHERE id = 11;",
             "BEGIN;",
             "INSERT INTO products VALUES (100, 'durable', 7777);",
+            "UPDATE products SET price = 7778 WHERE id = 100;",
             "COMMIT;",
-            "SELECT * FROM products WHERE price = 2499;",
+            "UPDATE products SET id = 55 WHERE id = 1;",
+            "SELECT * FROM products WHERE price = 2599;",
             "PRAGMA integrity_check;",
             ".exit",
         ],
     )
 
-    require(first, "(1, keyboard, 2499)")
+    require(first, "(1, keyboard pro, 2599)")
     require(first, "(11, 2, 5)")
     require(first, "(2, mouse, 1299)")
     require(first, "Syntax error. Could not parse statement.")
     require(first, "ok")
 
-    # COUNT(*) is printed before the REPL's Executed line. We expect 3 before
-    # the rollback experiment, then 0 for the rolled-back id=99 lookup.
+    # COUNT(*) is printed before the REPL's Executed line. The first generic
+    # counts are 3 products and 1 surviving order; id=99 must be 0 after the
+    # explicit transaction rolls back INSERT + UPDATE + DELETE together.
     require(first, "db > 3\nExecuted.")
+    require(first, "db > 1\nExecuted.")
     require(first, "db > 0\nExecuted.")
 
     second = run_session(
@@ -102,20 +113,25 @@ def run_test():
         db_file,
         [
             "PRAGMA table_info(products);",
+            "SELECT * FROM products WHERE id = 1;",
             "SELECT * FROM products WHERE id = 3;",
             "SELECT * FROM products WHERE id = 99;",
             "SELECT * FROM products WHERE id = 100;",
             "SELECT COUNT(*) FROM products;",
+            "SELECT COUNT(*) FROM orders;",
+            "DELETE FROM orders;",
             "SELECT COUNT(*) FROM orders;",
             "PRAGMA integrity_check;",
             ".exit",
         ],
     )
 
+    require(second, "(1, keyboard pro, 2599)")
     require(second, "(3, O'Reilly cable, 399)")
-    require(second, "(100, durable, 7777)")
+    require(second, "(100, durable, 7778)")
     require(second, "db > 4\nExecuted.")
-    require(second, "db > 2\nExecuted.")
+    require(second, "db > 1\nExecuted.")
+    require(second, "db > 0\nExecuted.")
     require(second, "ok")
     if "(99, ghost, 9999)" in second:
         print("FAIL: rolled-back generic row became visible after reopen")
@@ -123,8 +139,22 @@ def run_test():
         cleanup(db_file)
         sys.exit(1)
 
+    third = run_session(
+        executable,
+        db_file,
+        [
+            "SELECT COUNT(*) FROM orders;",
+            "SELECT * FROM products WHERE id = 100;",
+            "PRAGMA integrity_check;",
+            ".exit",
+        ],
+    )
+    require(third, "db > 0\nExecuted.")
+    require(third, "(100, durable, 7778)")
+    require(third, "ok")
+
     cleanup(db_file)
-    print("PASS: generic schema SQL INSERT/SELECT and transaction persistence verified.")
+    print("PASS: generic schema SQL INSERT/SELECT/UPDATE/DELETE and transaction persistence verified.")
 
 
 if __name__ == "__main__":
