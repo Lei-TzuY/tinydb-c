@@ -57,6 +57,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_range_select_sql.c
     src/generic_sql.c
     src/join_plan.c
+    src/leaf_format.c
     src/leaf_value.c
     src/multi_vacuum_into.c
     src/multitable.c
