@@ -72,11 +72,17 @@ def main():
                 "EXECUTE archive_lookup USING 2;",
                 "PREPARE product_floor FROM SELECT name FROM products WHERE price >= ?;",
                 "EXECUTE product_floor USING 20;",
+                "PREPARE product_plan FROM EXPLAIN SELECT name FROM products WHERE price >= ?;",
+                "EXECUTE product_plan USING 20;",
                 "PREPARE archive_delete FROM DELETE FROM archive WHERE id = ?;",
                 "BEGIN;",
                 "EXECUTE archive_delete USING 1;",
                 "ROLLBACK;",
                 "EXECUTE archive_lookup USING 1;",
+                "PREPARE blocked_vacuum FROM VACUUM;",
+                "EXECUTE blocked_vacuum;",
+                "PREPARE blocked_create FROM CREATE TABLE too_wide (id INT, a VARCHAR, b VARCHAR);",
+                "EXECUTE blocked_create;",
                 "PREPARE recur FROM EXECUTE recur USING ?;",
                 "EXECUTE recur USING 1;",
                 "PRAGMA integrity_check;",
@@ -89,8 +95,15 @@ def main():
         require(output, "Statement 'product_floor' prepared.")
         require(output, "mid")
         require(output, "high")
+        require(output, "PLAN: GENERIC SECONDARY INDEX RANGE SCAN")
+        require(output, "INDEX: idx_products_price")
         require(output, "Statement 'archive_delete' prepared.")
         require(output, "(1, archive1, a1@test.com)")
+        require(
+            output,
+            "VACUUM/VACUUM INTO is disabled for multi-table databases",
+        )
+        require(output, "CREATE TABLE row layout exceeds the fixed generic record slot")
         require(output, "prepared statement nesting exceeds the safe execution limit")
         require(output, "ok")
 
@@ -99,8 +112,9 @@ def main():
 
         print(
             "PASS: prepared SQL is rebound through the public engine pipeline, routes to "
-            "non-zero fixed-row and generic roots, participates in transaction rollback, "
-            "reuses generic indexed execution, and rejects recursive EXECUTE chains safely."
+            "non-zero fixed-row and generic roots, reuses generic indexed EXPLAIN/execution, "
+            "participates in transaction rollback, reapplies DDL/VACUUM policy guards, and "
+            "rejects recursive EXECUTE chains safely."
         )
     finally:
         cleanup(db_file)
