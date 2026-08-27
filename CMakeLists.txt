@@ -17,6 +17,7 @@ set(TINYDB_CORE_SOURCES
     src/compiler.c
     src/diagnostics.c
     src/engine.c
+    src/generic_index_sql.c
     src/generic_predicate.c
     src/generic_predicate_sql.c
     src/generic_range_mutation_sql.c
@@ -33,10 +34,8 @@ set(TINYDB_CORE_SOURCES
 )
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
-# front-end owns generic SELECT/UPDATE/DELETE statements that contain WHERE,
-# including compound AND predicates. INSERT, SELECT without WHERE, DELETE ALL,
-# legacy users routing, and older fail-closed behavior continue through the
-# established executor chain.
+# layer owns generic WHERE semantics. The outer index layer only intercepts
+# non-users equality SELECTs that have a schema-aware single-column index.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -51,6 +50,16 @@ set_source_files_properties(
     src/generic_range_select_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_predicate_base"
+)
+set_source_files_properties(
+    src/generic_predicate_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_select"
+)
+set_source_files_properties(
+    src/generic_range_plan_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
