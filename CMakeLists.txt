@@ -4,7 +4,6 @@ project(TinyDB C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
-# Enable all warnings
 if(MSVC)
     add_compile_options(/W4 /WX /utf-8)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
@@ -28,6 +27,8 @@ set(TINYDB_CORE_SOURCES
     src/generic_error_status.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
+    src/generic_index_correlation.c
+    src/generic_index_correlation_sql.c
     src/generic_index_stats.c
     src/generic_index_stats_refresh.c
     src/generic_index_estimate_policy.c
@@ -71,23 +72,12 @@ set(TINYDB_CORE_SOURCES
     src/vm.c
 )
 
-# Keep the historical parser behind a facade that normalizes VARCHAR(n) into
-# syntax the legacy compiler understands, then restores the declared width on
-# parsed CREATE TABLE / ALTER TABLE statements for physical layout policy.
 set_source_files_properties(
     src/compiler.c
     PROPERTIES COMPILE_DEFINITIONS
     "prepare_statement=prepare_statement_legacy_base"
 )
 
-# Keep the historical engine body private behind facade wrappers. CREATE TABLE
-# fixed-slot validation stays inside create_table_policy.c. Multi-table
-# VACUUM INTO is followed by the sized-ALTER route, then prepared_route.c owns
-# the public facade so bound ALTER statements re-enter the same safety policy.
-# ANALYZE is intercepted at that outer facade before legacy parsing so
-# maintenance statistics never require a VM/compiler statement opcode.
-# The public tinydb_open() lives in engine_open_guard.c and fails closed when a
-# persisted schema catalog cannot be loaded safely.
 set_source_files_properties(
     src/engine.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -104,14 +94,6 @@ set_source_files_properties(
     "tinydb_execute_sql=tinydb_execute_sql_alter_delegate_base"
 )
 
-# Keep historical generic layers as fallbacks while sharing ordered-index
-# snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Exact
-# estimates remain available as a private fallback. generic_index_stats.c owns
-# the persisted synopsis estimator, generic_index_stats_refresh.c exposes the
-# same persisted path to ANALYZE without paying the small-table exact-cost
-# policy, while generic_index_estimate_policy.c keeps ordinary small-table
-# planning on exact costing and uses synopsis estimates only once loading a
-# full typed snapshot is materially more expensive.
 set_source_files_properties(
     src/generic_index_candidates.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -123,13 +105,6 @@ set_source_files_properties(
     "tinydb_generic_index_estimate_candidates=tinydb_generic_index_estimate_candidates_stats_base;tinydb_generic_index_estimate_conjunctive_candidates=tinydb_generic_index_estimate_conjunctive_candidates_stats_base"
 )
 
-# Generic SELECT routing is deliberately ordered as follows:
-#   parenthesized -> OR mutation wrapper -> LIKE router -> costed OR index union
-#   -> OR scan -> flat AND intersection/anchor cost planner
-#   -> costed single range/equality -> residual.
-# LIKE therefore never enters an ordered index layer. Flat OR uses index union
-# only when every disjunct has a proven PK or ordered secondary-index anchor and
-# the estimated union work is not more expensive than the schema-aware scan.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -189,6 +164,11 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_index_intersection_sql.c
     PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_intersection_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_intersection_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_intersection_base"
+)
+set_source_files_properties(
+    src/generic_index_correlation_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_anchor_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_anchor_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_anchor_index_base"
 )
 set_source_files_properties(
@@ -222,19 +202,12 @@ set_source_files_properties(
     "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_compound_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_compound_base"
 )
 
-# Generic record mutation APIs are wrapped so a durable index epoch is advanced
-# before indexed-table data changes. This makes equality/range snapshots fail
-# closed after commit, rollback, crash recovery, direct API mutation, or REPL mutation.
 set_source_files_properties(
     src/record.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base"
 )
 
-# Preserve historical schema-catalog I/O as a V1 read fallback while the V2
-# facade handles fixed little-endian encoding/checksums. The public load then
-# passes through schema_catalog_guard.c for case-insensitive object identity and
-# unique-root validation before the engine becomes available.
 set_source_files_properties(
     src/multitable.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -246,9 +219,6 @@ set_source_files_properties(
     "multitable_catalog_load=multitable_catalog_load_checksums_base"
 )
 
-# Keep historical CREATE TABLE/ALTER/index/drop implementations as delegates.
-# Sized facades patch only explicitly bounded VARCHAR layouts after the legacy
-# catalog mutators perform their duplicate/name/max-column policy checks.
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
