@@ -130,12 +130,14 @@ def main():
             [
                 "DROP INDEX idx_products_category;",
                 "EXPLAIN SELECT id FROM products WHERE price >= 10 AND category = 'hot';",
+                "EXPLAIN SELECT id FROM products WHERE price >= 10 AND price = 100;",
                 ".exit",
             ],
         )
         require(dropped, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
         require(dropped, "INDEX: idx_products_price")
         require(dropped, "ANCHOR: price >= 10")
+        require(dropped, "ANCHOR: price = 100")
         if "PLAN: GENERIC SECONDARY INDEX INTERSECTION" in dropped:
             raise AssertionError("intersection remained active with only one usable index\n" + dropped)
         if os.path.exists(category_range):
@@ -143,8 +145,8 @@ def main():
 
         print(
             "PASS: flat AND predicates intersect distinct secondary indexes, reuse typed "
-            "snapshots after reopen, rebuild both sources on epoch change, and fall back "
-            "to the remaining single anchor after DROP INDEX."
+            "snapshots after reopen, rebuild both sources on epoch change, fall back after "
+            "DROP INDEX, and retain equality-over-range preference on one remaining index."
         )
     finally:
         cleanup(db_file)
