@@ -1,5 +1,4 @@
 #include "diagnostics.h"
-#include "engine.h"
 #include "record.h"
 
 #include <time.h>
@@ -51,12 +50,6 @@ static uint32_t next_random(uint32_t* state) {
     return *state;
 }
 
-static bool execute_sql_ok(TinyDB* database, const char* sql) {
-    TinyDBSqlResult result;
-    TinyDBSqlStatus status = tinydb_execute_sql(database, sql, &result);
-    return status == TINYDB_SQL_SUCCESS && result.execute_result == EXECUTE_SUCCESS;
-}
-
 static TableSchema* find_schema(Table* table, const char* name) {
     for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
         if (strcmp(table->catalog.schemas[i].name, name) == 0) {
@@ -66,12 +59,31 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
-static int insert_rows(TinyDB* database,
+static int create_benchmark_schema(Table* table, TableSchema** schema) {
+    char column_names[3][32] = {"id", "bucket", "value"};
+    char column_types[3][16] = {"INT", "VARCHAR", "INT"};
+    if (!table_create_table(table,
+                            "bench_records",
+                            3u,
+                            column_names,
+                            column_types,
+                            false,
+                            NULL,
+                            NULL,
+                            NULL,
+                            false)) {
+        return 1;
+    }
+    *schema = find_schema(table, "bench_records");
+    return *schema == NULL ? 1 : 0;
+}
+
+static int insert_rows(Table* table,
                        TableSchema* schema,
                        uint32_t rows,
                        double* elapsed) {
-    Table* table = tinydb_table(database);
-    if (!execute_sql_ok(database, "BEGIN;")) return 1;
+    pager_begin_transaction(table->pager);
+    table->in_transaction = true;
 
     double started = monotonic_seconds();
     for (uint32_t id = 1; id <= rows; id++) {
@@ -98,12 +110,14 @@ static int insert_rows(TinyDB* database,
                     "generic insert failed at id=%u: %s\n",
                     id,
                     message);
-            (void)execute_sql_ok(database, "ROLLBACK;");
+            pager_rollback(table->pager);
+            table->in_transaction = false;
             return 1;
         }
     }
 
-    if (!execute_sql_ok(database, "COMMIT;")) return 1;
+    pager_commit(table->pager);
+    table->in_transaction = false;
     *elapsed = monotonic_seconds() - started;
     return 0;
 }
@@ -231,24 +245,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    TinyDB* tinydb = tinydb_open(database);
-    if (tinydb == NULL) {
-        fprintf(stderr, "unable to open generic benchmark database\n");
-        return 1;
-    }
-    if (!execute_sql_ok(
-            tinydb,
-            "CREATE TABLE bench_records (id INT, bucket VARCHAR, value INT);")) {
-        fprintf(stderr, "unable to create generic benchmark table\n");
-        tinydb_close(tinydb);
-        return 1;
-    }
-
-    Table* table = tinydb_table(tinydb);
-    TableSchema* schema = find_schema(table, "bench_records");
-    if (schema == NULL) {
-        fprintf(stderr, "generic benchmark schema missing\n");
-        tinydb_close(tinydb);
+    Table* table = db_open(database);
+    TableSchema* schema = NULL;
+    if (table == NULL || create_benchmark_schema(table, &schema) != 0) {
+        fprintf(stderr, "unable to create generic benchmark schema\n");
+        if (table != NULL) db_close(table);
         return 1;
     }
 
@@ -264,8 +265,8 @@ int main(int argc, char** argv) {
     }
 
     double insert_seconds = 0.0;
-    if (insert_rows(tinydb, schema, rows, &insert_seconds) != 0) {
-        tinydb_close(tinydb);
+    if (insert_rows(table, schema, rows, &insert_seconds) != 0) {
+        db_close(table);
         return 1;
     }
 
@@ -280,7 +281,7 @@ int main(int argc, char** argv) {
                                 lookups,
                                 &lookup_hits,
                                 &lookup_seconds) != 0) {
-        tinydb_close(tinydb);
+        db_close(table);
         return 1;
     }
     uint32_t lookup_cache_hits = table->pager->cache_hits - lookup_cache_hits_before;
@@ -298,7 +299,7 @@ int main(int argc, char** argv) {
                                scan_rounds,
                                &scan_matches,
                                &scan_seconds) != 0) {
-        tinydb_close(tinydb);
+        db_close(table);
         return 1;
     }
     uint32_t scan_cache_hits = table->pager->cache_hits - scan_cache_hits_before;
@@ -405,6 +406,6 @@ int main(int argc, char** argv) {
                    : "GENERIC_BENCHMARK_FAILED");
     }
 
-    tinydb_close(tinydb);
+    db_close(table);
     return status;
 }
