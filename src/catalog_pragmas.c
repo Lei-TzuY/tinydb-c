@@ -1,4 +1,5 @@
 #include "catalog_pragmas.h"
+#include "column_type.h"
 
 #include <ctype.h>
 
@@ -97,13 +98,8 @@ static void print_users_table_info(void) {
 static void format_column_type(const TableColumn* column,
                                char* output,
                                size_t output_size) {
-    if (column->type == COL_TYPE_INT) {
-        snprintf(output, output_size, "INT");
-    } else {
-        /* Serialized VARCHAR fields reserve one byte for the mandatory NUL
-         * terminator. Report character capacity rather than physical bytes. */
-        uint32_t character_capacity = column->size > 0u ? column->size - 1u : 0u;
-        snprintf(output, output_size, "VARCHAR(%u)", character_capacity);
+    if (!tinydb_column_type_format(column, output, output_size)) {
+        snprintf(output, output_size, "UNKNOWN");
     }
 }
 
