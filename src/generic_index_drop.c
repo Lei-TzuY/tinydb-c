@@ -18,19 +18,39 @@ static bool build_range_filename(Table* table,
     return written >= 0 && (size_t)written < output_size;
 }
 
+static bool remove_sidecar(const char* filename, const char* description) {
+    if (filename == NULL) return true;
+    if (remove(filename) == 0 || errno == ENOENT) return true;
+    printf("Error: unable to remove %s.\n", description);
+    return false;
+}
+
 bool table_drop_index(Table* table, const char* index_name) {
     char range_filename[640];
+    char stats_filename[672];
     bool has_range_filename = build_range_filename(table,
                                                     index_name,
                                                     range_filename,
                                                     sizeof(range_filename));
+    bool has_stats_filename = false;
+    if (has_range_filename) {
+        int written = snprintf(stats_filename,
+                               sizeof(stats_filename),
+                               "%s.stats",
+                               range_filename);
+        has_stats_filename =
+            written >= 0 && (size_t)written < sizeof(stats_filename);
+    }
 
     bool dropped = table_drop_index_legacy(table, index_name);
     if (!dropped) return false;
 
     if (has_range_filename &&
-        remove(range_filename) != 0 && errno != ENOENT) {
-        printf("Error: unable to remove generic range index snapshot.\n");
+        !remove_sidecar(range_filename, "generic range index snapshot")) {
+        return false;
+    }
+    if (has_stats_filename &&
+        !remove_sidecar(stats_filename, "generic index optimizer statistics")) {
         return false;
     }
     return true;
