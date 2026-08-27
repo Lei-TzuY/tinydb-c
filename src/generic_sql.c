@@ -17,6 +17,11 @@ typedef struct {
     bool has_limit;
 } GenericSelectContext;
 
+typedef struct {
+    uint32_t column_index;
+    TinyDBValue value;
+} GenericAssignment;
+
 static void initialize_result(TinyDBGenericSqlResult* result) {
     memset(result, 0, sizeof(*result));
     result->status = TINYDB_GENERIC_SQL_NOT_APPLICABLE;
@@ -140,6 +145,13 @@ static TableSchema* find_schema_exact(Table* table, const char* name) {
     return NULL;
 }
 
+static int find_column_index(const TableSchema* schema, const char* name) {
+    for (uint32_t i = 0; i < schema->num_columns; i++) {
+        if (ci_equal(schema->columns[i].name, name)) return (int)i;
+    }
+    return -1;
+}
+
 static bool is_legacy_fixed_row_schema(const TableSchema* schema) {
     /* Keep the exact compatibility predicate used by multitable.c. Older
      * CREATE TABLE metadata records VARCHAR columns as 256 bytes each even
@@ -177,6 +189,18 @@ static TableSchema* resolve_generic_target(Table* table,
                                   table_name,
                                   sizeof(table_name))) {
         *type = STATEMENT_INSERT;
+    } else if (parse_target_after_prefix(sql,
+                                         "update",
+                                         NULL,
+                                         table_name,
+                                         sizeof(table_name))) {
+        *type = STATEMENT_UPDATE;
+    } else if (parse_target_after_prefix(sql,
+                                         "delete",
+                                         "from",
+                                         table_name,
+                                         sizeof(table_name))) {
+        *type = STATEMENT_DELETE;
     } else {
         GenericParser parser;
         parser.current = sql;
@@ -227,6 +251,16 @@ static TinyDBGenericSqlStatus generic_execute_error(TinyDBGenericSqlResult* resu
     return result->status;
 }
 
+static TinyDBGenericSqlStatus generic_success(TinyDBGenericSqlResult* result,
+                                              StatementType type) {
+    result->status = TINYDB_GENERIC_SQL_SUCCESS;
+    result->statement_type = type;
+    result->statement_type_valid = true;
+    result->execute_result = EXECUTE_SUCCESS;
+    result->executed = true;
+    return result->status;
+}
+
 static TinyDBGenericSqlStatus execute_insert(Table* table,
                                               TableSchema* schema,
                                               const char* sql,
@@ -245,7 +279,7 @@ static TinyDBGenericSqlStatus execute_insert(Table* table,
         !consume_char(&parser, '(')) {
         return generic_syntax_error(result,
                                     STATEMENT_INSERT,
-                                    "generic INSERT syntax is INSERT INTO table VALUES (...) ");
+                                    "generic INSERT syntax is INSERT INTO table VALUES (...)");
     }
 
     for (uint32_t i = 0; i < schema->num_columns; i++) {
@@ -261,12 +295,10 @@ static TinyDBGenericSqlStatus execute_insert(Table* table,
                                         STATEMENT_INSERT,
                                         "generic INSERT value does not match the target column type");
         }
-        if (i + 1 < schema->num_columns) {
-            if (!consume_char(&parser, ',')) {
-                return generic_syntax_error(result,
-                                            STATEMENT_INSERT,
-                                            "generic INSERT value count does not match the table schema");
-            }
+        if (i + 1 < schema->num_columns && !consume_char(&parser, ',')) {
+            return generic_syntax_error(result,
+                                        STATEMENT_INSERT,
+                                        "generic INSERT value count does not match the table schema");
         }
     }
 
@@ -292,12 +324,183 @@ static TinyDBGenericSqlStatus execute_insert(Table* table,
                                      message);
     }
 
-    result->status = TINYDB_GENERIC_SQL_SUCCESS;
-    result->statement_type = STATEMENT_INSERT;
-    result->statement_type_valid = true;
-    result->execute_result = EXECUTE_SUCCESS;
-    result->executed = true;
-    return result->status;
+    return generic_success(result, STATEMENT_INSERT);
+}
+
+static TinyDBGenericSqlStatus execute_update(Table* table,
+                                              TableSchema* schema,
+                                              const char* sql,
+                                              TinyDBGenericSqlResult* result) {
+    GenericParser parser;
+    parser.current = sql;
+    char table_name[MAX_NAME_SIZE];
+    GenericAssignment assignments[MAX_COLUMNS_PER_TABLE];
+    uint32_t assignment_count = 0;
+
+    if (!consume_word(&parser, "update") ||
+        !parse_identifier(&parser, table_name, sizeof(table_name)) ||
+        !ci_equal(table_name, schema->name) ||
+        !consume_word(&parser, "set")) {
+        return generic_syntax_error(result,
+                                    STATEMENT_UPDATE,
+                                    "generic UPDATE syntax is UPDATE table SET column=value WHERE id=N");
+    }
+
+    while (assignment_count < MAX_COLUMNS_PER_TABLE) {
+        char column_name[MAX_NAME_SIZE];
+        if (!parse_identifier(&parser, column_name, sizeof(column_name))) {
+            return generic_syntax_error(result,
+                                        STATEMENT_UPDATE,
+                                        "generic UPDATE requires a column assignment");
+        }
+        int column_index = find_column_index(schema, column_name);
+        if (column_index < 0) {
+            return generic_syntax_error(result,
+                                        STATEMENT_UPDATE,
+                                        "generic UPDATE references an unknown column");
+        }
+        if (column_index == 0) {
+            return generic_syntax_error(result,
+                                        STATEMENT_UPDATE,
+                                        "generic UPDATE cannot change the primary-key id");
+        }
+        if (!consume_char(&parser, '=')) {
+            return generic_syntax_error(result,
+                                        STATEMENT_UPDATE,
+                                        "generic UPDATE assignment requires '='");
+        }
+
+        GenericAssignment* assignment = &assignments[assignment_count++];
+        assignment->column_index = (uint32_t)column_index;
+        memset(&assignment->value, 0, sizeof(assignment->value));
+        assignment->value.type = schema->columns[column_index].type;
+        if (assignment->value.type == COL_TYPE_INT) {
+            if (!parse_uint32(&parser, &assignment->value.int_value)) {
+                return generic_syntax_error(result,
+                                            STATEMENT_UPDATE,
+                                            "generic UPDATE integer column requires an integer value");
+            }
+        } else if (!parse_string(&parser,
+                                 assignment->value.text,
+                                 sizeof(assignment->value.text))) {
+            return generic_syntax_error(result,
+                                        STATEMENT_UPDATE,
+                                        "generic UPDATE VARCHAR column requires a quoted string");
+        }
+
+        if (consume_word(&parser, "where")) break;
+        if (!consume_char(&parser, ',')) {
+            return generic_syntax_error(result,
+                                        STATEMENT_UPDATE,
+                                        "generic UPDATE requires WHERE id=N after assignments");
+        }
+    }
+
+    char where_column[MAX_NAME_SIZE];
+    uint32_t id = 0;
+    if (assignment_count == 0 ||
+        !parse_identifier(&parser, where_column, sizeof(where_column)) ||
+        !ci_equal(where_column, "id") ||
+        !consume_char(&parser, '=') ||
+        !parse_uint32(&parser, &id) ||
+        !consume_end(&parser)) {
+        return generic_syntax_error(result,
+                                    STATEMENT_UPDATE,
+                                    "generic UPDATE currently requires WHERE id = N");
+    }
+
+    TinyDBRecord existing;
+    if (!tinydb_record_find(table, schema, id, &existing)) {
+        return generic_execute_error(result,
+                                     STATEMENT_UPDATE,
+                                     EXECUTE_KEY_NOT_FOUND,
+                                     "primary key not found");
+    }
+
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    uint32_t value_count = 0;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_decode(schema,
+                              &existing,
+                              values,
+                              MAX_COLUMNS_PER_TABLE,
+                              &value_count,
+                              message,
+                              sizeof(message))) {
+        return generic_execute_error(result,
+                                     STATEMENT_UPDATE,
+                                     EXECUTE_KEY_NOT_FOUND,
+                                     message);
+    }
+
+    for (uint32_t i = 0; i < assignment_count; i++) {
+        values[assignments[i].column_index] = assignments[i].value;
+    }
+
+    if (!tinydb_record_update(table,
+                              schema,
+                              id,
+                              values,
+                              value_count,
+                              message,
+                              sizeof(message))) {
+        return generic_execute_error(result,
+                                     STATEMENT_UPDATE,
+                                     EXECUTE_KEY_NOT_FOUND,
+                                     message);
+    }
+    return generic_success(result, STATEMENT_UPDATE);
+}
+
+static TinyDBGenericSqlStatus execute_delete(Table* table,
+                                              TableSchema* schema,
+                                              const char* sql,
+                                              TinyDBGenericSqlResult* result) {
+    GenericParser parser;
+    parser.current = sql;
+    char table_name[MAX_NAME_SIZE];
+
+    if (!consume_word(&parser, "delete") ||
+        !consume_word(&parser, "from") ||
+        !parse_identifier(&parser, table_name, sizeof(table_name)) ||
+        !ci_equal(table_name, schema->name)) {
+        return generic_syntax_error(result,
+                                    STATEMENT_DELETE,
+                                    "generic DELETE syntax is DELETE FROM table [WHERE id=N]");
+    }
+
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (consume_end(&parser)) {
+        (void)tinydb_record_delete_all(table, schema, message, sizeof(message));
+        if (message[0] != '\0') {
+            return generic_execute_error(result,
+                                         STATEMENT_DELETE,
+                                         EXECUTE_KEY_NOT_FOUND,
+                                         message);
+        }
+        return generic_success(result, STATEMENT_DELETE);
+    }
+
+    char where_column[MAX_NAME_SIZE];
+    uint32_t id = 0;
+    if (!consume_word(&parser, "where") ||
+        !parse_identifier(&parser, where_column, sizeof(where_column)) ||
+        !ci_equal(where_column, "id") ||
+        !consume_char(&parser, '=') ||
+        !parse_uint32(&parser, &id) ||
+        !consume_end(&parser)) {
+        return generic_syntax_error(result,
+                                    STATEMENT_DELETE,
+                                    "generic DELETE currently supports only WHERE id = N");
+    }
+
+    if (!tinydb_record_delete(table, schema, id, message, sizeof(message))) {
+        return generic_execute_error(result,
+                                     STATEMENT_DELETE,
+                                     EXECUTE_KEY_NOT_FOUND,
+                                     message);
+    }
+    return generic_success(result, STATEMENT_DELETE);
 }
 
 static bool print_scan_record(const TableSchema* schema,
@@ -422,12 +625,7 @@ static TinyDBGenericSqlStatus execute_select(Table* table,
         (void)tinydb_record_scan(table, schema, print_scan_record, &context);
     }
 
-    result->status = TINYDB_GENERIC_SQL_SUCCESS;
-    result->statement_type = STATEMENT_SELECT;
-    result->statement_type_valid = true;
-    result->execute_result = EXECUTE_SUCCESS;
-    result->executed = true;
-    return result->status;
+    return generic_success(result, STATEMENT_SELECT);
 }
 
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(Table* table,
@@ -455,8 +653,16 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(Table* table,
                                      schema_message);
     }
 
-    if (type == STATEMENT_INSERT) {
-        return execute_insert(table, schema, sql, output);
+    switch (type) {
+        case STATEMENT_INSERT:
+            return execute_insert(table, schema, sql, output);
+        case STATEMENT_UPDATE:
+            return execute_update(table, schema, sql, output);
+        case STATEMENT_DELETE:
+            return execute_delete(table, schema, sql, output);
+        case STATEMENT_SELECT:
+            return execute_select(table, schema, sql, output);
+        default:
+            return output->status;
     }
-    return execute_select(table, schema, sql, output);
 }
