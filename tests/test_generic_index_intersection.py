@@ -125,6 +125,26 @@ def main():
         if scalar_results(three_way) != [2]:
             raise AssertionError("three-way intersection returned wrong count\n" + three_way)
 
+        like_residual = run_session(
+            executable,
+            db_file,
+            [
+                "EXPLAIN SELECT name FROM products WHERE price >= 1000 AND stock = 0 AND name LIKE 'high%';",
+                "SELECT COUNT(*) FROM products WHERE price >= 1000 AND stock = 0 AND name LIKE 'high%';",
+                "SELECT name FROM products WHERE price >= 1000 AND stock = 0 AND name LIKE 'high%';",
+                ".exit",
+            ],
+        )
+        require(like_residual, "PLAN: GENERIC SECONDARY INDEX INTERSECTION")
+        require(like_residual, "INDEXES: 2")
+        require(like_residual, "FILTER: price >= 1000 AND stock = 0 AND name LIKE 'high%'")
+        if scalar_results(like_residual) != [2]:
+            raise AssertionError("LIKE residual changed intersection result\n" + like_residual)
+        require(like_residual, "high-a")
+        require(like_residual, "high-c")
+        if "mid-a\n" in like_residual or "mid-c\n" in like_residual:
+            raise AssertionError("LIKE residual was not revalidated after intersection\n" + like_residual)
+
         fallbacks = run_session(
             executable,
             db_file,
@@ -178,9 +198,9 @@ def main():
 
         print(
             "PASS: flat generic AND queries intersect two or more distinct ordered "
-            "secondary-index candidate sets, revalidate full predicates, preserve single-index "
-            "anchor and PK-equality priority, rebuild stale snapshots after mutation, and remain "
-            "correct after reopen."
+            "secondary-index candidate sets, revalidate full predicates including residual "
+            "LIKE, preserve single-index anchor and PK-equality priority, rebuild stale "
+            "snapshots after mutation, and remain correct after reopen."
         )
     finally:
         cleanup(db_file)
