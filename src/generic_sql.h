@@ -39,6 +39,8 @@ typedef struct {
     char filter_expression[TINYDB_GENERIC_PLAN_FILTER_EXPRESSION_MAX];
     char index_name[MAX_NAME_SIZE];
     uint32_t index_branch_count;
+    uint32_t index_term_count;
+    uint32_t index_fused_source_count;
 } TinyDBGenericSelectPlan;
 
 typedef struct {
