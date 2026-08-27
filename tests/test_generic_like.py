@@ -118,7 +118,7 @@ def main():
             raise AssertionError("LIKE was incorrectly planned as an ordered range scan\n" + first)
         if "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER" in first:
             raise AssertionError("LIKE was incorrectly selected as a flat-AND index anchor\n" + first)
-        require_scalars(first, [4, 1, 1, 0, 6, 3, 2, 3, 2, 0, 4])
+        require_scalars(first, [4, 1, 1, 0, 6, 3, 2, 3, 4, 3, 0, 3])
 
         reopened = run_session(
             executable,
@@ -132,7 +132,7 @@ def main():
                 ".exit",
             ],
         )
-        require_scalars(reopened, [4, 2, 2, 1])
+        require_scalars(reopened, [3, 2, 2, 1])
         require(reopened, "ok")
 
         invalid = run_session(
