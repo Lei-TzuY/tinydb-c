@@ -125,7 +125,7 @@ def main():
             raise AssertionError("database did not run WAL recovery")
         if "db > 5\nExecuted." not in recovered:
             raise AssertionError(recovered)
-        if "page ownership:" in recovered or "\nok\n" not in recovered:
+        if "page ownership:" in recovered or "db > ok\nExecuted." not in recovered:
             raise AssertionError(recovered)
         if not os.path.exists(free_file):
             raise AssertionError("WAL recovery did not recreate free-page sidecar")
@@ -156,7 +156,7 @@ def main():
             ".exit",
         ])
         refilled = run_session(executable, db_file, refill_commands)
-        if "db > 25\nExecuted." not in refilled or "\nok\n" not in refilled:
+        if "db > 25\nExecuted." not in refilled or "db > ok\nExecuted." not in refilled:
             raise AssertionError(refilled)
         if os.path.getsize(db_file) != size_before_reuse:
             raise AssertionError(
