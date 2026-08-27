@@ -10,6 +10,11 @@ SCHEMA_WAL_COMMIT_MAGIC = 0x57435354
 FNV64_OFFSET = 1469598103934665603
 FNV64_PRIME = 1099511628211
 MASK64 = (1 << 64) - 1
+PAGE_SIZE = 4096
+NODE_TYPE_OFFSET = 0
+IS_ROOT_OFFSET = 1
+NODE_INTERNAL = 0
+NODE_LEAF = 1
 
 
 def find_executable(base_dir):
@@ -49,7 +54,7 @@ def fnv64(data):
     return value
 
 
-def forge_committed_impossible_root_wal(schema_bytes):
+def forge_committed_root_wal(schema_bytes, root_page_num):
     if len(schema_bytes) < 20:
         raise AssertionError('schema catalog is shorter than the V2 header')
 
@@ -64,11 +69,54 @@ def forge_committed_impossible_root_wal(schema_bytes):
     # The first table root follows the fixed 32-byte name at payload offset 40.
     if len(payload) < 44:
         raise AssertionError('schema payload is too short for the first table root')
-    struct.pack_into('<I', payload, 40, 0xFFFFFFFF)
+    struct.pack_into('<I', payload, 40, root_page_num)
 
     header = bytearray(schema_bytes[:20])
     struct.pack_into('<Q', header, 12, fnv64(payload))
     return bytes(header) + bytes(payload) + struct.pack('<I', SCHEMA_WAL_COMMIT_MAGIC)
+
+
+def find_non_root_tree_page(db_file):
+    with open(db_file, 'rb') as handle:
+        data = handle.read()
+    if len(data) % PAGE_SIZE != 0:
+        raise AssertionError('database file is not page aligned')
+
+    for page_num in range(len(data) // PAGE_SIZE):
+        page = data[page_num * PAGE_SIZE:(page_num + 1) * PAGE_SIZE]
+        if (
+            page[NODE_TYPE_OFFSET] in (NODE_INTERNAL, NODE_LEAF)
+            and page[IS_ROOT_OFFSET] == 0
+        ):
+            return page_num
+    raise AssertionError('expected a non-root B+ tree page after forcing a split')
+
+
+def reject_forged_wal(executable, db_file, schema_file, schema_wal,
+                       healthy_main, bad_root, description):
+    forged_wal = forge_committed_root_wal(healthy_main, bad_root)
+    with open(schema_wal, 'wb') as handle:
+        handle.write(forged_wal)
+
+    rc, stdout, stderr = run_commands(executable, db_file, '.exit\n')
+    if rc != 0:
+        print(f'FAIL: {description} prevented reopen.')
+        print(stdout)
+        print(stderr)
+        sys.exit(1)
+    if 'preserving main catalog' not in stdout:
+        print(f'FAIL: expected {description} rejection diagnostic.')
+        print(stdout)
+        sys.exit(1)
+    if os.path.exists(schema_wal):
+        print(f'FAIL: rejected {description} WAL was not removed.')
+        sys.exit(1)
+
+    with open(schema_file, 'rb') as handle:
+        recovered_main = handle.read()
+    if recovered_main != healthy_main:
+        print(f'FAIL: {description} WAL overwrote the healthy main schema catalog.')
+        sys.exit(1)
 
 
 def run_test():
@@ -83,13 +131,22 @@ def run_test():
     schema_wal = db_file + '.schema.wal'
     remove_database(db_file)
 
+    commands = ['CREATE TABLE products (id INT, price INT);']
+    # The physical V1 leaf still uses the historical fixed value slot, so a few
+    # dozen rows are enough to force the generic table root to split and create
+    # at least one valid in-file page whose root bit is clear.
+    commands.extend(
+        f'INSERT INTO products VALUES ({row_id}, {row_id * 10});'
+        for row_id in range(1, 41)
+    )
+    commands.append('.exit')
     rc, stdout, stderr = run_commands(
         executable,
         db_file,
-        "CREATE TABLE products (id INT, price INT);\n.exit\n",
+        '\n'.join(commands) + '\n',
     )
-    if rc != 0:
-        print('FAIL: failed to create a database with a persisted schema catalog.')
+    if rc != 0 or 'Error:' in stdout or 'Syntax error' in stdout:
+        print('FAIL: failed to create a split database with a persisted schema catalog.')
         print(stdout)
         print(stderr)
         sys.exit(1)
@@ -99,38 +156,47 @@ def run_test():
 
     with open(schema_file, 'rb') as handle:
         healthy_main = handle.read()
-    forged_wal = forge_committed_impossible_root_wal(healthy_main)
-    with open(schema_wal, 'wb') as handle:
-        handle.write(forged_wal)
 
-    rc, stdout, stderr = run_commands(executable, db_file, '.exit\n')
-    if rc != 0:
-        print('FAIL: a committed WAL with an impossible root prevented reopen.')
-        print(stdout)
-        print(stderr)
-        sys.exit(1)
-    if 'preserving main catalog' not in stdout:
-        print('FAIL: expected impossible-root WAL rejection diagnostic.')
-        print(stdout)
-        sys.exit(1)
-    if os.path.exists(schema_wal):
-        print('FAIL: rejected schema WAL was not removed.')
-        sys.exit(1)
+    reject_forged_wal(
+        executable,
+        db_file,
+        schema_file,
+        schema_wal,
+        healthy_main,
+        0xFFFFFFFF,
+        'impossible-root schema',
+    )
 
-    with open(schema_file, 'rb') as handle:
-        recovered_main = handle.read()
-    if recovered_main != healthy_main:
-        print('FAIL: impossible-root WAL overwrote the healthy main schema catalog.')
-        sys.exit(1)
+    child_page = find_non_root_tree_page(db_file)
+    reject_forged_wal(
+        executable,
+        db_file,
+        schema_file,
+        schema_wal,
+        healthy_main,
+        child_page,
+        'non-root-page schema',
+    )
 
-    rc, stdout, stderr = run_commands(executable, db_file, '.exit\n')
+    rc, stdout, stderr = run_commands(
+        executable,
+        db_file,
+        'SELECT COUNT(*) FROM products;\nPRAGMA integrity_check;\n.exit\n',
+    )
     if rc != 0:
         print('FAIL: database did not reopen after invalid WAL removal.')
         print(stdout)
         print(stderr)
         sys.exit(1)
+    if '40' not in stdout or 'ok' not in stdout:
+        print('FAIL: healthy catalog/data were not preserved after WAL rejection.')
+        print(stdout)
+        sys.exit(1)
 
-    print('PASS: impossible-root schema WAL is discarded before it can replace the healthy catalog.')
+    print(
+        'PASS: schema WAL roots outside the file or targeting existing non-root '
+        'B+ tree pages are discarded before they can replace the healthy catalog.'
+    )
     remove_database(db_file)
 
 
