@@ -20,6 +20,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
     src/generic_index_anchor_sql.c
+    src/generic_index_candidates.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
@@ -28,6 +29,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_record_guard.c
     src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
+    src/generic_index_union_sql.c
     src/generic_like_route_sql.c
     src/generic_or_mutation_sql.c
     src/generic_or_sql.c
@@ -53,9 +55,10 @@ set(TINYDB_CORE_SOURCES
 # the proven ordered single-term paths. A LIKE router deliberately bypasses
 # those ordered paths and sends flat LIKE predicates to schema-aware residual
 # execution/planning. The compound-anchor layer can narrow a flat AND expression
-# with one indexed comparison term before evaluating residual predicates. OR and
-# parenthesized boolean handling stay outside that layer and continue to use
-# their established boolean evaluators.
+# with one indexed comparison term before evaluating residual predicates. Flat
+# OR SELECTs may use an index union only when every disjunct has a proven PK or
+# secondary-index anchor; otherwise they delegate to the established OR scan.
+# Parenthesized boolean handling stays outside those flat-expression layers.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -123,7 +126,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_parenthesized_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_parenthesized_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_anchor_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_anchor_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_scan_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_or_scan_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_or_scan_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_anchor_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_anchor_base"
 )
 set_source_files_properties(
     src/generic_or_mutation_sql.c
