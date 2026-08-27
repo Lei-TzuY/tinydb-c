@@ -23,6 +23,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_stats.c
+    src/generic_index_estimate_policy.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
@@ -78,14 +79,20 @@ set_source_files_properties(
 )
 
 # Keep historical generic layers as fallbacks while sharing ordered-index
-# snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. The public
-# estimate functions are wrapped by generic_index_stats.c: non-transactional
-# planning first uses a small persisted epoch-bound synopsis and falls back to
-# the exact typed snapshot estimator whenever statistics cannot be trusted.
+# snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Exact
+# estimates remain available as a private fallback. generic_index_stats.c owns
+# the persisted synopsis estimator, while generic_index_estimate_policy.c keeps
+# small tables on exact costing and uses synopsis estimates only once loading a
+# full typed snapshot is materially more expensive.
 set_source_files_properties(
     src/generic_index_candidates.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_index_estimate_candidates=tinydb_generic_index_estimate_candidates_exact_base;tinydb_generic_index_estimate_conjunctive_candidates=tinydb_generic_index_estimate_conjunctive_candidates_exact_base"
+)
+set_source_files_properties(
+    src/generic_index_stats.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_index_estimate_candidates=tinydb_generic_index_estimate_candidates_stats_base;tinydb_generic_index_estimate_conjunctive_candidates=tinydb_generic_index_estimate_conjunctive_candidates_stats_base"
 )
 
 # Generic SELECT routing is deliberately ordered as follows:
