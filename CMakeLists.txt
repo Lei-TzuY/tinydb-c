@@ -19,8 +19,10 @@ set(TINYDB_CORE_SOURCES
     src/engine.c
     src/generic_compound_plan_guard.c
     src/generic_index_ddl.c
+    src/generic_index_drop.c
     src/generic_index_epoch.c
     src/generic_index_policy.c
+    src/generic_index_range_sql.c
     src/generic_index_record_guard.c
     src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
@@ -43,11 +45,10 @@ set(TINYDB_CORE_SOURCES
 )
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
-# layer owns generic WHERE semantics. The compound planner wraps the historical
-# equality/range planner. The volatile index layer remains the proven fallback;
-# the persistent snapshot layer sits immediately above it. The OR SELECT layer
-# owns disjunctive reads/plans, while the outer OR mutation layer adds UPDATE /
-# DELETE disjunctions and delegates every other statement into that chain.
+# layer owns generic WHERE semantics. The volatile equality-index layer remains
+# the lowest index fallback; durable equality snapshots sit above it, then the
+# typed persistent range-index layer. OR SELECT owns disjunctive reads/plans and
+# the outer OR mutation layer owns UPDATE/DELETE disjunctions.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -98,19 +99,24 @@ if(NOT MSVC)
     )
 endif()
 set_source_files_properties(
+    src/generic_index_range_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range_index_base"
+)
+set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_snapshot_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_range_index_base"
 )
 set_source_files_properties(
     src/generic_compound_plan_guard.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_or_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_or_base"
+    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_compound_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_compound_base"
 )
 
 # Generic record mutation APIs are wrapped so a durable index epoch is advanced
-# before indexed-table data changes. This makes old snapshots fail closed after
-# commit, rollback, crash recovery, direct API mutation, or REPL mutation.
+# before indexed-table data changes. This makes equality/range snapshots fail
+# closed after commit, rollback, crash recovery, direct API mutation, or REPL mutation.
 set_source_files_properties(
     src/record.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -126,14 +132,13 @@ set_source_files_properties(
     "multitable_index_target_supported=multitable_index_target_supported_legacy"
 )
 
-# Keep the historical index catalog implementation as the storage delegate.
-# generic_index_ddl.c validates non-users generic roots before calling it, so
-# unsupported composite/unknown/primary-key generic index definitions never
-# enter the catalog.
+# Keep historical index catalog/drop implementations as delegates. Generic DDL
+# validates non-users roots before creation; the drop wrapper additionally
+# removes the typed range sidecar so no orphan snapshot remains.
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
-    "table_create_index=table_create_index_legacy"
+    "table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
