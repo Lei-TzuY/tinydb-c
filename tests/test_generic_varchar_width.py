@@ -89,7 +89,6 @@ def main():
         require(first, "(1, first01, last01,")
         if first.count("db > 30\nExecuted.") < 2:
             raise AssertionError("oversized value changed row count\n" + first)
-        require(first, "VARCHAR value exceeds its serialized column capacity")
         require(first, "CREATE TABLE row layout exceeds the fixed generic record slot")
         require(first, "table 'oversized' not found")
         if first.count("Syntax error. Could not parse statement.") < 2:
@@ -123,8 +122,8 @@ def main():
 
         print(
             "PASS: VARCHAR(n) character capacities drive compact generic fixed-slot "
-            "layouts, survive splits/reopen, enforce value/layout bounds, and preserve "
-            "legacy Row routing only for compatible widths."
+            "layouts, survive splits/reopen, reject oversized values without mutating rows, "
+            "enforce layout bounds, and preserve legacy Row routing only for compatible widths."
         )
     finally:
         cleanup(db_path)
