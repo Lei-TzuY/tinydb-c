@@ -495,10 +495,6 @@ static void predicate_bounds(const CandidateSnapshot* snapshot,
         case TINYDB_GENERIC_COMPARE_LTE:
             *end = upper_bound(snapshot, &predicate->value);
             break;
-        case TINYDB_GENERIC_COMPARE_LIKE:
-            *start = 0;
-            *end = 0;
-            break;
     }
 }
 
