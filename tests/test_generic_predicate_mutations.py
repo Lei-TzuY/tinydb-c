@@ -72,7 +72,7 @@ def run_test():
     for row_id in range(1, 81):
         bucket = "obsolete" if row_id % 2 == 0 else "keep"
         inserts.append(
-            f"INSERT INTO items VALUES ({row_id}, '{bucket}', {row_id});"
+            f"INSERT INTO items VALUES ({row_id}, '{bucket}', {row_id + 100});"
         )
 
     first = run_session(
