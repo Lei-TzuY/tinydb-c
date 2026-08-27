@@ -191,13 +191,28 @@ static bool walk_tree(TreeWalkContext* context,
         }
     }
 
+    /* get_page() may evict the frame backing `node` while we recurse.
+     * Snapshot child page numbers before descending so the parent buffer
+     * pointer is never dereferenced after recursive page loads. */
+    uint32_t child_count = num_keys + 1;
+    uint32_t* child_pages = (uint32_t*)malloc(sizeof(uint32_t) * child_count);
+    if (child_pages == NULL) {
+        return diagnostic_fail(context,
+                               "unable to allocate child snapshot for page %u",
+                               page_num);
+    }
+    for (uint32_t i = 0; i < child_count; i++) {
+        child_pages[i] = *internal_node_child(node, i);
+    }
+
     context->stats->internal_pages++;
-    for (uint32_t i = 0; i <= num_keys; i++) {
-        uint32_t child_page = *internal_node_child(node, i);
-        if (!walk_tree(context, child_page, page_num, depth + 1)) {
+    for (uint32_t i = 0; i < child_count; i++) {
+        if (!walk_tree(context, child_pages[i], page_num, depth + 1)) {
+            free(child_pages);
             return false;
         }
     }
+    free(child_pages);
     return true;
 }
 
