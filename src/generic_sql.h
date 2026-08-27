@@ -17,7 +17,8 @@ typedef enum {
 
 typedef enum {
     TINYDB_GENERIC_PLAN_FULL_SCAN = 0,
-    TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP
+    TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP,
+    TINYDB_GENERIC_PLAN_SECONDARY_INDEX_LOOKUP
 } TinyDBGenericPlanKind;
 
 typedef struct {
@@ -30,6 +31,7 @@ typedef struct {
     char filter_column[MAX_NAME_SIZE];
     char filter_operator[TINYDB_GENERIC_PLAN_OPERATOR_MAX];
     char filter_value[TINYDB_GENERIC_PLAN_TEXT_MAX];
+    char index_name[MAX_NAME_SIZE];
 } TinyDBGenericSelectPlan;
 
 typedef struct {
