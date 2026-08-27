@@ -280,7 +280,6 @@ static bool parse_indexed_select(Table* table,
     parser.current = sql;
     if (!consume_word(&parser, "select")) return false;
 
-    /* First discover the table name without assuming the projection is valid. */
     IndexParser routing = parser;
     if (consume_char(&routing, '*')) {
         /* positioned after projection */
@@ -385,9 +384,7 @@ static GenericIndexCache* find_cache(Table* table,
         }
         if (cache->table == table &&
             ci_equal(cache->index_name, index->name)) {
-            const char* filename = table->pager->filename != NULL
-                ? table->pager->filename
-                : "";
+            const char* filename = table->pager->filename;
             if (cache->root_page_num != schema->root_page_num ||
                 strcmp(cache->database_filename, filename) != 0) {
                 cache->count = 0;
@@ -415,7 +412,7 @@ static GenericIndexCache* find_cache(Table* table,
     snprintf(free_slot->database_filename,
              sizeof(free_slot->database_filename),
              "%s",
-             table->pager->filename != NULL ? table->pager->filename : "");
+             table->pager->filename);
     return free_slot;
 }
 
@@ -491,11 +488,6 @@ static bool ensure_cache(Table* table,
                   sizeof(GenericIndexEntry),
                   compare_index_entries);
         }
-
-        /* An index image built inside a transaction must not become the
-         * post-transaction cache: COMMIT/ROLLBACK is handled outside the generic
-         * SQL wrapper. Keep it dirty so the first query after the transaction
-         * rebuilds from the final visible state. */
         cache->dirty = table->in_transaction;
     }
 
