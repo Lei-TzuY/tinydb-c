@@ -77,20 +77,17 @@ def main():
                 ".exit",
             ],
         )
-        require(first, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
-        require(first, "INDEX: idx_products_category")
-        require(first, "ANCHOR: category = 'hot'")
+        require(first, "PLAN: GENERIC SECONDARY INDEX INTERSECTION")
+        require(first, "INDEXES: 2")
         require(first, "FILTER: price >= 10 AND category = 'hot'")
-        require(first, "INDEX: idx_products_price")
-        require(first, "ANCHOR: price >= 10")
         require(first, "FILTER: price >= 10 AND category > 'cold'")
         require(first, "db > 2\nExecuted.")
         require(first, "ok")
 
         if not os.path.exists(category_range):
-            raise AssertionError("equality compound anchor did not create typed snapshot")
+            raise AssertionError("intersection did not create category typed snapshot")
         if not os.path.exists(price_range):
-            raise AssertionError("range compound anchor did not create typed snapshot")
+            raise AssertionError("intersection did not create price typed snapshot")
         category_mtime = os.stat(category_range).st_mtime_ns
         price_mtime = os.stat(price_range).st_mtime_ns
 
@@ -106,9 +103,9 @@ def main():
         )
         require(reopened, "db > 2\nExecuted.")
         if os.stat(category_range).st_mtime_ns != category_mtime:
-            raise AssertionError("clean reopen rewrote equality-anchor typed snapshot")
+            raise AssertionError("clean reopen rewrote category intersection snapshot")
         if os.stat(price_range).st_mtime_ns != price_mtime:
-            raise AssertionError("clean reopen rewrote range-anchor typed snapshot")
+            raise AssertionError("clean reopen rewrote price intersection snapshot")
 
         mutation = run_session(
             executable,
@@ -123,7 +120,9 @@ def main():
         require(mutation, "db > 1\nExecuted.")
         require(mutation, "ok")
         if os.stat(category_range).st_mtime_ns <= category_mtime:
-            raise AssertionError("epoch-stale equality anchor snapshot was not rebuilt")
+            raise AssertionError("epoch-stale category intersection snapshot was not rebuilt")
+        if os.stat(price_range).st_mtime_ns <= price_mtime:
+            raise AssertionError("epoch-stale price intersection snapshot was not rebuilt")
 
         dropped = run_session(
             executable,
@@ -134,15 +133,18 @@ def main():
                 ".exit",
             ],
         )
+        require(dropped, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
         require(dropped, "INDEX: idx_products_price")
         require(dropped, "ANCHOR: price >= 10")
+        if "PLAN: GENERIC SECONDARY INDEX INTERSECTION" in dropped:
+            raise AssertionError("intersection remained active with only one usable index\n" + dropped)
         if os.path.exists(category_range):
-            raise AssertionError("DROP INDEX left compound-anchor range snapshot behind")
+            raise AssertionError("DROP INDEX left category range snapshot behind")
 
         print(
-            "PASS: compound secondary-index anchors prefer equality over range, reuse "
-            "typed snapshots after reopen, rebuild on epoch change, and fall back to "
-            "the remaining index after DROP."
+            "PASS: flat AND predicates intersect distinct secondary indexes, reuse typed "
+            "snapshots after reopen, rebuild both sources on epoch change, and fall back "
+            "to the remaining single anchor after DROP INDEX."
         )
     finally:
         cleanup(db_file)
