@@ -135,15 +135,11 @@ def main():
                 ".exit",
             ],
         )
-        require(disjunction, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(disjunction, "PLAN: GENERIC INDEX UNION")
+        require(disjunction, "BRANCHES: 2")
         require(disjunction, "FILTER: price >= 4000 OR price <= 500")
         require(disjunction, "monitor")
         require(disjunction, "cable")
-        if "SECONDARY INDEX + RESIDUAL" in disjunction:
-            raise AssertionError(
-                "OR predicate was incorrectly promoted to a single-anchor plan\n"
-                + disjunction
-            )
 
         analyzed = run_session(
             executable,
@@ -156,7 +152,7 @@ def main():
         )
         require(analyzed, "QUERY PLAN")
         require(analyzed, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
-        require(analyzed, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(analyzed, "PLAN: GENERIC INDEX UNION")
         require(analyzed, "FILTER: price >= 1000 AND price <= 3000")
         require(analyzed, "FILTER: id = 1 OR price >= 4000")
         require(analyzed, "ACTUAL RESULT")
@@ -179,7 +175,8 @@ def main():
         print(
             "PASS: generic EXPLAIN/ANALYZE uses a persistent secondary-index anchor "
             "plus residual filtering for flat AND predicates, preserves PK equality "
-            "priority, keeps OR on the scan path, and rejects invalid typed filters."
+            "priority, promotes fully-indexable OR predicates to index union, and rejects "
+            "invalid typed filters."
         )
     finally:
         cleanup(db_file)
