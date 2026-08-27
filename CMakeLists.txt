@@ -240,3 +240,6 @@ target_link_libraries(tinydb_page_ownership_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_generic_record_probe tests/generic_record_probe.c)
 target_link_libraries(tinydb_generic_record_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_schema_catalog_v1_probe tests/schema_catalog_v1_probe.c)
+target_link_libraries(tinydb_schema_catalog_v1_probe PRIVATE tinydb_core)
