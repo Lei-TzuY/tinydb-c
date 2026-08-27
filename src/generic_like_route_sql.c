@@ -1,6 +1,7 @@
 #include "generic_sql.h"
 
 #include <ctype.h>
+#include <string.h>
 
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_range_select(
     Table* table,
@@ -8,6 +9,11 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_range_select(
     TinyDBGenericSqlResult* result);
 
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_like_base(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSqlResult* result);
+
+TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_or_scan_base(
     Table* table,
     const char* sql,
     TinyDBGenericSqlResult* result);
@@ -24,6 +30,12 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_like_base(
     TinyDBGenericSelectPlan* plan,
     TinyDBGenericSqlResult* result);
 
+TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_or_scan_base(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSelectPlan* plan,
+    TinyDBGenericSqlResult* result);
+
 void tinydb_generic_sql_print_plan_like_base(
     const TinyDBGenericSelectPlan* plan);
 
@@ -35,20 +47,20 @@ static bool is_identifier_char(char value) {
     return isalnum((unsigned char)value) || value == '_';
 }
 
-static bool starts_like_keyword(const char* current, const char* sql) {
-    if (current[0] == '\0' || current[1] == '\0' ||
-        current[2] == '\0' || current[3] == '\0') {
-        return false;
+static bool starts_keyword(const char* current,
+                           const char* sql,
+                           const char* keyword) {
+    size_t length = strlen(keyword);
+    for (size_t i = 0; i < length; i++) {
+        if (current[i] == '\0' || ci_char(current[i]) != ci_char(keyword[i])) {
+            return false;
+        }
     }
-    return ci_char(current[0]) == 'l' &&
-           ci_char(current[1]) == 'i' &&
-           ci_char(current[2]) == 'k' &&
-           ci_char(current[3]) == 'e' &&
-           (current == sql || !is_identifier_char(current[-1])) &&
-           !is_identifier_char(current[4]);
+    return (current == sql || !is_identifier_char(current[-1])) &&
+           !is_identifier_char(current[length]);
 }
 
-static bool contains_like_keyword(const char* sql) {
+static bool contains_keyword(const char* sql, const char* keyword) {
     bool in_string = false;
     const char* current = sql;
 
@@ -62,8 +74,7 @@ static bool contains_like_keyword(const char* sql) {
             current++;
             continue;
         }
-
-        if (!in_string && starts_like_keyword(current, sql)) return true;
+        if (!in_string && starts_keyword(current, sql, keyword)) return true;
         current++;
     }
     return false;
@@ -73,8 +84,17 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(
     Table* table,
     const char* sql,
     TinyDBGenericSqlResult* result) {
-    if (sql != NULL && contains_like_keyword(sql)) {
-        /* LIKE is schema-aware residual filtering, not an ordered range. */
+    if (sql != NULL && contains_keyword(sql, "like")) {
+        /*
+         * LIKE is residual-only: never send it to ordered equality/range,
+         * compound-anchor, or OR-union paths. Flat OR still needs the existing
+         * OR evaluator because the flat AND residual executor cannot parse OR.
+         * Parenthesized expressions are intercepted by the outer grouped layer
+         * before this router is reached.
+         */
+        if (contains_keyword(sql, "or")) {
+            return tinydb_generic_sql_try_execute_or_scan_base(table, sql, result);
+        }
         return tinydb_generic_sql_try_execute_range_select(table, sql, result);
     }
     return tinydb_generic_sql_try_execute_like_base(table, sql, result);
@@ -85,7 +105,11 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     const char* sql,
     TinyDBGenericSelectPlan* plan,
     TinyDBGenericSqlResult* result) {
-    if (sql != NULL && contains_like_keyword(sql)) {
+    if (sql != NULL && contains_keyword(sql, "like")) {
+        if (contains_keyword(sql, "or")) {
+            return tinydb_generic_sql_build_select_plan_or_scan_base(
+                table, sql, plan, result);
+        }
         return tinydb_generic_sql_build_select_plan_range(table, sql, plan, result);
     }
     return tinydb_generic_sql_build_select_plan_like_base(table, sql, plan, result);
