@@ -110,11 +110,13 @@ def main():
             db_file,
             [
                 "EXPLAIN SELECT name FROM products WHERE price = 1299 AND id > 1;",
+                "SELECT name FROM products WHERE price = 1299 AND id > 1;",
                 ".exit",
             ],
         )
         require(indexed_residual, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(indexed_residual, "FILTER: price = 1299 AND id > 1")
+        require(indexed_residual, "mouse")
         if "PLAN: GENERIC SECONDARY INDEX LOOKUP" in indexed_residual:
             raise AssertionError(
                 "compound predicate was incorrectly promoted to single-term index plan\n"
@@ -151,8 +153,8 @@ def main():
 
         print(
             "PASS: compound generic EXPLAIN/ANALYZE renders AND predicates, "
-            "preserves PK equality lookup, avoids unsound single-term index promotion, "
-            "executes the same predicate path, and rejects invalid compound filters."
+            "preserves PK equality lookup, keeps indexed residual predicates on the "
+            "scan path, executes the same semantics, and rejects invalid filters."
         )
     finally:
         cleanup(db_file)
