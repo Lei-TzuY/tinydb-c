@@ -134,8 +134,10 @@ static void print_index_list(Table* table, const TableSchema* schema) {
         printf("%u   | idx_users_username   | 0      | c      | 0\n", sequence++);
     }
 
-    for (uint32_t i = 0; i < table->catalog.num_indexes; i++) {
-        const SecondaryIndexMeta* index = &table->catalog.indexes[i];
+    /* Generic/composite indexes are materialized in sec_indexes. This is the
+     * same runtime state consulted by the planner and survives catalog reload. */
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        const GenericSecondaryIndex* index = &table->sec_indexes[i];
         if (!index->enabled || !ci_equal(index->table_name, schema->name)) continue;
         if (ci_equal(schema->name, "users") &&
             table->username_index_enabled &&
