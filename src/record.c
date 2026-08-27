@@ -2,19 +2,6 @@
 
 #include <ctype.h>
 
-#define TINYDB_RECORD_TRAILER_MAGIC 0x32575254u /* TRW2 */
-#define TINYDB_RECORD_TRAILER_VERSION 1u
-#define TINYDB_RECORD_TRAILER_SIZE 16u
-#define TINYDB_RECORD_TRAILER_VERSION_SHIFT 16u
-#define TINYDB_RECORD_TRAILER_PAYLOAD_MASK 0xffffu
-
-typedef struct {
-    uint32_t magic;
-    uint32_t version_and_payload_size;
-    uint32_t schema_fingerprint;
-    uint32_t payload_checksum;
-} TinyDBRecordTrailer;
-
 static bool ci_equal(const char* left, const char* right) {
     if (left == NULL || right == NULL) return false;
     while (*left != '\0' && *right != '\0') {
@@ -37,103 +24,6 @@ static void set_message(char* message,
     } else {
         snprintf(message, message_size, "%s", format);
     }
-}
-
-static uint32_t fnv1a_update(uint32_t hash, const void* data, size_t size) {
-    const unsigned char* bytes = (const unsigned char*)data;
-    for (size_t i = 0; i < size; i++) {
-        hash ^= bytes[i];
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
-static uint32_t schema_fingerprint_for_payload(const TableSchema* schema,
-                                               uint32_t payload_size) {
-    uint32_t hash = 2166136261u;
-    hash = fnv1a_update(hash, &payload_size, sizeof(payload_size));
-    for (uint32_t i = 0; i < schema->num_columns; i++) {
-        const TableColumn* column = &schema->columns[i];
-        if (column->offset > payload_size ||
-            column->size > payload_size - column->offset) {
-            continue;
-        }
-        size_t name_length = strlen(column->name) + 1u;
-        hash = fnv1a_update(hash, column->name, name_length);
-        hash = fnv1a_update(hash, &column->type, sizeof(column->type));
-        hash = fnv1a_update(hash, &column->size, sizeof(column->size));
-        hash = fnv1a_update(hash, &column->offset, sizeof(column->offset));
-    }
-    return hash;
-}
-
-static bool schema_has_integrity_trailer(const TableSchema* schema) {
-    return schema != NULL && schema->row_size <= ROW_SIZE - TINYDB_RECORD_TRAILER_SIZE;
-}
-
-static unsigned char* trailer_bytes(TinyDBRecord* record) {
-    return record->bytes + ROW_SIZE - TINYDB_RECORD_TRAILER_SIZE;
-}
-
-static const unsigned char* const_trailer_bytes(const TinyDBRecord* record) {
-    return record->bytes + ROW_SIZE - TINYDB_RECORD_TRAILER_SIZE;
-}
-
-static uint32_t pack_trailer_version(uint32_t payload_size) {
-    return (TINYDB_RECORD_TRAILER_VERSION << TINYDB_RECORD_TRAILER_VERSION_SHIFT) |
-           payload_size;
-}
-
-static void write_integrity_trailer(const TableSchema* schema,
-                                    TinyDBRecord* record) {
-    if (!schema_has_integrity_trailer(schema)) return;
-    TinyDBRecordTrailer trailer;
-    trailer.magic = TINYDB_RECORD_TRAILER_MAGIC;
-    trailer.version_and_payload_size = pack_trailer_version(schema->row_size);
-    trailer.schema_fingerprint = schema_fingerprint_for_payload(schema, schema->row_size);
-    trailer.payload_checksum = fnv1a_update(2166136261u,
-                                            record->bytes,
-                                            schema->row_size);
-    memcpy(trailer_bytes(record), &trailer, sizeof(trailer));
-}
-
-static bool validate_integrity_trailer(const TableSchema* schema,
-                                       const TinyDBRecord* record,
-                                       char* message,
-                                       size_t message_size) {
-    if (!schema_has_integrity_trailer(schema)) return true;
-
-    TinyDBRecordTrailer trailer;
-    memcpy(&trailer, const_trailer_bytes(record), sizeof(trailer));
-    if (trailer.magic != TINYDB_RECORD_TRAILER_MAGIC) {
-        /* Legacy fixed-slot records predate trailers and remain readable. */
-        return true;
-    }
-
-    uint32_t version = trailer.version_and_payload_size >>
-                       TINYDB_RECORD_TRAILER_VERSION_SHIFT;
-    uint32_t payload_size = trailer.version_and_payload_size &
-                            TINYDB_RECORD_TRAILER_PAYLOAD_MASK;
-    if (version != TINYDB_RECORD_TRAILER_VERSION ||
-        payload_size == 0 ||
-        payload_size > schema->row_size ||
-        payload_size > ROW_SIZE - TINYDB_RECORD_TRAILER_SIZE) {
-        set_message(message, message_size, "generic record uses an unsupported row trailer version", NULL);
-        return false;
-    }
-    if (trailer.schema_fingerprint !=
-        schema_fingerprint_for_payload(schema, payload_size)) {
-        set_message(message, message_size, "generic record schema fingerprint mismatch", NULL);
-        return false;
-    }
-    uint32_t checksum = fnv1a_update(2166136261u,
-                                     record->bytes,
-                                     payload_size);
-    if (trailer.payload_checksum != checksum) {
-        set_message(message, message_size, "generic record payload checksum mismatch", NULL);
-        return false;
-    }
-    return true;
 }
 
 bool tinydb_schema_supports_records(const TableSchema* schema,
@@ -235,7 +125,6 @@ bool tinydb_record_encode(const TableSchema* schema,
             destination[length] = '\0';
         }
     }
-    write_integrity_trailer(schema, record);
     return true;
 }
 
@@ -251,7 +140,6 @@ bool tinydb_record_decode(const TableSchema* schema,
         set_message(message, message_size, "record decode buffer is too small", NULL);
         return false;
     }
-    if (!validate_integrity_trailer(schema, record, message, message_size)) return false;
 
     for (uint32_t i = 0; i < schema->num_columns; i++) {
         const TableColumn* column = &schema->columns[i];
