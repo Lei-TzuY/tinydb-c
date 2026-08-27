@@ -137,6 +137,11 @@ bool tinydb_generic_parse_value_for_column(TinyDBGenericParser* parser,
 
 static bool parse_compare_op(TinyDBGenericParser* parser,
                              TinyDBGenericCompareOp* op) {
+    if (tinydb_generic_consume_word(parser, "like")) {
+        *op = TINYDB_GENERIC_COMPARE_LIKE;
+        return true;
+    }
+
     tinydb_generic_skip_spaces(parser);
     if (*parser->current == '=') {
         parser->current++;
@@ -175,6 +180,10 @@ bool tinydb_generic_parse_predicate(TinyDBGenericParser* parser,
     int column_index = tinydb_generic_find_column_index(schema, column);
     if (column_index < 0 || !parse_compare_op(parser, &predicate->op)) return false;
     predicate->column_index = (uint32_t)column_index;
+    if (predicate->op == TINYDB_GENERIC_COMPARE_LIKE &&
+        schema->columns[predicate->column_index].type != COL_TYPE_VARCHAR) {
+        return false;
+    }
     return tinydb_generic_parse_value_for_column(
         parser, &schema->columns[predicate->column_index], &predicate->value);
 }
@@ -191,11 +200,36 @@ static int compare_values(const TinyDBValue* left, const TinyDBValue* right) {
     return 0;
 }
 
+static bool like_match(const char* pattern, const char* text) {
+    if (*pattern == '\0') return *text == '\0';
+
+    if (*pattern == '%') {
+        while (*pattern == '%') pattern++;
+        if (*pattern == '\0') return true;
+        while (*text != '\0') {
+            if (like_match(pattern, text)) return true;
+            text++;
+        }
+        return like_match(pattern, text);
+    }
+
+    if (*text == '\0') return false;
+    if (*pattern == '_' || *pattern == *text) {
+        return like_match(pattern + 1, text + 1);
+    }
+    return false;
+}
+
 bool tinydb_generic_predicate_matches(const TinyDBGenericPredicate* predicate,
                                       const TinyDBValue* value) {
     if (predicate == NULL || value == NULL || value->type != predicate->value.type) {
         return false;
     }
+    if (predicate->op == TINYDB_GENERIC_COMPARE_LIKE) {
+        return value->type == COL_TYPE_VARCHAR &&
+               like_match(predicate->value.text, value->text);
+    }
+
     int compared = compare_values(value, &predicate->value);
     switch (predicate->op) {
         case TINYDB_GENERIC_COMPARE_EQ:
@@ -208,6 +242,8 @@ bool tinydb_generic_predicate_matches(const TinyDBGenericPredicate* predicate,
             return compared < 0;
         case TINYDB_GENERIC_COMPARE_LTE:
             return compared <= 0;
+        case TINYDB_GENERIC_COMPARE_LIKE:
+            return false;
     }
     return false;
 }
@@ -219,6 +255,7 @@ const char* tinydb_generic_compare_op_text(TinyDBGenericCompareOp op) {
         case TINYDB_GENERIC_COMPARE_GTE: return ">=";
         case TINYDB_GENERIC_COMPARE_LT: return "<";
         case TINYDB_GENERIC_COMPARE_LTE: return "<=";
+        case TINYDB_GENERIC_COMPARE_LIKE: return "LIKE";
     }
     return "?";
 }
