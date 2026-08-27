@@ -20,6 +20,16 @@ bool tinydb_generic_index_collect_candidates(
     char* message,
     size_t message_size);
 
+bool tinydb_generic_index_collect_conjunctive_candidates(
+    Table* table,
+    const TableSchema* schema,
+    GenericSecondaryIndex* index,
+    const TinyDBGenericPredicate* predicates,
+    uint32_t predicate_count,
+    TinyDBGenericIndexCandidates* candidates,
+    char* message,
+    size_t message_size);
+
 void tinydb_generic_index_candidates_free(
     TinyDBGenericIndexCandidates* candidates);
 
