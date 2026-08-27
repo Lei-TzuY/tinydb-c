@@ -173,6 +173,24 @@ static bool choose_anchor(Table* table, AnchorV2Select* select) {
     return true;
 }
 
+static uint32_t collect_anchor_predicates(
+    const AnchorV2Select* select,
+    TinyDBGenericPredicate* predicates,
+    uint32_t capacity) {
+    if (select == NULL || predicates == NULL || capacity == 0) return 0;
+    uint32_t column_index =
+        select->predicates[select->anchor_predicate_index].column_index;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < select->predicate_count && count < capacity; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index == column_index &&
+            predicate->op <= TINYDB_GENERIC_COMPARE_LTE) {
+            predicates[count++] = *predicate;
+        }
+    }
+    return count;
+}
+
 static bool parse_anchor_select(Table* table,
                                 const char* sql,
                                 AnchorV2Select* select) {
@@ -298,17 +316,36 @@ static TinyDBGenericSqlStatus execute_anchor_select(
     Table* table,
     const AnchorV2Select* select,
     TinyDBGenericSqlResult* result) {
-    const TinyDBGenericPredicate* anchor =
-        &select->predicates[select->anchor_predicate_index];
+    TinyDBGenericPredicate index_predicates[MAX_COLUMNS_PER_TABLE];
+    uint32_t index_predicate_count = collect_anchor_predicates(
+        select,
+        index_predicates,
+        MAX_COLUMNS_PER_TABLE);
+    if (index_predicate_count == 0) {
+        return execute_error(result, "compound index anchor has no ordered predicate");
+    }
+
     TinyDBGenericIndexCandidates candidates;
     char message[TINYDB_GENERIC_SQL_MESSAGE_MAX] = {0};
-    if (!tinydb_generic_index_collect_candidates(table,
-                                                 select->schema,
-                                                 select->index,
-                                                 anchor,
-                                                 &candidates,
-                                                 message,
-                                                 sizeof(message))) {
+    bool collected = index_predicate_count >= 2
+        ? tinydb_generic_index_collect_conjunctive_candidates(
+              table,
+              select->schema,
+              select->index,
+              index_predicates,
+              index_predicate_count,
+              &candidates,
+              message,
+              sizeof(message))
+        : tinydb_generic_index_collect_candidates(
+              table,
+              select->schema,
+              select->index,
+              &index_predicates[0],
+              &candidates,
+              message,
+              sizeof(message));
+    if (!collected) {
         return execute_error(result,
                              message[0] != '\0' ? message
                                                  : "unable to collect compound index candidates");
@@ -456,10 +493,17 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
 
     const TinyDBGenericPredicate* anchor =
         &select.predicates[select.anchor_predicate_index];
+    TinyDBGenericPredicate index_predicates[MAX_COLUMNS_PER_TABLE];
+    uint32_t index_predicate_count = collect_anchor_predicates(
+        &select,
+        index_predicates,
+        MAX_COLUMNS_PER_TABLE);
+
     plan->applicable = true;
     plan->kind = TINYDB_GENERIC_PLAN_SECONDARY_INDEX_RESIDUAL;
     plan->root_page_num = select.schema->root_page_num;
     plan->has_filter = true;
+    plan->index_branch_count = index_predicate_count;
     snprintf(plan->table_name, sizeof(plan->table_name), "%s", select.schema->name);
     snprintf(plan->index_name, sizeof(plan->index_name), "%s", select.index->name);
     snprintf(plan->filter_column,
@@ -498,6 +542,17 @@ void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
     if (plan == NULL || !plan->applicable ||
         plan->kind != TINYDB_GENERIC_PLAN_SECONDARY_INDEX_RESIDUAL) {
         tinydb_generic_sql_print_plan_range_index_base(plan);
+        return;
+    }
+    if (plan->index_branch_count >= 2) {
+        printf("PLAN: GENERIC SECONDARY INDEX FUSED RANGE\n");
+        printf("  TABLE: %s (root page %u)\n", plan->table_name, plan->root_page_num);
+        printf("  INDEX: %s\n", plan->index_name);
+        printf("  PROJECTION: %s\n", plan->projection);
+        printf("  RANGE TERMS: %u on %s\n",
+               plan->index_branch_count,
+               plan->filter_column);
+        printf("  FILTER: %s\n", plan->filter_expression);
         return;
     }
     printf("PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER\n");
