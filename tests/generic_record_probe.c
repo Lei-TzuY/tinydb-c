@@ -67,6 +67,60 @@ static bool expect_layout_validation(const TableSchema* schema) {
     return true;
 }
 
+static bool expect_unterminated_varchar_rejected(const TableSchema* schema) {
+    int varchar_index = -1;
+    for (uint32_t i = 0; i < schema->num_columns; i++) {
+        if (schema->columns[i].type == COL_TYPE_VARCHAR) {
+            varchar_index = (int)i;
+            break;
+        }
+    }
+    if (varchar_index < 0) return true;
+
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    for (uint32_t i = 0; i < schema->num_columns; i++) {
+        values[i] = schema->columns[i].type == COL_TYPE_INT
+            ? int_value(i + 1u)
+            : text_value("valid");
+    }
+
+    TinyDBRecord record;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_encode(schema,
+                              values,
+                              schema->num_columns,
+                              &record,
+                              message,
+                              sizeof(message))) {
+        fprintf(stderr, "unable to encode corruption probe record: %s\n", message);
+        return false;
+    }
+
+    const TableColumn* column = &schema->columns[(uint32_t)varchar_index];
+    memset(record.bytes + column->offset, 'x', column->size);
+
+    TinyDBValue decoded[MAX_COLUMNS_PER_TABLE];
+    uint32_t decoded_count = 123u;
+    if (tinydb_record_decode(schema,
+                             &record,
+                             decoded,
+                             MAX_COLUMNS_PER_TABLE,
+                             &decoded_count,
+                             message,
+                             sizeof(message))) {
+        fprintf(stderr, "unterminated VARCHAR corruption was accepted\n");
+        return false;
+    }
+    if (decoded_count != 0u || strstr(message, "not NUL-terminated") == NULL) {
+        fprintf(stderr,
+                "unexpected unterminated VARCHAR failure: count=%u message=%s\n",
+                decoded_count,
+                message);
+        return false;
+    }
+    return true;
+}
+
 static bool expect_product(Table* table,
                            TableSchema* schema,
                            uint32_t id,
@@ -241,7 +295,8 @@ int main(int argc, char** argv) {
         tinydb_close(db);
         return EXIT_FAILURE;
     }
-    if (!expect_layout_validation(products) || !expect_layout_validation(orders)) {
+    if (!expect_layout_validation(products) || !expect_layout_validation(orders) ||
+        !expect_unterminated_varchar_rejected(products)) {
         tinydb_close(db);
         return EXIT_FAILURE;
     }
@@ -293,6 +348,7 @@ int main(int argc, char** argv) {
            orders->row_size,
            orders->columns[2].offset);
     printf("GENERIC_LAYOUT_GUARD overlap=reject gap=reject trailing_gap=reject\n");
+    printf("GENERIC_RECORD_CORRUPTION unterminated_varchar=reject\n");
     printf("GENERIC_INDEX_WINDOW price=1000..1500 candidates=6\n");
 
     tinydb_close(db);
@@ -305,6 +361,7 @@ int main(int argc, char** argv) {
     if (products == NULL || orders == NULL ||
         !expect_layout_validation(products) ||
         !expect_layout_validation(orders) ||
+        !expect_unterminated_varchar_rejected(products) ||
         tinydb_record_scan(table, products, NULL, NULL) != 30u ||
         tinydb_record_scan(table, orders, NULL, NULL) != 20u ||
         !expect_product(table, products, 29u, "product_29", 2900u) ||
@@ -315,7 +372,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes layout_guard=yes\n");
+    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes layout_guard=yes varchar_corruption_guard=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
 }
