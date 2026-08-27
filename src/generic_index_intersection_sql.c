@@ -312,6 +312,23 @@ static bool apply_cost_model(Table* table, IntersectionSelect* select) {
         if (i == 0 || estimate.total_count > table_rows) {
             table_rows = estimate.total_count;
         }
+
+        if (estimate.candidate_count == 0) {
+            if (i != 0) {
+                IntersectionSource empty_source = select->sources[i];
+                for (uint32_t j = i; j > 0; j--) {
+                    select->sources[j] = select->sources[j - 1u];
+                }
+                select->sources[0] = empty_source;
+            }
+            select->cost_estimated = true;
+            select->estimated_rows = 0;
+            select->estimated_table_rows = estimate.total_count;
+            select->estimated_cost = 0;
+            select->estimated_anchor_cost = 0;
+            select->estimated_scan_cost = tinydb_generic_scan_cost(estimate.total_count);
+            return true;
+        }
     }
 
     sort_sources_by_estimate(select);
@@ -324,13 +341,6 @@ static bool apply_cost_model(Table* table, IntersectionSelect* select) {
     select->estimated_scan_cost = tinydb_generic_scan_cost(table_rows);
     select->estimated_anchor_cost =
         tinydb_generic_anchor_cost(select->sources[0].estimated_count);
-
-    if (select->sources[0].estimated_count == 0) {
-        select->estimated_rows = 0;
-        select->estimated_cost = 0;
-        return true;
-    }
-
     select->estimated_cost = tinydb_generic_intersection_cost(
         source_rows,
         select->source_count,
@@ -529,6 +539,9 @@ static bool collect_intersection(Table* table,
         sort_ids(&sets[i]);
 
         if (sets[i].count == 0) {
+            if (i != 0) {
+                tinydb_generic_index_candidates_free(intersection);
+            }
             *intersection = sets[i];
             memset(&sets[i], 0, sizeof(sets[i]));
             free_candidate_sets(sets, collected);
