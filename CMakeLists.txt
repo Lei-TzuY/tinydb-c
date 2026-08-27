@@ -29,6 +29,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_candidates.c
     src/generic_index_correlation.c
     src/generic_index_correlation_sql.c
+    src/generic_index_intersection_forced_sql.c
     src/generic_index_stats.c
     src/generic_index_stats_refresh.c
     src/generic_index_estimate_policy.c
