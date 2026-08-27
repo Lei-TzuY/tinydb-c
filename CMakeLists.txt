@@ -44,6 +44,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_range_select_sql.c
     src/generic_sql.c
     src/join_plan.c
+    src/multi_vacuum_into.c
     src/multitable.c
     src/pager.c
     src/prepared_route.c
@@ -54,9 +55,9 @@ set(TINYDB_CORE_SOURCES
 )
 
 # Keep the historical engine body private behind facade wrappers. CREATE TABLE
-# fixed-slot validation stays inside create_table_policy.c; prepared_route.c is
-# the public entry point so bound prepared SQL re-enters the complete engine
-# pipeline instead of calling the VM directly and bypassing root routing.
+# fixed-slot validation stays inside create_table_policy.c. Multi-table
+# VACUUM INTO is a logical-rebuild facade inside prepared_route.c, so bound
+# prepared VACUUM statements still re-enter the same safety pipeline.
 set_source_files_properties(
     src/engine.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -66,6 +67,11 @@ set_source_files_properties(
     src/create_table_policy.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_execute_sql=tinydb_execute_sql_create_policy_base"
+)
+set_source_files_properties(
+    src/multi_vacuum_into.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_execute_sql=tinydb_execute_sql_prepared_delegate_base"
 )
 
 # Keep historical generic layers as fallbacks while sharing ordered-index
