@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "catalog_pragmas.h"
 
 #include <ctype.h>
 
@@ -201,6 +202,30 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
     output->statement_type = statement.type;
     output->statement_type_valid = true;
     Table* table = database->table;
+
+    if (statement.type == STATEMENT_PRAGMA_TABLE_INFO ||
+        statement.type == STATEMENT_PRAGMA_INDEX_LIST) {
+        CatalogPragmaResult pragma_result = tinydb_execute_catalog_pragma(
+            table,
+            statement.type,
+            sql,
+            output->message,
+            sizeof(output->message));
+        if (pragma_result == CATALOG_PRAGMA_SUCCESS) {
+            output->executed = true;
+            output->execute_result = EXECUTE_SUCCESS;
+            output->status = TINYDB_SQL_SUCCESS;
+            return output->status;
+        }
+        if (pragma_result == CATALOG_PRAGMA_TABLE_NOT_FOUND) {
+            output->status = TINYDB_SQL_ROUTE_ERROR;
+            return output->status;
+        }
+        if (pragma_result == CATALOG_PRAGMA_INVALID_TARGET) {
+            output->status = TINYDB_SQL_SYNTAX_ERROR;
+            return output->status;
+        }
+    }
 
     if (multitable_is_schema_ddl(statement.type) && table->in_transaction) {
         output->status = TINYDB_SQL_POLICY_ERROR;
