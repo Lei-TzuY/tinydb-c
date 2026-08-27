@@ -3,17 +3,19 @@
 
 #include "record.h"
 
-typedef enum {
+/* Predicate opcodes are stored as a fixed-width scalar rather than an enum.
+ * Ordered index code can therefore switch only over sortable comparisons,
+ * while residual-only operators such as LIKE remain explicit opcodes without
+ * triggering compiler enum-exhaustiveness diagnostics in legacy range paths. */
+typedef uint32_t TinyDBGenericCompareOp;
+enum {
     TINYDB_GENERIC_COMPARE_EQ = 0,
     TINYDB_GENERIC_COMPARE_GT,
     TINYDB_GENERIC_COMPARE_GTE,
     TINYDB_GENERIC_COMPARE_LT,
-    TINYDB_GENERIC_COMPARE_LTE
-} TinyDBGenericCompareOp;
-
-/* LIKE is deliberately outside the ordered-comparison enum so legacy range
- * switches remain exhaustive over the only operators they can order. */
-#define TINYDB_GENERIC_COMPARE_LIKE ((TinyDBGenericCompareOp)5)
+    TINYDB_GENERIC_COMPARE_LTE,
+    TINYDB_GENERIC_COMPARE_LIKE
+};
 
 typedef struct {
     const char* current;
