@@ -22,6 +22,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_compound_plan_guard.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
+    src/generic_index_stats.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
@@ -77,8 +78,17 @@ set_source_files_properties(
 )
 
 # Keep historical generic layers as fallbacks while sharing ordered-index
-# snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Routing is
-# deliberately ordered as follows for SELECT:
+# snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. The public
+# estimate functions are wrapped by generic_index_stats.c: non-transactional
+# planning first uses a small persisted epoch-bound synopsis and falls back to
+# the exact typed snapshot estimator whenever statistics cannot be trusted.
+set_source_files_properties(
+    src/generic_index_candidates.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_index_estimate_candidates=tinydb_generic_index_estimate_candidates_exact_base;tinydb_generic_index_estimate_conjunctive_candidates=tinydb_generic_index_estimate_conjunctive_candidates_exact_base"
+)
+
+# Generic SELECT routing is deliberately ordered as follows:
 #   parenthesized -> OR mutation wrapper -> LIKE router -> costed OR index union
 #   -> OR scan -> flat AND intersection/anchor cost planner
 #   -> costed single range/equality -> residual.
@@ -190,7 +200,8 @@ set_source_files_properties(
 )
 
 # Keep historical index catalog/drop implementations as delegates. Generic DDL
-# validates non-users roots before creation; drop also removes typed snapshots.
+# validates non-users roots before creation; drop also removes typed snapshots
+# and optimizer-statistics sidecars.
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
