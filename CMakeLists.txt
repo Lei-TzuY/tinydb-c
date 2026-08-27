@@ -14,6 +14,7 @@ endif()
 
 set(TINYDB_CORE_SOURCES
     src/alter_varchar_policy.c
+    src/analyze_sql.c
     src/catalog_pragmas.c
     src/column_type.c
     src/compiler.c
@@ -28,6 +29,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_stats.c
+    src/generic_index_stats_refresh.c
     src/generic_index_estimate_policy.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
@@ -81,6 +83,8 @@ set_source_files_properties(
 # fixed-slot validation stays inside create_table_policy.c. Multi-table
 # VACUUM INTO is followed by the sized-ALTER route, then prepared_route.c owns
 # the public facade so bound ALTER statements re-enter the same safety policy.
+# ANALYZE is intercepted at that outer facade before legacy parsing so
+# maintenance statistics never require a VM/compiler statement opcode.
 # The public tinydb_open() lives in engine_open_guard.c and fails closed when a
 # persisted schema catalog cannot be loaded safely.
 set_source_files_properties(
@@ -102,8 +106,10 @@ set_source_files_properties(
 # Keep historical generic layers as fallbacks while sharing ordered-index
 # snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Exact
 # estimates remain available as a private fallback. generic_index_stats.c owns
-# the persisted synopsis estimator, while generic_index_estimate_policy.c keeps
-# small tables on exact costing and uses synopsis estimates only once loading a
+# the persisted synopsis estimator, generic_index_stats_refresh.c exposes the
+# same persisted path to ANALYZE without paying the small-table exact-cost
+# policy, while generic_index_estimate_policy.c keeps ordinary small-table
+# planning on exact costing and uses synopsis estimates only once loading a
 # full typed snapshot is materially more expensive.
 set_source_files_properties(
     src/generic_index_candidates.c
