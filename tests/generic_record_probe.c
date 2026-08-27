@@ -32,6 +32,41 @@ static TinyDBValue text_value(const char* value) {
     return result;
 }
 
+static bool expect_layout_validation(const TableSchema* schema) {
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    TableSchema invalid = *schema;
+
+    invalid.columns[2].offset--;
+    if (tinydb_schema_supports_records(&invalid, message, sizeof(message)) ||
+        strstr(message, "contiguous non-overlapping") == NULL) {
+        fprintf(stderr, "overlapping generic layout was not rejected: %s\n", message);
+        return false;
+    }
+
+    invalid = *schema;
+    invalid.columns[2].offset++;
+    invalid.row_size++;
+    if (tinydb_schema_supports_records(&invalid, message, sizeof(message)) ||
+        strstr(message, "contiguous non-overlapping") == NULL) {
+        fprintf(stderr, "gapped generic layout was not rejected: %s\n", message);
+        return false;
+    }
+
+    invalid = *schema;
+    invalid.row_size++;
+    if (tinydb_schema_supports_records(&invalid, message, sizeof(message)) ||
+        strstr(message, "row size must match") == NULL) {
+        fprintf(stderr, "trailing generic layout gap was not rejected: %s\n", message);
+        return false;
+    }
+
+    if (!tinydb_schema_supports_records(schema, message, sizeof(message))) {
+        fprintf(stderr, "valid generic layout was rejected: %s\n", message);
+        return false;
+    }
+    return true;
+}
+
 static bool expect_product(Table* table,
                            TableSchema* schema,
                            uint32_t id,
@@ -206,6 +241,10 @@ int main(int argc, char** argv) {
         tinydb_close(db);
         return EXIT_FAILURE;
     }
+    if (!expect_layout_validation(products) || !expect_layout_validation(orders)) {
+        tinydb_close(db);
+        return EXIT_FAILURE;
+    }
 
     char message[TINYDB_RECORD_MESSAGE_MAX];
     for (uint32_t i = 1; i <= 30; i++) {
@@ -253,6 +292,7 @@ int main(int argc, char** argv) {
            products->columns[2].offset,
            orders->row_size,
            orders->columns[2].offset);
+    printf("GENERIC_LAYOUT_GUARD overlap=reject gap=reject trailing_gap=reject\n");
     printf("GENERIC_INDEX_WINDOW price=1000..1500 candidates=6\n");
 
     tinydb_close(db);
@@ -263,6 +303,8 @@ int main(int argc, char** argv) {
     orders = table_get_schema(table, "orders");
 
     if (products == NULL || orders == NULL ||
+        !expect_layout_validation(products) ||
+        !expect_layout_validation(orders) ||
         tinydb_record_scan(table, products, NULL, NULL) != 30u ||
         tinydb_record_scan(table, orders, NULL, NULL) != 20u ||
         !expect_product(table, products, 29u, "product_29", 2900u) ||
@@ -273,7 +315,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes\n");
+    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes layout_guard=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
 }
