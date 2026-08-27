@@ -174,6 +174,31 @@ static void end_root_scope(Table* table, uint32_t previous_root) {
     table->root_page_num = previous_root;
 }
 
+static bool mutation_target_supported(const TableSchema* schema,
+                                      char* message,
+                                      size_t message_size) {
+    if (!tinydb_schema_supports_records(schema, message, message_size)) return false;
+    if (ci_equal(schema->name, "users")) {
+        set_message(message,
+                    message_size,
+                    "use the legacy users execution path so its secondary indexes stay synchronized",
+                    NULL);
+        return false;
+    }
+    return true;
+}
+
+static bool cursor_matches_key(Table* table, Cursor* cursor, uint32_t key) {
+    void* node = get_page(table->pager, cursor->page_num);
+    uint32_t num_cells = *leaf_node_num_cells(node);
+    return cursor->cell_num < num_cells &&
+           *leaf_node_key(node, cursor->cell_num) == key;
+}
+
+static void commit_if_autocommit(Table* table) {
+    if (!table->in_transaction) pager_commit(table->pager);
+}
+
 bool tinydb_record_insert(Table* table,
                           const TableSchema* schema,
                           const TinyDBValue* values,
@@ -184,13 +209,7 @@ bool tinydb_record_insert(Table* table,
         set_message(message, message_size, "table and schema are required", NULL);
         return false;
     }
-    if (ci_equal(schema->name, "users")) {
-        set_message(message,
-                    message_size,
-                    "use the legacy users execution path so its secondary indexes stay synchronized",
-                    NULL);
-        return false;
-    }
+    if (!mutation_target_supported(schema, message, message_size)) return false;
 
     TinyDBRecord record;
     if (!tinydb_record_encode(schema,
@@ -208,10 +227,7 @@ bool tinydb_record_insert(Table* table,
     begin_root_scope(table, schema, &previous_root);
 
     Cursor* cursor = table_find(table, key);
-    void* node = get_page(table->pager, cursor->page_num);
-    uint32_t num_cells = *leaf_node_num_cells(node);
-    if (cursor->cell_num < num_cells &&
-        *leaf_node_key(node, cursor->cell_num) == key) {
+    if (cursor_matches_key(table, cursor, key)) {
         free(cursor);
         end_root_scope(table, previous_root);
         set_message(message, message_size, "duplicate primary key", NULL);
@@ -225,11 +241,122 @@ bool tinydb_record_insert(Table* table,
     free(cursor);
     end_root_scope(table, previous_root);
 
-    if (!table->in_transaction) {
-        pager_commit(table->pager);
-    }
+    commit_if_autocommit(table);
     if (message != NULL && message_size > 0) message[0] = '\0';
     return true;
+}
+
+bool tinydb_record_update(Table* table,
+                          const TableSchema* schema,
+                          uint32_t id,
+                          const TinyDBValue* values,
+                          uint32_t value_count,
+                          char* message,
+                          size_t message_size) {
+    if (table == NULL || schema == NULL) {
+        set_message(message, message_size, "table and schema are required", NULL);
+        return false;
+    }
+    if (!mutation_target_supported(schema, message, message_size)) return false;
+
+    TinyDBRecord record;
+    if (!tinydb_record_encode(schema,
+                              values,
+                              value_count,
+                              &record,
+                              message,
+                              message_size)) {
+        return false;
+    }
+    uint32_t encoded_id = 0;
+    memcpy(&encoded_id, record.bytes, sizeof(encoded_id));
+    if (encoded_id != id) {
+        set_message(message,
+                    message_size,
+                    "generic UPDATE cannot change the primary-key id",
+                    NULL);
+        return false;
+    }
+
+    uint32_t previous_root = 0;
+    begin_root_scope(table, schema, &previous_root);
+    Cursor* cursor = table_find(table, id);
+    if (!cursor_matches_key(table, cursor, id)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message, message_size, "primary key not found", NULL);
+        return false;
+    }
+
+    memcpy(cursor_value(cursor), record.bytes, ROW_SIZE);
+    mark_page_dirty(table->pager, cursor->page_num);
+    free(cursor);
+    end_root_scope(table, previous_root);
+
+    commit_if_autocommit(table);
+    if (message != NULL && message_size > 0) message[0] = '\0';
+    return true;
+}
+
+bool tinydb_record_delete(Table* table,
+                          const TableSchema* schema,
+                          uint32_t id,
+                          char* message,
+                          size_t message_size) {
+    if (table == NULL || schema == NULL) {
+        set_message(message, message_size, "table and schema are required", NULL);
+        return false;
+    }
+    if (!mutation_target_supported(schema, message, message_size)) return false;
+
+    uint32_t previous_root = 0;
+    begin_root_scope(table, schema, &previous_root);
+    Cursor* cursor = table_find(table, id);
+    if (!cursor_matches_key(table, cursor, id)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message, message_size, "primary key not found", NULL);
+        return false;
+    }
+
+    leaf_node_delete(cursor);
+    free(cursor);
+    end_root_scope(table, previous_root);
+
+    commit_if_autocommit(table);
+    if (message != NULL && message_size > 0) message[0] = '\0';
+    return true;
+}
+
+uint32_t tinydb_record_delete_all(Table* table,
+                                  const TableSchema* schema,
+                                  char* message,
+                                  size_t message_size) {
+    if (table == NULL || schema == NULL) {
+        set_message(message, message_size, "table and schema are required", NULL);
+        return 0;
+    }
+    if (!mutation_target_supported(schema, message, message_size)) return 0;
+
+    uint32_t previous_root = 0;
+    begin_root_scope(table, schema, &previous_root);
+    uint32_t deleted = 0;
+
+    while (true) {
+        Cursor* cursor = table_start(table);
+        if (cursor->end_of_table) {
+            free(cursor);
+            break;
+        }
+        leaf_node_delete(cursor);
+        free(cursor);
+        deleted++;
+    }
+
+    end_root_scope(table, previous_root);
+    commit_if_autocommit(table);
+    if (message != NULL && message_size > 0) message[0] = '\0';
+    return deleted;
 }
 
 bool tinydb_record_find(Table* table,
@@ -243,10 +370,7 @@ bool tinydb_record_find(Table* table,
     uint32_t previous_root = 0;
     begin_root_scope(table, schema, &previous_root);
     Cursor* cursor = table_find(table, id);
-    void* node = get_page(table->pager, cursor->page_num);
-    uint32_t num_cells = *leaf_node_num_cells(node);
-    bool found = cursor->cell_num < num_cells &&
-                 *leaf_node_key(node, cursor->cell_num) == id;
+    bool found = cursor_matches_key(table, cursor, id);
     if (found) {
         memcpy(record->bytes, cursor_value(cursor), ROW_SIZE);
     }
