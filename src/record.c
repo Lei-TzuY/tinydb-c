@@ -169,6 +169,14 @@ bool tinydb_record_decode(const TableSchema* schema,
         } else {
             uint32_t length = 0;
             while (length < column->size && source[length] != '\0') length++;
+            if (length == column->size) {
+                set_message(message,
+                            message_size,
+                            "serialized VARCHAR field is not NUL-terminated within its column capacity",
+                            NULL);
+                if (value_count != NULL) *value_count = 0;
+                return false;
+            }
             if (length >= sizeof(value->text)) length = (uint32_t)sizeof(value->text) - 1u;
             memcpy(value->text, source, length);
             value->text[length] = '\0';
