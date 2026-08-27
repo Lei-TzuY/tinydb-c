@@ -18,6 +18,7 @@ set(TINYDB_CORE_SOURCES
     src/create_table_policy.c
     src/diagnostics.c
     src/engine.c
+    src/engine_open_guard.c
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
     src/generic_index_anchor_v2_sql.c
@@ -62,11 +63,13 @@ set(TINYDB_CORE_SOURCES
 # Keep the historical engine body private behind facade wrappers. CREATE TABLE
 # fixed-slot validation stays inside create_table_policy.c. Multi-table
 # VACUUM INTO is a logical-rebuild facade inside prepared_route.c, so bound
-# prepared VACUUM statements still re-enter the same safety pipeline.
+# prepared VACUUM statements still re-enter the same safety pipeline. The
+# public tinydb_open() lives in engine_open_guard.c and fails closed when a
+# persisted schema catalog cannot be loaded safely.
 set_source_files_properties(
     src/engine.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_execute_sql=tinydb_execute_sql_base"
+    "tinydb_execute_sql=tinydb_execute_sql_base;tinydb_open=tinydb_open_legacy_base"
 )
 set_source_files_properties(
     src/create_table_policy.c
