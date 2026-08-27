@@ -10,8 +10,11 @@
 #include <unistd.h>
 #endif
 
-#define WAL_TXN_MAGIC    0x57414c54u /* "WALT" */
-#define WAL_COMMIT_MAGIC 0x57414c43u /* "WALC" */
+#define WAL_TXN_MAGIC       0x57414c54u /* "WALT" - structured WAL v1 */
+#define WAL_TXN_V2_MAGIC    0x57414c32u /* "WAL2" - includes free-page state */
+#define WAL_COMMIT_MAGIC    0x57414c43u /* "WALC" */
+#define FREE_LIST_MAGIC     0x46524545u /* "FREE" */
+#define FREE_LIST_VERSION   1u
 
 static void fail_io(const char* message) {
     printf("%s: %d\n", message, errno);
@@ -51,14 +54,17 @@ static void* checked_calloc_array(uint32_t count,
 }
 
 /* ── Page checksum (FNV-1a 32-bit) ────────────────────────────────────── */
-static uint32_t fnv1a_32(const void* data, size_t len) {
-    uint32_t hash = 2166136261u;
+static uint32_t fnv1a_extend(uint32_t hash, const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
     for (size_t i = 0; i < len; i++) {
         hash ^= p[i];
         hash *= 16777619u;
     }
     return hash;
+}
+
+static uint32_t fnv1a_32(const void* data, size_t len) {
+    return fnv1a_extend(2166136261u, data, len);
 }
 
 static void page_write_checksum(void* page) {
@@ -163,6 +169,208 @@ static void truncate_file(FILE* file, uint64_t length) {
         fail_io("Error truncating database");
     }
 #endif
+}
+
+/* ── Durable free-page metadata ───────────────────────────────────────── */
+static void make_sidecar_path(const char* filename,
+                              const char* suffix,
+                              char* output,
+                              size_t output_size) {
+    int written = snprintf(output, output_size, "%s%s", filename, suffix);
+    if (written < 0 || (size_t)written >= output_size) {
+        printf("Database sidecar path is too long.\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+static bool validate_free_page_list(uint32_t num_pages,
+                                    const uint32_t* free_pages,
+                                    uint32_t free_page_count) {
+    if (free_page_count > num_pages) return false;
+    if (free_page_count == 0) return true;
+    if (num_pages == 0 || free_pages == NULL) return false;
+
+    bool* seen = (bool*)checked_calloc_array(
+        num_pages, sizeof(bool),
+        "Unable to validate free-page metadata.");
+    bool valid = true;
+    for (uint32_t i = 0; i < free_page_count; i++) {
+        uint32_t page_num = free_pages[i];
+        if (page_num == 0 || page_num >= num_pages || seen[page_num]) {
+            valid = false;
+            break;
+        }
+        seen[page_num] = true;
+    }
+    free(seen);
+    return valid;
+}
+
+static uint32_t free_list_checksum(uint32_t num_pages,
+                                   uint32_t free_page_count,
+                                   const uint32_t* free_pages) {
+    uint32_t hash = 2166136261u;
+    uint32_t magic = FREE_LIST_MAGIC;
+    uint32_t version = FREE_LIST_VERSION;
+    hash = fnv1a_extend(hash, &magic, sizeof(magic));
+    hash = fnv1a_extend(hash, &version, sizeof(version));
+    hash = fnv1a_extend(hash, &num_pages, sizeof(num_pages));
+    hash = fnv1a_extend(hash, &free_page_count, sizeof(free_page_count));
+    if (free_page_count > 0) {
+        hash = fnv1a_extend(hash,
+                            free_pages,
+                            (size_t)free_page_count * sizeof(uint32_t));
+    }
+    return hash;
+}
+
+static void persist_free_list_snapshot(const char* filename,
+                                       uint32_t num_pages,
+                                       uint32_t free_page_count,
+                                       const uint32_t* free_pages) {
+    if (!validate_free_page_list(num_pages, free_pages, free_page_count)) {
+        printf("BUG: refusing to persist invalid free-page metadata.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    char free_path[1024];
+    char free_wal_path[1024];
+    make_sidecar_path(filename, ".free", free_path, sizeof(free_path));
+    make_sidecar_path(filename, ".free.wal", free_wal_path, sizeof(free_wal_path));
+
+    FILE* file = fopen(free_wal_path, "wb");
+    if (file == NULL) fail_io("Unable to open free-page metadata WAL");
+
+    uint32_t magic = FREE_LIST_MAGIC;
+    uint32_t version = FREE_LIST_VERSION;
+    uint32_t checksum = free_list_checksum(num_pages,
+                                           free_page_count,
+                                           free_pages);
+    write_bytes(file, &magic, sizeof(magic));
+    write_bytes(file, &version, sizeof(version));
+    write_bytes(file, &num_pages, sizeof(num_pages));
+    write_bytes(file, &free_page_count, sizeof(free_page_count));
+    if (free_page_count > 0) {
+        write_bytes(file,
+                    free_pages,
+                    (size_t)free_page_count * sizeof(uint32_t));
+    }
+    write_bytes(file, &checksum, sizeof(checksum));
+    sync_file(file);
+    fclose(file);
+
+    if (remove(free_path) != 0 && errno != ENOENT) {
+        fail_io("Unable to replace free-page metadata");
+    }
+    if (rename(free_wal_path, free_path) != 0) {
+        fail_io("Unable to publish free-page metadata");
+    }
+}
+
+static bool read_free_list_snapshot(const char* path,
+                                    uint32_t expected_num_pages,
+                                    uint32_t** free_pages_out,
+                                    uint32_t* free_page_count_out) {
+    *free_pages_out = NULL;
+    *free_page_count_out = 0;
+
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) return false;
+
+    uint64_t length = get_file_length(file);
+    seek_offset(file, 0, SEEK_SET);
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t num_pages = 0;
+    uint32_t free_page_count = 0;
+    if (!read_bytes(file, &magic, sizeof(magic)) ||
+        !read_bytes(file, &version, sizeof(version)) ||
+        !read_bytes(file, &num_pages, sizeof(num_pages)) ||
+        !read_bytes(file, &free_page_count, sizeof(free_page_count))) {
+        fclose(file);
+        return false;
+    }
+
+    uint64_t expected_length = sizeof(uint32_t) * 5u +
+        (uint64_t)free_page_count * sizeof(uint32_t);
+    if (magic != FREE_LIST_MAGIC ||
+        version != FREE_LIST_VERSION ||
+        num_pages != expected_num_pages ||
+        free_page_count > num_pages ||
+        expected_length != length) {
+        fclose(file);
+        return false;
+    }
+
+    uint32_t* free_pages = NULL;
+    if (free_page_count > 0) {
+        free_pages = (uint32_t*)checked_calloc_array(
+            free_page_count, sizeof(uint32_t),
+            "Unable to load free-page metadata.");
+        if (!read_bytes(file,
+                        free_pages,
+                        (size_t)free_page_count * sizeof(uint32_t))) {
+            free(free_pages);
+            fclose(file);
+            return false;
+        }
+    }
+
+    uint32_t stored_checksum = 0;
+    bool valid = read_bytes(file, &stored_checksum, sizeof(stored_checksum)) &&
+        stored_checksum == free_list_checksum(num_pages,
+                                              free_page_count,
+                                              free_pages) &&
+        validate_free_page_list(num_pages, free_pages, free_page_count);
+    fclose(file);
+    if (!valid) {
+        free(free_pages);
+        return false;
+    }
+
+    *free_pages_out = free_pages;
+    *free_page_count_out = free_page_count;
+    return true;
+}
+
+static void load_free_list_snapshot(Pager* pager) {
+    char free_path[1024];
+    char free_wal_path[1024];
+    make_sidecar_path(pager->filename, ".free", free_path, sizeof(free_path));
+    make_sidecar_path(pager->filename, ".free.wal", free_wal_path, sizeof(free_wal_path));
+
+    uint32_t* loaded_pages = NULL;
+    uint32_t loaded_count = 0;
+    if (read_free_list_snapshot(free_wal_path,
+                                pager->num_pages,
+                                &loaded_pages,
+                                &loaded_count)) {
+        if (remove(free_path) != 0 && errno != ENOENT) {
+            free(loaded_pages);
+            fail_io("Unable to recover free-page metadata");
+        }
+        if (rename(free_wal_path, free_path) != 0) {
+            free(loaded_pages);
+            fail_io("Unable to recover free-page metadata");
+        }
+    } else if (!read_free_list_snapshot(free_path,
+                                        pager->num_pages,
+                                        &loaded_pages,
+                                        &loaded_count)) {
+        if (remove(free_wal_path) != 0 && errno != ENOENT) {
+            fail_io("Unable to discard invalid free-page metadata WAL");
+        }
+        return;
+    }
+
+    if (loaded_count > 0) {
+        memcpy(pager->free_pages,
+               loaded_pages,
+               (size_t)loaded_count * sizeof(uint32_t));
+    }
+    pager->free_page_count = loaded_count;
+    free(loaded_pages);
 }
 
 /* ── Growable pager metadata ──────────────────────────────────────────── */
@@ -328,15 +536,30 @@ static void recover_wal(const char* filename, const char* wal_filename) {
     uint64_t wal_length = get_file_length(wal_file);
     seek_offset(wal_file, 0, SEEK_SET);
 
+    uint32_t* recovered_free_pages = NULL;
+    uint32_t recovered_free_page_count = 0;
+    uint32_t recovered_num_pages = 0;
+    bool recovered_free_state = false;
+
     while (tell_file(wal_file) < wal_length) {
         uint32_t first_word = 0;
         if (!read_bytes(wal_file, &first_word, sizeof(first_word))) break;
 
-        bool new_format = first_word == WAL_TXN_MAGIC;
+        bool format_v2 = first_word == WAL_TXN_V2_MAGIC;
+        bool format_v1 = first_word == WAL_TXN_MAGIC;
+        bool structured = format_v1 || format_v2;
         uint32_t page_count = 0;
         uint32_t final_num_pages = 0;
+        uint32_t free_page_count = 0;
 
-        if (new_format) {
+        if (format_v2) {
+            if (!read_bytes(wal_file, &page_count, sizeof(page_count)) ||
+                !read_bytes(wal_file, &final_num_pages, sizeof(final_num_pages)) ||
+                !read_bytes(wal_file, &free_page_count, sizeof(free_page_count))) {
+                printf("Ignoring incomplete WAL transaction.\n");
+                break;
+            }
+        } else if (format_v1) {
             if (!read_bytes(wal_file, &page_count, sizeof(page_count)) ||
                 !read_bytes(wal_file, &final_num_pages, sizeof(final_num_pages))) {
                 printf("Ignoring incomplete WAL transaction.\n");
@@ -350,9 +573,31 @@ static void recover_wal(const char* filename, const char* wal_filename) {
         uint64_t remaining = wal_length - current;
         uint64_t bytes_per_page = sizeof(uint32_t) + (uint64_t)PAGE_SIZE;
         uint64_t needed = (uint64_t)page_count * bytes_per_page + sizeof(uint32_t);
-        if ((!new_format && page_count == 0) || needed > remaining) {
+        if (format_v2) {
+            needed += (uint64_t)free_page_count * sizeof(uint32_t);
+        }
+        if ((!structured && page_count == 0) ||
+            (format_v2 && free_page_count > final_num_pages) ||
+            needed > remaining) {
             printf("Ignoring incomplete WAL transaction.\n");
             break;
+        }
+
+        uint32_t* txn_free_pages = NULL;
+        if (format_v2 && free_page_count > 0) {
+            txn_free_pages = (uint32_t*)checked_calloc_array(
+                free_page_count, sizeof(uint32_t),
+                "Unable to allocate WAL free-page buffer.");
+            if (!read_bytes(wal_file,
+                            txn_free_pages,
+                            (size_t)free_page_count * sizeof(uint32_t)) ||
+                !validate_free_page_list(final_num_pages,
+                                         txn_free_pages,
+                                         free_page_count)) {
+                free(txn_free_pages);
+                printf("Ignoring incomplete WAL transaction.\n");
+                break;
+            }
         }
 
         uint32_t* page_nums = NULL;
@@ -374,6 +619,7 @@ static void recover_wal(const char* filename, const char* wal_filename) {
             }
             if (!read_bytes(wal_file, &page_nums[i], sizeof(page_nums[i])) ||
                 page_nums[i] == INVALID_PAGE_NUM ||
+                (structured && page_nums[i] >= final_num_pages) ||
                 !read_bytes(wal_file, page_buffers[i], PAGE_SIZE)) {
                 complete = false;
                 break;
@@ -390,6 +636,7 @@ static void recover_wal(const char* filename, const char* wal_filename) {
             for (uint32_t i = 0; i < page_count; i++) free(page_buffers[i]);
             free(page_buffers);
             free(page_nums);
+            free(txn_free_pages);
             break;
         }
 
@@ -401,12 +648,29 @@ static void recover_wal(const char* filename, const char* wal_filename) {
         free(page_buffers);
         free(page_nums);
 
-        if (new_format) {
+        if (structured) {
             truncate_file(db_file, (uint64_t)final_num_pages * (uint64_t)PAGE_SIZE);
         }
+
+        if (format_v2) {
+            free(recovered_free_pages);
+            recovered_free_pages = txn_free_pages;
+            txn_free_pages = NULL;
+            recovered_free_page_count = free_page_count;
+            recovered_num_pages = final_num_pages;
+            recovered_free_state = true;
+        }
+        free(txn_free_pages);
     }
 
     sync_file(db_file);
+    if (recovered_free_state) {
+        persist_free_list_snapshot(filename,
+                                   recovered_num_pages,
+                                   recovered_free_page_count,
+                                   recovered_free_pages);
+    }
+    free(recovered_free_pages);
     fclose(db_file);
     fclose(wal_file);
 
@@ -468,6 +732,7 @@ Pager* pager_open(const char* filename) {
         ? pager->num_pages
         : PAGER_INITIAL_CAPACITY;
     pager_reserve_capacity(pager, initial_capacity);
+    load_free_list_snapshot(pager);
 
     db_rwlock_init(&pager->pager_lock);
     for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
@@ -724,22 +989,26 @@ void pager_commit(Pager* pager) {
         if (pager->is_dirty[i]) dirty_count++;
     }
 
-    if (dirty_count == 0) {
-        clear_all_savepoints(pager);
-        clear_transaction_free_snapshot(pager);
-        pager->in_transaction = false;
-        pager->transaction_file_length = 0;
-        pager->transaction_num_pages = 0;
-        return;
+    if (!validate_free_page_list(pager->num_pages,
+                                 pager->free_pages,
+                                 pager->free_page_count)) {
+        printf("BUG: pager free-page list is invalid at commit.\n");
+        exit(EXIT_FAILURE);
     }
 
     FILE* wal_file = fopen(pager->wal_filename, "ab");
     if (wal_file == NULL) fail_io("Failed to open WAL for commit");
 
-    uint32_t txn_magic = WAL_TXN_MAGIC;
+    uint32_t txn_magic = WAL_TXN_V2_MAGIC;
     write_bytes(wal_file, &txn_magic, sizeof(txn_magic));
     write_bytes(wal_file, &dirty_count, sizeof(dirty_count));
     write_bytes(wal_file, &pager->num_pages, sizeof(pager->num_pages));
+    write_bytes(wal_file, &pager->free_page_count, sizeof(pager->free_page_count));
+    if (pager->free_page_count > 0) {
+        write_bytes(wal_file,
+                    pager->free_pages,
+                    (size_t)pager->free_page_count * sizeof(uint32_t));
+    }
 
     for (uint32_t i = 0; i < pager->num_pages; i++) {
         if (!pager->is_dirty[i]) continue;
@@ -755,6 +1024,13 @@ void pager_commit(Pager* pager) {
     write_bytes(wal_file, &commit_magic, sizeof(commit_magic));
     sync_file(wal_file);
     fclose(wal_file);
+
+    /* The main WAL is durable first. If a crash lands before this sidecar is
+     * published, WAL recovery replays the same free-page snapshot. */
+    persist_free_list_snapshot(pager->filename,
+                               pager->num_pages,
+                               pager->free_page_count,
+                               pager->free_pages);
 
     for (uint32_t i = 0; i < pager->num_pages; i++) {
         if (!pager->is_dirty[i]) continue;
@@ -828,6 +1104,13 @@ void pager_checkpoint(Pager* pager) {
     truncate_file(pager->file, target_length);
     pager->file_length = target_length;
     sync_file(pager->file);
+
+    /* Publish free-space state before deleting the database WAL. A crash before
+     * WAL removal can therefore recover both page images and allocator state. */
+    persist_free_list_snapshot(pager->filename,
+                               pager->num_pages,
+                               pager->free_page_count,
+                               pager->free_pages);
 
     if (remove(pager->wal_filename) != 0 && errno != ENOENT) {
         fail_io("Unable to remove checkpointed WAL");
