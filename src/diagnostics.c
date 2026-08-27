@@ -277,19 +277,40 @@ bool tinydb_check_table_tree(Table* table,
                              char* message,
                              size_t message_size) {
     if (table == NULL || table_name == NULL) return false;
-    TinyDBTreeStats stats;
-    bool ok = run_tree_walk(table, table_name, &stats, message, message_size);
-    if (ok && message != NULL && message_size > 0) {
+
+    TinyDBTreeStats tree_stats;
+    if (!run_tree_walk(table, table_name, &tree_stats, message, message_size)) {
+        return false;
+    }
+
+    TinyDBPageOwnershipStats ownership_stats;
+    char ownership_message_text[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+    if (!tinydb_check_page_ownership(table,
+                                     &ownership_stats,
+                                     ownership_message_text,
+                                     sizeof(ownership_message_text))) {
+        if (message != NULL && message_size > 0) {
+            snprintf(message,
+                     message_size,
+                     "page ownership: %s",
+                     ownership_message_text);
+        }
+        return false;
+    }
+
+    if (message != NULL && message_size > 0) {
         snprintf(message,
                  message_size,
-                 "ok: root=%u height=%u rows=%u leaf_pages=%u internal_pages=%u",
-                 stats.root_page_num,
-                 stats.height,
-                 stats.total_rows,
-                 stats.leaf_pages,
-                 stats.internal_pages);
+                 "ok: root=%u height=%u rows=%u leaf_pages=%u internal_pages=%u ownership_owned=%u free=%u",
+                 tree_stats.root_page_num,
+                 tree_stats.height,
+                 tree_stats.total_rows,
+                 tree_stats.leaf_pages,
+                 tree_stats.internal_pages,
+                 ownership_stats.owned_pages,
+                 ownership_stats.free_pages);
     }
-    return ok;
+    return true;
 }
 
 typedef struct {
@@ -390,6 +411,28 @@ static bool claim_tree_pages(OwnershipContext* context,
     return ok;
 }
 
+static bool validate_free_page_list(OwnershipContext* context) {
+    Pager* pager = context->table->pager;
+    for (uint32_t i = 0; i < pager->free_page_count; i++) {
+        uint32_t page_num = pager->free_pages[i];
+        if (page_num >= pager->num_pages) {
+            ownership_message(context,
+                              "free-page list contains out-of-range page %u",
+                              page_num);
+            return false;
+        }
+        for (uint32_t j = 0; j < i; j++) {
+            if (pager->free_pages[j] == page_num) {
+                ownership_message(context,
+                                  "free-page list contains duplicate page %u",
+                                  page_num);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool tinydb_check_page_ownership(Table* table,
                                  TinyDBPageOwnershipStats* stats,
                                  char* message,
@@ -430,7 +473,7 @@ bool tinydb_check_page_ownership(Table* table,
     context.message = message;
     context.message_size = message_size;
 
-    bool ok = true;
+    bool ok = validate_free_page_list(&context);
     for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
         uint32_t root = table->catalog.schemas[i].root_page_num;
         if (!claim_tree_pages(&context, root, i)) {
