@@ -41,6 +41,7 @@ typedef struct {
     uint32_t index_branch_count;
     uint32_t index_term_count;
     uint32_t index_fused_source_count;
+    bool has_cost_estimate;
     uint32_t estimated_rows;
     uint32_t estimated_table_rows;
     uint64_t estimated_cost;
