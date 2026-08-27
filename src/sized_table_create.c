@@ -1,3 +1,4 @@
+#include "column_type.h"
 #include "table.h"
 
 #include <ctype.h>
@@ -29,41 +30,6 @@ static bool ci_equal(const char* left, const char* right) {
     return *left == '\0' && *right == '\0';
 }
 
-static bool parse_varchar_storage(const char* type,
-                                  uint32_t* storage_size,
-                                  bool* explicitly_sized) {
-    if (type == NULL) return false;
-    if (ci_equal(type, "VARCHAR")) {
-        if (storage_size != NULL) *storage_size = 256u;
-        if (explicitly_sized != NULL) *explicitly_sized = false;
-        return true;
-    }
-
-    const char* current = type;
-    static const char prefix[] = "VARCHAR(";
-    for (size_t i = 0; i < sizeof(prefix) - 1u; i++) {
-        if (ci_char(current[i]) != ci_char(prefix[i])) return false;
-    }
-    current += sizeof(prefix) - 1u;
-    if (!isdigit((unsigned char)*current)) return false;
-
-    uint32_t declared = 0;
-    while (isdigit((unsigned char)*current)) {
-        declared = declared * 10u + (uint32_t)(*current - '0');
-        if (declared > 255u) return false;
-        current++;
-    }
-    if (*current != ')' || current[1] != '\0' || declared == 0u) return false;
-
-    if (storage_size != NULL) *storage_size = declared + 1u;
-    if (explicitly_sized != NULL) *explicitly_sized = true;
-    return true;
-}
-
-static bool is_int_type(const char* type) {
-    return ci_equal(type, "INT") || ci_equal(type, "INTEGER");
-}
-
 static bool legacy_column_names(uint32_t num_cols, char col_names[][32]) {
     return num_cols == 3u &&
            ci_equal(col_names[0], "id") &&
@@ -74,37 +40,28 @@ static bool legacy_column_names(uint32_t num_cols, char col_names[][32]) {
 static bool validate_sized_layout(uint32_t num_cols,
                                   char col_names[][32],
                                   char col_types[][16],
-                                  uint32_t* sizes,
+                                  TinyDBColumnTypeSpec* types,
                                   bool* recognized_all,
                                   bool* has_explicit_width) {
     *recognized_all = true;
     *has_explicit_width = false;
 
     for (uint32_t i = 0; i < num_cols; i++) {
-        if (is_int_type(col_types[i])) {
-            sizes[i] = (uint32_t)sizeof(uint32_t);
+        if (!tinydb_column_type_parse(col_types[i], &types[i])) {
+            memset(&types[i], 0, sizeof(types[i]));
+            *recognized_all = false;
             continue;
         }
-
-        bool explicitly_sized = false;
-        if (parse_varchar_storage(col_types[i], &sizes[i], &explicitly_sized)) {
-            if (explicitly_sized) *has_explicit_width = true;
-            continue;
-        }
-
-        sizes[i] = 0u;
-        *recognized_all = false;
+        if (types[i].explicitly_sized) *has_explicit_width = true;
     }
 
     if (*has_explicit_width && legacy_column_names(num_cols, col_names)) {
-        if (!is_int_type(col_types[0])) return false;
-        uint32_t username_size = 0;
-        uint32_t email_size = 0;
-        if (!parse_varchar_storage(col_types[1], &username_size, NULL) ||
-            !parse_varchar_storage(col_types[2], &email_size, NULL)) {
-            return false;
-        }
-        if (username_size != USERNAME_SIZE || email_size != EMAIL_SIZE) {
+        if (!*recognized_all ||
+            types[0].type != COL_TYPE_INT ||
+            types[1].type != COL_TYPE_VARCHAR ||
+            types[2].type != COL_TYPE_VARCHAR ||
+            types[1].storage_size != USERNAME_SIZE ||
+            types[2].storage_size != EMAIL_SIZE) {
             printf("Error: sized legacy Row schemas require username VARCHAR(32) and email VARCHAR(255).\n");
             return false;
         }
@@ -138,28 +95,30 @@ bool table_create_table(Table* table,
         return false;
     }
 
-    uint32_t sizes[MAX_COLUMNS_PER_TABLE] = {0};
+    TinyDBColumnTypeSpec types[MAX_COLUMNS_PER_TABLE];
+    memset(types, 0, sizeof(types));
     bool recognized_all = false;
     bool has_explicit_width = false;
     if (!validate_sized_layout(num_cols,
                                col_names,
                                col_types,
-                               sizes,
+                               types,
                                &recognized_all,
                                &has_explicit_width)) {
         return false;
     }
 
     if (recognized_all && has_explicit_width &&
-        ci_equal(col_names[0], "id") && is_int_type(col_types[0]) &&
+        ci_equal(col_names[0], "id") && types[0].type == COL_TYPE_INT &&
         !legacy_column_names(num_cols, col_names)) {
         uint32_t row_size = 0;
         for (uint32_t i = 0; i < num_cols; i++) {
-            if (row_size > ROW_SIZE || sizes[i] > ROW_SIZE - row_size) {
+            if (row_size > ROW_SIZE ||
+                types[i].storage_size > ROW_SIZE - row_size) {
                 printf("Error: CREATE TABLE row layout exceeds the fixed generic record slot.\n");
                 return false;
             }
-            row_size += sizes[i];
+            row_size += types[i].storage_size;
         }
     }
 
@@ -183,16 +142,9 @@ bool table_create_table(Table* table,
 
     uint32_t offset = 0;
     for (uint32_t i = 0; i < num_cols; i++) {
-        if (is_int_type(col_types[i])) {
-            schema->columns[i].type = COL_TYPE_INT;
-            schema->columns[i].size = (uint32_t)sizeof(uint32_t);
-        } else if (parse_varchar_storage(col_types[i],
-                                         &schema->columns[i].size,
-                                         NULL)) {
-            schema->columns[i].type = COL_TYPE_VARCHAR;
-        } else {
-            /* Preserve the historical fallback for metadata-only unsupported
-             * type names if a mixed schema ever reaches this internal API. */
+        if (recognized_all || types[i].storage_size != 0u) {
+            schema->columns[i].type = types[i].type;
+            schema->columns[i].size = types[i].storage_size;
         }
         schema->columns[i].offset = offset;
         offset += schema->columns[i].size;
