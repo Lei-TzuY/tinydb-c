@@ -74,13 +74,13 @@ def main():
             executable,
             db_file,
             [
-                "CREATE TABLE docs (id INT, name VARCHAR, category VARCHAR, price INT);",
-                "INSERT INTO docs VALUES (1, 'alpha', 'active', 10);",
-                "INSERT INTO docs VALUES (2, 'alphabet', 'active', 20);",
-                "INSERT INTO docs VALUES (3, 'beta', 'archived', 30);",
-                "INSERT INTO docs VALUES (4, 'alpine', 'inactive', 40);",
-                "INSERT INTO docs VALUES (5, 'omega', 'active', 50);",
-                "INSERT INTO docs VALUES (6, 'alphanumeric', 'archived', 60);",
+                "CREATE TABLE docs (id INT, name VARCHAR, category INT, price INT);",
+                "INSERT INTO docs VALUES (1, 'alpha', 1, 10);",
+                "INSERT INTO docs VALUES (2, 'alphabet', 1, 20);",
+                "INSERT INTO docs VALUES (3, 'beta', 2, 30);",
+                "INSERT INTO docs VALUES (4, 'alpine', 3, 40);",
+                "INSERT INTO docs VALUES (5, 'omega', 1, 50);",
+                "INSERT INTO docs VALUES (6, 'alphanumeric', 2, 60);",
                 "CREATE INDEX idx_docs_name ON docs(name);",
                 "CREATE INDEX idx_docs_price ON docs(price);",
                 "EXPLAIN SELECT id FROM docs WHERE name LIKE 'alp%';",
@@ -91,17 +91,17 @@ def main():
                 "SELECT COUNT(*) FROM docs WHERE name LIKE '%';",
                 "EXPLAIN SELECT id FROM docs WHERE name LIKE 'alp%' AND price >= 20;",
                 "SELECT COUNT(*) FROM docs WHERE name LIKE 'alp%' AND price >= 20;",
-                "SELECT COUNT(*) FROM docs WHERE name LIKE 'bet%' OR category = 'inactive';",
+                "SELECT COUNT(*) FROM docs WHERE name LIKE 'bet%' OR category = 3;",
                 "SELECT COUNT(*) FROM docs WHERE (name LIKE 'alp%' OR name LIKE 'bet%') AND price >= 30;",
-                "EXPLAIN ANALYZE SELECT id FROM docs WHERE (name LIKE 'alp%' OR category = 'inactive') AND price >= 20 LIMIT 2;",
-                "UPDATE docs SET category = 'match' WHERE name LIKE 'alp%';",
-                "SELECT COUNT(*) FROM docs WHERE category = 'match';",
+                "EXPLAIN ANALYZE SELECT id FROM docs WHERE (name LIKE 'alp%' OR category = 3) AND price >= 20 LIMIT 2;",
+                "UPDATE docs SET category = 9 WHERE name LIKE 'alp%';",
+                "SELECT COUNT(*) FROM docs WHERE category = 9;",
                 "BEGIN;",
                 "UPDATE docs SET price = 99 WHERE (name LIKE 'alp%' OR name LIKE 'bet%') AND price >= 30;",
                 "SELECT COUNT(*) FROM docs WHERE price = 99;",
                 "ROLLBACK;",
                 "SELECT COUNT(*) FROM docs WHERE price = 99;",
-                "DELETE FROM docs WHERE name LIKE '%ta' OR (category = 'match' AND price >= 40);",
+                "DELETE FROM docs WHERE name LIKE '%ta' OR (category = 9 AND price >= 40);",
                 "SELECT COUNT(*) FROM docs;",
                 "PRAGMA integrity_check;",
                 ".exit",
@@ -126,7 +126,7 @@ def main():
             [
                 "SELECT COUNT(*) FROM docs;",
                 "SELECT COUNT(*) FROM docs WHERE name LIKE 'alp%';",
-                "SELECT COUNT(*) FROM docs WHERE category = 'match';",
+                "SELECT COUNT(*) FROM docs WHERE category = 9;",
                 "SELECT COUNT(*) FROM docs WHERE name LIKE '%ga';",
                 "PRAGMA integrity_check;",
                 ".exit",
@@ -152,8 +152,8 @@ def main():
         print(
             "PASS: generic VARCHAR LIKE supports %/_ wildcards across SELECT, AND/OR, "
             "parenthesized predicates, UPDATE/DELETE, EXPLAIN ANALYZE, rollback and "
-            "reopen durability while typed mismatches fail closed and ordered indexes "
-            "are not misused as LIKE range plans."
+            "reopen durability on a mixed VARCHAR/INT schema while typed mismatches fail "
+            "closed and ordered indexes are not misused as LIKE range plans."
         )
     finally:
         cleanup(db_file)
