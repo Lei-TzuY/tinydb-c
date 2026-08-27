@@ -141,6 +141,10 @@ static TableSchema* find_schema_exact(Table* table, const char* name) {
 }
 
 static bool is_legacy_fixed_row_schema(const TableSchema* schema) {
+    /* Keep the exact compatibility predicate used by multitable.c. Older
+     * CREATE TABLE metadata records VARCHAR columns as 256 bytes each even
+     * though the legacy physical Row slot is 293 bytes, so row_size itself
+     * cannot be used to decide which execution path owns the table. */
     return schema != NULL &&
            schema->num_columns == 3 &&
            ci_equal(schema->columns[0].name, "id") &&
@@ -148,8 +152,7 @@ static bool is_legacy_fixed_row_schema(const TableSchema* schema) {
            ci_equal(schema->columns[2].name, "email") &&
            schema->columns[0].type == COL_TYPE_INT &&
            schema->columns[1].type == COL_TYPE_VARCHAR &&
-           schema->columns[2].type == COL_TYPE_VARCHAR &&
-           schema->row_size == ROW_SIZE;
+           schema->columns[2].type == COL_TYPE_VARCHAR;
 }
 
 static bool parse_target_after_prefix(const char* sql,
