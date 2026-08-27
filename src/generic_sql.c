@@ -745,6 +745,212 @@ static TinyDBGenericSqlStatus execute_select(Table* table,
     return generic_success(result, STATEMENT_SELECT);
 }
 
+static bool parse_projection_token(GenericParser* parser,
+                                   bool* count_only,
+                                   bool* star,
+                                   char* column,
+                                   size_t column_size) {
+    *count_only = false;
+    *star = false;
+    column[0] = '\0';
+
+    if (consume_char(parser, '*')) {
+        *star = true;
+        return true;
+    }
+
+    GenericParser backup = *parser;
+    if (consume_word(parser, "count") &&
+        consume_char(parser, '(') &&
+        consume_char(parser, '*') &&
+        consume_char(parser, ')')) {
+        *count_only = true;
+        return true;
+    }
+    *parser = backup;
+    return parse_identifier(parser, column, column_size);
+}
+
+static void format_plan_value(const TinyDBValue* value,
+                              char* output,
+                              size_t output_size) {
+    if (value->type == COL_TYPE_INT) {
+        snprintf(output, output_size, "%u", value->int_value);
+    } else {
+        snprintf(output, output_size, "'%s'", value->text);
+    }
+}
+
+TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSelectPlan* plan,
+    TinyDBGenericSqlResult* result) {
+    TinyDBGenericSqlResult local_result;
+    TinyDBGenericSqlResult* output = result != NULL ? result : &local_result;
+    initialize_result(output);
+    if (plan != NULL) memset(plan, 0, sizeof(*plan));
+
+    if (table == NULL || sql == NULL || plan == NULL) {
+        return output->status;
+    }
+
+    GenericParser parser;
+    parser.current = sql;
+    if (!consume_word(&parser, "select")) return output->status;
+
+    bool count_only = false;
+    bool star = false;
+    char projection_column[MAX_NAME_SIZE];
+    if (!parse_projection_token(&parser,
+                                &count_only,
+                                &star,
+                                projection_column,
+                                sizeof(projection_column))) {
+        return output->status;
+    }
+
+    char table_name[MAX_NAME_SIZE];
+    if (!consume_word(&parser, "from") ||
+        !parse_identifier(&parser, table_name, sizeof(table_name))) {
+        return output->status;
+    }
+
+    TableSchema* schema = find_schema_exact(table, table_name);
+    if (schema == NULL || is_legacy_fixed_row_schema(schema)) {
+        return output->status;
+    }
+
+    char schema_message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_schema_supports_records(schema,
+                                        schema_message,
+                                        sizeof(schema_message))) {
+        return generic_execute_error(output,
+                                     STATEMENT_SELECT,
+                                     EXECUTE_KEY_NOT_FOUND,
+                                     schema_message);
+    }
+
+    if (count_only) {
+        snprintf(plan->projection, sizeof(plan->projection), "COUNT(*)");
+    } else if (star) {
+        snprintf(plan->projection, sizeof(plan->projection), "*");
+    } else {
+        int projection_index = find_column_index(schema, projection_column);
+        if (projection_index < 0) {
+            return generic_syntax_error(
+                output,
+                STATEMENT_SELECT,
+                "generic SELECT projection references an unknown column");
+        }
+        snprintf(plan->projection,
+                 sizeof(plan->projection),
+                 "%s",
+                 schema->columns[projection_index].name);
+    }
+
+    uint32_t filter_column_index = 0;
+    if (consume_word(&parser, "where")) {
+        char filter_column[MAX_NAME_SIZE];
+        if (!parse_identifier(&parser,
+                              filter_column,
+                              sizeof(filter_column))) {
+            return generic_syntax_error(output,
+                                        STATEMENT_SELECT,
+                                        "generic SELECT WHERE requires a column name");
+        }
+        int column_index = find_column_index(schema, filter_column);
+        if (column_index < 0 || !consume_char(&parser, '=')) {
+            return generic_syntax_error(
+                output,
+                STATEMENT_SELECT,
+                "generic SELECT WHERE references an unknown column or operator");
+        }
+        filter_column_index = (uint32_t)column_index;
+        TinyDBValue filter_value;
+        if (!parse_value_for_column(&parser,
+                                    &schema->columns[filter_column_index],
+                                    &filter_value)) {
+            return generic_syntax_error(
+                output,
+                STATEMENT_SELECT,
+                "generic SELECT filter value does not match the target column type");
+        }
+        plan->has_filter = true;
+        snprintf(plan->filter_column,
+                 sizeof(plan->filter_column),
+                 "%s",
+                 schema->columns[filter_column_index].name);
+        format_plan_value(&filter_value,
+                          plan->filter_value,
+                          sizeof(plan->filter_value));
+    }
+
+    if (consume_word(&parser, "limit")) {
+        uint32_t ignored_limit = 0;
+        if (!parse_uint32(&parser, &ignored_limit)) {
+            return generic_syntax_error(output,
+                                        STATEMENT_SELECT,
+                                        "LIMIT requires an integer");
+        }
+        if (consume_word(&parser, "offset")) {
+            uint32_t ignored_offset = 0;
+            if (!parse_uint32(&parser, &ignored_offset)) {
+                return generic_syntax_error(output,
+                                            STATEMENT_SELECT,
+                                            "OFFSET requires an integer");
+            }
+        }
+    } else if (consume_word(&parser, "offset")) {
+        uint32_t ignored_offset = 0;
+        if (!parse_uint32(&parser, &ignored_offset)) {
+            return generic_syntax_error(output,
+                                        STATEMENT_SELECT,
+                                        "OFFSET requires an integer");
+        }
+    }
+
+    if (!consume_end(&parser)) {
+        return generic_syntax_error(output,
+                                    STATEMENT_SELECT,
+                                    "generic SELECT contains an unsupported clause");
+    }
+
+    plan->applicable = true;
+    plan->root_page_num = schema->root_page_num;
+    plan->kind = plan->has_filter && filter_column_index == 0
+        ? TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP
+        : TINYDB_GENERIC_PLAN_FULL_SCAN;
+    snprintf(plan->table_name, sizeof(plan->table_name), "%s", schema->name);
+
+    output->status = TINYDB_GENERIC_SQL_SUCCESS;
+    output->statement_type = STATEMENT_SELECT;
+    output->statement_type_valid = true;
+    output->execute_result = EXECUTE_SUCCESS;
+    return output->status;
+}
+
+void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
+    if (plan == NULL || !plan->applicable) return;
+
+    if (plan->kind == TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP) {
+        printf("PLAN: GENERIC PRIMARY KEY LOOKUP\n");
+    } else {
+        printf("PLAN: GENERIC SCHEMA-AWARE TABLE SCAN\n");
+    }
+    printf("  TABLE: %s (root page %u)\n",
+           plan->table_name,
+           plan->root_page_num);
+    printf("  PROJECTION: %s\n", plan->projection);
+    if (plan->has_filter) {
+        printf("  FILTER: %s = %s\n",
+               plan->filter_column,
+               plan->filter_value);
+    } else {
+        printf("  FILTER: none\n");
+    }
+}
+
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(Table* table,
                                                        const char* sql,
                                                        TinyDBGenericSqlResult* result) {
