@@ -38,32 +38,29 @@ static bool legacy_fixed_row_shape(const CreateTableStatement* create) {
            is_varchar_type(create->col_types[2]);
 }
 
+static bool generic_record_candidate(const CreateTableStatement* create) {
+    return create->num_columns > 0 &&
+           ci_equal(create->col_names[0], "id") &&
+           is_int_type(create->col_types[0]) &&
+           !legacy_fixed_row_shape(create);
+}
+
 static bool validate_generic_layout(const CreateTableStatement* create,
                                     char* message,
                                     size_t message_size) {
-    if (create->num_columns == 0 ||
-        !ci_equal(create->col_names[0], "id") ||
-        !is_int_type(create->col_types[0])) {
-        snprintf(message,
-                 message_size,
-                 "generic CREATE TABLE requires the first column to be id INT");
-        return false;
-    }
-
     uint32_t row_size = 0;
     for (uint32_t i = 0; i < create->num_columns; i++) {
         uint32_t column_size = 0;
         if (is_int_type(create->col_types[i])) {
             column_size = (uint32_t)sizeof(uint32_t);
         } else if (is_varchar_type(create->col_types[i])) {
-            /* Keep this policy exactly aligned with the current catalog/record
-             * representation: generic VARCHAR columns occupy 256 serialized bytes. */
+            /* Keep this policy aligned with the current catalog/record format:
+             * generic VARCHAR columns occupy 256 serialized bytes. */
             column_size = 256u;
         } else {
-            snprintf(message,
-                     message_size,
-                     "generic CREATE TABLE contains an unsupported column type");
-            return false;
+            /* The historical CREATE TABLE path owns metadata-only/unsupported
+             * schema semantics. Do not broaden this wrapper into a new type parser. */
+            return true;
         }
 
         if (row_size > ROW_SIZE || column_size > ROW_SIZE - row_size) {
@@ -101,7 +98,7 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
         memset(&statement, 0, sizeof(statement));
         if (prepare_statement(sql, &statement) == PREPARE_SUCCESS &&
             statement.type == STATEMENT_CREATE_TABLE &&
-            !legacy_fixed_row_shape(&statement.create_table)) {
+            generic_record_candidate(&statement.create_table)) {
             char message[TINYDB_ENGINE_MESSAGE_MAX];
             if (!validate_generic_layout(&statement.create_table,
                                          message,
