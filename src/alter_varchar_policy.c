@@ -1,3 +1,4 @@
+#include "column_type.h"
 #include "engine.h"
 #include "multitable.h"
 #include "record.h"
@@ -46,26 +47,6 @@ static bool fixed_row_shape(const TableSchema* schema) {
            schema->columns[2].type == COL_TYPE_VARCHAR;
 }
 
-static bool parse_sized_varchar(const char* type, uint32_t* storage_size) {
-    if (type == NULL) return false;
-    static const char prefix[] = "VARCHAR(";
-    for (size_t i = 0; i < sizeof(prefix) - 1u; i++) {
-        if (type[i] == '\0' || ci_char(type[i]) != ci_char(prefix[i])) return false;
-    }
-    const char* current = type + sizeof(prefix) - 1u;
-    if (!isdigit((unsigned char)*current)) return false;
-
-    uint32_t declared = 0;
-    while (isdigit((unsigned char)*current)) {
-        declared = declared * 10u + (uint32_t)(*current - '0');
-        if (declared > 255u) return false;
-        current++;
-    }
-    if (*current != ')' || current[1] != '\0' || declared == 0u) return false;
-    *storage_size = declared + 1u;
-    return true;
-}
-
 static void initialize_result(TinyDBSqlResult* result, TinyDBSqlStatus status) {
     if (result == NULL) return;
     memset(result, 0, sizeof(*result));
@@ -104,8 +85,10 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
         return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
 
-    uint32_t storage_size = 0;
-    if (!parse_sized_varchar(statement.alter_table.new_col_type, &storage_size)) {
+    TinyDBColumnTypeSpec type;
+    if (!tinydb_column_type_parse(statement.alter_table.new_col_type, &type) ||
+        type.type != COL_TYPE_VARCHAR ||
+        !type.explicitly_sized) {
         return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
 
@@ -133,7 +116,8 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     bool executable_generic = tinydb_schema_supports_records(
         target, schema_message, sizeof(schema_message));
     if (executable_generic &&
-        (target->row_size > ROW_SIZE || storage_size > ROW_SIZE - target->row_size)) {
+        (target->row_size > ROW_SIZE ||
+         type.storage_size > ROW_SIZE - target->row_size)) {
         return fail_result(
             result,
             TINYDB_SQL_POLICY_ERROR,
