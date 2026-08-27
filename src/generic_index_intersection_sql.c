@@ -1,4 +1,5 @@
 #include "generic_index_candidates.h"
+#include "generic_index_cost.h"
 #include "generic_sql.h"
 
 #include <ctype.h>
@@ -18,6 +19,7 @@ typedef struct {
     uint32_t predicate_index;
     uint32_t column_index;
     GenericSecondaryIndex* index;
+    uint32_t estimated_count;
 } IntersectionSource;
 
 typedef struct {
@@ -31,6 +33,12 @@ typedef struct {
     bool has_limit;
     uint32_t limit;
     uint32_t offset;
+    bool cost_estimated;
+    uint32_t estimated_rows;
+    uint32_t estimated_table_rows;
+    uint64_t estimated_cost;
+    uint64_t estimated_anchor_cost;
+    uint64_t estimated_scan_cost;
 } IntersectionSelect;
 
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_single_anchor_base(
@@ -246,6 +254,93 @@ static uint32_t fused_source_count(const IntersectionSelect* select) {
     return fused;
 }
 
+static void sort_sources_by_estimate(IntersectionSelect* select) {
+    for (uint32_t i = 0; i < select->source_count; i++) {
+        uint32_t smallest = i;
+        for (uint32_t j = i + 1u; j < select->source_count; j++) {
+            if (select->sources[j].estimated_count <
+                select->sources[smallest].estimated_count) {
+                smallest = j;
+            }
+        }
+        if (smallest != i) {
+            IntersectionSource swap = select->sources[i];
+            select->sources[i] = select->sources[smallest];
+            select->sources[smallest] = swap;
+        }
+    }
+}
+
+static bool apply_cost_model(Table* table, IntersectionSelect* select) {
+    uint32_t source_rows[INTERSECTION_MAX_SOURCES];
+    uint32_t table_rows = 0;
+
+    for (uint32_t i = 0; i < select->source_count; i++) {
+        TinyDBGenericPredicate source_predicates[MAX_COLUMNS_PER_TABLE];
+        uint32_t source_predicate_count = collect_source_predicates(
+            select,
+            &select->sources[i],
+            source_predicates,
+            MAX_COLUMNS_PER_TABLE);
+        if (source_predicate_count == 0) return true;
+
+        TinyDBGenericIndexEstimate estimate;
+        char message[TINYDB_GENERIC_SQL_MESSAGE_MAX] = {0};
+        bool estimated = source_predicate_count >= 2
+            ? tinydb_generic_index_estimate_conjunctive_candidates(
+                  table,
+                  select->schema,
+                  select->sources[i].index,
+                  source_predicates,
+                  source_predicate_count,
+                  &estimate,
+                  message,
+                  sizeof(message))
+            : tinydb_generic_index_estimate_candidates(
+                  table,
+                  select->schema,
+                  select->sources[i].index,
+                  &source_predicates[0],
+                  &estimate,
+                  message,
+                  sizeof(message));
+        if (!estimated) {
+            return true;
+        }
+        select->sources[i].estimated_count = estimate.candidate_count;
+        source_rows[i] = estimate.candidate_count;
+        if (i == 0 || estimate.total_count > table_rows) {
+            table_rows = estimate.total_count;
+        }
+    }
+
+    sort_sources_by_estimate(select);
+    for (uint32_t i = 0; i < select->source_count; i++) {
+        source_rows[i] = select->sources[i].estimated_count;
+    }
+
+    select->cost_estimated = true;
+    select->estimated_table_rows = table_rows;
+    select->estimated_scan_cost = tinydb_generic_scan_cost(table_rows);
+    select->estimated_anchor_cost =
+        tinydb_generic_anchor_cost(select->sources[0].estimated_count);
+
+    if (select->sources[0].estimated_count == 0) {
+        select->estimated_rows = 0;
+        select->estimated_cost = 0;
+        return true;
+    }
+
+    select->estimated_cost = tinydb_generic_intersection_cost(
+        source_rows,
+        select->source_count,
+        table_rows,
+        &select->estimated_rows);
+
+    return select->estimated_cost <= select->estimated_anchor_cost &&
+           select->estimated_cost <= select->estimated_scan_cost;
+}
+
 static bool parse_intersection_select(Table* table,
                                       const char* sql,
                                       IntersectionSelect* select) {
@@ -328,7 +423,8 @@ static bool parse_intersection_select(Table* table,
 
     if (!tinydb_generic_consume_end(&parser) ||
         has_primary_key_equality(select) ||
-        !choose_sources(table, select)) {
+        !choose_sources(table, select) ||
+        !apply_cost_model(table, select)) {
         return false;
     }
     return true;
@@ -438,24 +534,22 @@ static bool collect_intersection(Table* table,
             free_candidate_sets(sets, collected);
             return true;
         }
-    }
 
-    uint32_t smallest = 0;
-    for (uint32_t i = 1; i < collected; i++) {
-        if (sets[i].count < sets[smallest].count) smallest = i;
-    }
-    if (smallest != 0) {
-        TinyDBGenericIndexCandidates swap = sets[0];
-        sets[0] = sets[smallest];
-        sets[smallest] = swap;
-    }
+        if (i == 0) {
+            *intersection = sets[0];
+            memset(&sets[0], 0, sizeof(sets[0]));
+            continue;
+        }
 
-    *intersection = sets[0];
-    memset(&sets[0], 0, sizeof(sets[0]));
-    for (uint32_t i = 1; i < collected; i++) {
         intersect_ids(intersection, &sets[i]);
-        if (intersection->count == 0) break;
+        tinydb_generic_index_candidates_free(&sets[i]);
+        memset(&sets[i], 0, sizeof(sets[i]));
+        if (intersection->count == 0) {
+            free_candidate_sets(sets, collected);
+            return true;
+        }
     }
+
     free_candidate_sets(sets, collected);
     return true;
 }
@@ -655,6 +749,11 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     plan->index_branch_count = select.source_count;
     plan->index_term_count = ordered_source_term_count(&select);
     plan->index_fused_source_count = fused_source_count(&select);
+    plan->has_cost_estimate = select.cost_estimated;
+    plan->estimated_rows = select.estimated_rows;
+    plan->estimated_table_rows = select.estimated_table_rows;
+    plan->estimated_cost = select.estimated_cost;
+    plan->estimated_scan_cost = select.estimated_scan_cost;
     snprintf(plan->table_name, sizeof(plan->table_name), "%s", select.schema->name);
     snprintf(plan->index_name, sizeof(plan->index_name), "%s", "multiple");
     snprintf(plan->projection,
@@ -694,5 +793,13 @@ void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
         printf("  FUSED SOURCES: %u\n", plan->index_fused_source_count);
     }
     printf("  PROJECTION: %s\n", plan->projection);
+    if (plan->has_cost_estimate) {
+        printf("  ESTIMATED ROWS: %u / %u\n",
+               plan->estimated_rows,
+               plan->estimated_table_rows);
+        printf("  ESTIMATED COST: %llu (scan %llu)\n",
+               (unsigned long long)plan->estimated_cost,
+               (unsigned long long)plan->estimated_scan_cost);
+    }
     printf("  FILTER: %s\n", plan->filter_expression);
 }
