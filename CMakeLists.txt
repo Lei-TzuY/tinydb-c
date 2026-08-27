@@ -18,6 +18,7 @@ set(TINYDB_CORE_SOURCES
     src/diagnostics.c
     src/engine.c
     src/generic_compound_plan_guard.c
+    src/generic_index_policy.c
     src/generic_index_sql.c
     src/generic_predicate.c
     src/generic_predicate_plan_sql.c
@@ -74,6 +75,15 @@ set_source_files_properties(
     src/generic_index_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_index_base"
+)
+
+# The original multi-root policy intentionally allowed indexes only on root 0.
+# Preserve it under a private symbol and expose the narrower schema-aware policy
+# from generic_index_policy.c for generic fixed-slot table roots.
+set_source_files_properties(
+    src/multitable.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "multitable_index_target_supported=multitable_index_target_supported_legacy"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
