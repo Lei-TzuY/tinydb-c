@@ -35,6 +35,16 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_intersection_base(
 void tinydb_generic_sql_print_plan_intersection_base(
     const TinyDBGenericSelectPlan* plan);
 
+TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_intersection_forced(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSqlResult* result);
+TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_intersection_forced(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSelectPlan* plan,
+    TinyDBGenericSqlResult* result);
+
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_single_anchor_base(
     Table* table,
     const char* sql,
@@ -265,8 +275,11 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(
     const char* sql,
     TinyDBGenericSqlResult* result) {
     CorrelationDecision decision;
-    if (correlation_decision(table, sql, &decision) && decision.downgrade) {
-        return tinydb_generic_sql_try_execute_single_anchor_base(table, sql, result);
+    if (correlation_decision(table, sql, &decision)) {
+        if (decision.downgrade) {
+            return tinydb_generic_sql_try_execute_single_anchor_base(table, sql, result);
+        }
+        return tinydb_generic_sql_try_execute_intersection_forced(table, sql, result);
     }
     return tinydb_generic_sql_try_execute_intersection_base(table, sql, result);
 }
@@ -282,6 +295,9 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     TinyDBGenericSqlStatus status = TINYDB_GENERIC_SQL_NOT_APPLICABLE;
     if (correlated && decision.downgrade) {
         status = tinydb_generic_sql_build_select_plan_single_anchor_base(
+            table, sql, plan, result);
+    } else if (correlated) {
+        status = tinydb_generic_sql_build_select_plan_intersection_forced(
             table, sql, plan, result);
     } else {
         status = tinydb_generic_sql_build_select_plan_intersection_base(
