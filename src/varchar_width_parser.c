@@ -46,6 +46,12 @@ static bool starts_create_table(const char* input) {
            consume_ci_word(&current, "table");
 }
 
+static bool starts_alter_table(const char* input) {
+    const char* current = input;
+    return consume_ci_word(&current, "alter") &&
+           consume_ci_word(&current, "table");
+}
+
 static bool copy_byte(char* output,
                       size_t output_size,
                       size_t* written,
@@ -94,10 +100,10 @@ static bool parse_width_suffix(const char* input,
     return true;
 }
 
-static bool normalize_create_table(const char* input,
-                                   char* output,
-                                   size_t output_size,
-                                   bool* had_sized_varchar) {
+static bool normalize_varchar_widths(const char* input,
+                                     char* output,
+                                     size_t output_size,
+                                     bool* had_sized_varchar) {
     size_t written = 0;
     bool in_string = false;
     *had_sized_varchar = false;
@@ -246,29 +252,74 @@ static bool annotate_create_widths(const char* input,
     return true;
 }
 
+static bool annotate_alter_width(const char* input,
+                                 AlterTableStatement* alter) {
+    const char* current = input;
+    if (!consume_ci_word(&current, "alter") ||
+        !consume_ci_word(&current, "table") ||
+        !parse_identifier(&current) ||
+        !consume_ci_word(&current, "add") ||
+        !consume_ci_word(&current, "column") ||
+        !parse_identifier(&current)) {
+        return false;
+    }
+
+    current = skip_spaces(current);
+    size_t word_length = 0;
+    if (!ci_word_at(current, "varchar", &word_length)) return false;
+    current += word_length;
+
+    const char* suffix_end = NULL;
+    uint32_t declared_width = 0;
+    if (!parse_width_suffix(current, &suffix_end, &declared_width)) return false;
+    current = skip_spaces(suffix_end);
+    if (*current == ';') current = skip_spaces(current + 1);
+    if (*current != '\0') return false;
+
+    int formatted = snprintf(alter->new_col_type,
+                             sizeof(alter->new_col_type),
+                             "VARCHAR(%u)",
+                             declared_width);
+    return formatted >= 0 &&
+           (size_t)formatted < sizeof(alter->new_col_type);
+}
+
 PrepareResult prepare_statement(const char* input, Statement* statement) {
-    if (input == NULL || statement == NULL || !starts_create_table(input)) {
+    if (input == NULL || statement == NULL) {
+        return prepare_statement_legacy_base(input, statement);
+    }
+
+    bool create_table = starts_create_table(input);
+    bool alter_table = starts_alter_table(input);
+    if (!create_table && !alter_table) {
         return prepare_statement_legacy_base(input, statement);
     }
 
     char normalized[VARCHAR_WIDTH_SQL_MAX];
     bool had_sized_varchar = false;
-    if (!normalize_create_table(input,
-                                normalized,
-                                sizeof(normalized),
-                                &had_sized_varchar)) {
+    if (!normalize_varchar_widths(input,
+                                  normalized,
+                                  sizeof(normalized),
+                                  &had_sized_varchar)) {
         return PREPARE_SYNTAX_ERROR;
     }
 
     PrepareResult result = prepare_statement_legacy_base(
         had_sized_varchar ? normalized : input,
         statement);
-    if (result != PREPARE_SUCCESS || !had_sized_varchar ||
-        statement->type != STATEMENT_CREATE_TABLE) {
+    if (result != PREPARE_SUCCESS || !had_sized_varchar) {
         return result;
     }
 
-    if (!annotate_create_widths(input, &statement->create_table)) {
+    bool annotated = false;
+    if (statement->type == STATEMENT_CREATE_TABLE) {
+        annotated = annotate_create_widths(input, &statement->create_table);
+    } else if (statement->type == STATEMENT_ALTER_TABLE &&
+               statement->alter_table.is_add_column) {
+        annotated = annotate_alter_width(input, &statement->alter_table);
+    }
+
+    if (!annotated) {
         memset(statement, 0, sizeof(*statement));
         return PREPARE_SYNTAX_ERROR;
     }
