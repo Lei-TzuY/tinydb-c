@@ -4,11 +4,17 @@
 The runner keeps one database alive across many crash cycles and verifies two
 important durability invariants after every cycle:
 
-1. transactions that reached COMMIT survive an abrupt process kill;
+1. transactions that returned successfully from COMMIT survive an immediate
+   hard process exit without a graceful database close/checkpoint;
 2. rows written inside a transaction that never reached COMMIT never leak.
 
-It also runs PRAGMA integrity_check after each recovery so B+ tree/page damage
-is detected immediately instead of only checking logical row visibility.
+The committed phase uses tinydb_committed_crash_probe instead of a timing-only
+sleep. This makes the crash point deterministic: pager_commit() has durably
+synced the WAL and returned before the helper calls _exit(). The uncommitted
+phase still kills the REPL while a transaction is active.
+
+PRAGMA integrity_check runs after every recovery so B+ tree/page damage is
+detected immediately instead of only checking logical row visibility.
 """
 
 from __future__ import annotations
@@ -32,11 +38,22 @@ def find_executable(repo_root: Path) -> Path | None:
     return next((path for path in candidates if path.exists()), None)
 
 
+def find_committed_probe(repo_root: Path) -> Path | None:
+    candidates = [
+        repo_root / "build" / "Debug" / "tinydb_committed_crash_probe.exe",
+        repo_root / "build" / "Release" / "tinydb_committed_crash_probe.exe",
+        repo_root / "build" / "tinydb_committed_crash_probe.exe",
+        repo_root / "build" / "tinydb_committed_crash_probe",
+    ]
+    return next((path for path in candidates if path.exists()), None)
+
+
 def generated_paths(db_path: Path) -> list[Path]:
     """Return files TinyDB can create for the no-secondary-index workload."""
     return [
         db_path,
         Path(str(db_path) + ".wal"),
+        Path(str(db_path) + ".free"),
         Path(str(db_path) + ".catalog"),
         Path(str(db_path) + ".catalog.wal"),
         Path(str(db_path) + ".username.idx"),
@@ -62,6 +79,26 @@ def run_commands(executable: Path, db_path: Path, commands: str) -> tuple[int, s
     )
     stdout, stderr = process.communicate(input=commands)
     return process.returncode, stdout, stderr
+
+
+def run_committed_crash(
+    probe: Path,
+    db_path: Path,
+    start_id: int,
+    row_count: int,
+) -> None:
+    result = subprocess.run(
+        [str(probe), str(db_path), str(start_id), str(row_count)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "committed crash probe failed "
+            f"(rc={result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
 
 def crash_after_commands(
@@ -99,9 +136,7 @@ def sql_row(row_id: int, username: str, email: str) -> str:
 
 
 def insert_sql(row_id: int, username: str, email: str) -> str:
-    return (
-        f"INSERT INTO users VALUES ({row_id}, '{username}', '{email}');\n"
-    )
+    return f"INSERT INTO users VALUES ({row_id}, '{username}', '{email}');\n"
 
 
 def verify_state(
@@ -140,8 +175,13 @@ def make_row(rng: random.Random, row_id: int, prefix: str) -> tuple[str, str]:
     return username, email
 
 
+def committed_probe_row(row_id: int) -> tuple[str, str]:
+    return f"durable_{row_id}", f"durable{row_id}@crash.test"
+
+
 def run_stress(
     executable: Path,
+    committed_probe: Path,
     db_path: Path,
     iterations: int,
     rows_per_round: int,
@@ -155,19 +195,22 @@ def run_stress(
     next_ghost_id = 1_000_000
 
     for iteration in range(1, iterations + 1):
-        # Phase A: reach COMMIT, then kill without a graceful .exit. Reopen must
-        # recover every row from the committed WAL transaction.
-        commit_commands = "BEGIN;\n"
+        # Phase A: the helper returns from COMMIT, verifies a non-empty durable
+        # WAL exists, then immediately _exit()s without tinydb_close(). Reopen
+        # must recover every row from that committed WAL transaction.
+        round_start_id = next_committed_id
         round_committed: dict[int, tuple[str, str]] = {}
         for _ in range(rows_per_round):
             row_id = next_committed_id
             next_committed_id += 1
-            username, email = make_row(rng, row_id, "durable")
-            round_committed[row_id] = (username, email)
-            commit_commands += insert_sql(row_id, username, email)
-        commit_commands += "COMMIT;\n"
+            round_committed[row_id] = committed_probe_row(row_id)
 
-        crash_after_commands(executable, db_path, commit_commands, settle_seconds)
+        run_committed_crash(
+            committed_probe,
+            db_path,
+            round_start_id,
+            rows_per_round,
+        )
         committed_rows.update(round_committed)
         verify_state(executable, db_path, committed_rows, forbidden_rows)
 
@@ -208,9 +251,10 @@ def parse_args() -> argparse.Namespace:
         "--settle-seconds",
         type=float,
         default=0.35,
-        help="time to let commands reach the engine before injecting SIGKILL/TerminateProcess",
+        help="time to let uncommitted commands reach the engine before injecting SIGKILL/TerminateProcess",
     )
     parser.add_argument("--executable", type=Path)
+    parser.add_argument("--committed-probe", type=Path)
     parser.add_argument("--db", type=Path)
     parser.add_argument("--keep-db", action="store_true")
     return parser.parse_args()
@@ -227,8 +271,15 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     executable = args.executable or find_executable(repo_root)
+    committed_probe = args.committed_probe or find_committed_probe(repo_root)
     if executable is None or not executable.exists():
         print("Could not find the tinydb executable; build the project first.", file=sys.stderr)
+        return 2
+    if committed_probe is None or not committed_probe.exists():
+        print(
+            "Could not find tinydb_committed_crash_probe; build the project first.",
+            file=sys.stderr,
+        )
         return 2
 
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -249,6 +300,7 @@ def main() -> int:
         cleanup_database(db_path)
         run_stress(
             executable=executable.resolve(),
+            committed_probe=committed_probe.resolve(),
             db_path=db_path,
             iterations=args.iterations,
             rows_per_round=args.rows_per_round,
