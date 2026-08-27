@@ -17,6 +17,7 @@ set(TINYDB_CORE_SOURCES
     src/compiler.c
     src/diagnostics.c
     src/engine.c
+    src/generic_boolean.c
     src/generic_compound_plan_guard.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
@@ -28,6 +29,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_sql.c
     src/generic_or_mutation_sql.c
     src/generic_or_sql.c
+    src/generic_parenthesized_sql.c
     src/generic_predicate.c
     src/generic_predicate_plan_sql.c
     src/generic_predicate_sql.c
@@ -45,10 +47,10 @@ set(TINYDB_CORE_SOURCES
 )
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
-# layer owns generic WHERE semantics. The volatile equality-index layer remains
-# the lowest index fallback; durable equality snapshots sit above it, then the
-# typed persistent range-index layer. OR SELECT owns disjunctive reads/plans and
-# the outer OR mutation layer owns UPDATE/DELETE disjunctions.
+# layer owns typed comparisons. Equality/range indexes and flat AND/OR handling
+# remain unchanged for ungrouped statements. The outer parenthesized layer only
+# intercepts WHERE expressions that actually contain boolean grouping, so the
+# established PK/index fast paths stay available to every ungrouped query.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -106,7 +108,12 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_range_index_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_parenthesized_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_parenthesized_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_range_index_base"
+)
+set_source_files_properties(
+    src/generic_or_mutation_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_parenthesized_base"
 )
 set_source_files_properties(
     src/generic_compound_plan_guard.c
