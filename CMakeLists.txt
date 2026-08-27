@@ -19,6 +19,7 @@ set(TINYDB_CORE_SOURCES
     src/engine.c
     src/generic_index_sql.c
     src/generic_predicate.c
+    src/generic_predicate_plan_sql.c
     src/generic_predicate_sql.c
     src/generic_range_mutation_sql.c
     src/generic_range_plan_sql.c
@@ -34,8 +35,9 @@ set(TINYDB_CORE_SOURCES
 )
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
-# layer owns generic WHERE semantics. The outer index layer only intercepts
-# non-users equality SELECTs that have a schema-aware single-column index.
+# layer owns generic WHERE semantics. The compound planner wraps the historical
+# equality/range planner, while the outer index layer still gets the final say
+# for eligible single-column equality index plans.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -59,7 +61,12 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_range_plan_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range"
+    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range_base"
+)
+set_source_files_properties(
+    src/generic_predicate_plan_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range;tinydb_generic_sql_build_select_plan_predicate_base=tinydb_generic_sql_build_select_plan_range_base;tinydb_generic_sql_print_plan_predicate_base=tinydb_generic_sql_print_plan_range_base"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
