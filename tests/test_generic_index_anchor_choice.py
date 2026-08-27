@@ -137,7 +137,9 @@ def main():
         require(dropped, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
         require(dropped, "INDEX: idx_products_price")
         require(dropped, "ANCHOR: price >= 10")
-        require(dropped, "ANCHOR: price = 100")
+        require(dropped, "PLAN: GENERIC SECONDARY INDEX FUSED RANGE")
+        require(dropped, "RANGE TERMS: 2 on price")
+        require(dropped, "FILTER: price >= 10 AND price = 100")
         if "PLAN: GENERIC SECONDARY INDEX INTERSECTION" in dropped:
             raise AssertionError("intersection remained active with only one usable index\n" + dropped)
         if os.path.exists(category_range):
@@ -146,7 +148,7 @@ def main():
         print(
             "PASS: flat AND predicates intersect distinct secondary indexes, reuse typed "
             "snapshots after reopen, rebuild both sources on epoch change, fall back after "
-            "DROP INDEX, and retain equality-over-range preference on one remaining index."
+            "DROP INDEX, and fuse compatible terms on the one remaining index."
         )
     finally:
         cleanup(db_file)
