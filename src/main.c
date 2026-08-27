@@ -61,11 +61,10 @@ static const char* meta_argument(const char* input, const char* command) {
     if (strncmp(input, command, command_length) != 0) return NULL;
     const char* argument = input + command_length;
     if (*argument != '\0' && !isspace((unsigned char)*argument)) return NULL;
-    argument = skip_spaces(argument);
-    return argument;
+    return skip_spaces(argument);
 }
 
-static void print_schema(const TableSchema* schema) {
+static void print_schema(Table* table, const TableSchema* schema) {
     if (schema == NULL) return;
     printf("Table: %s (root page %u)\n", schema->name, schema->root_page_num);
     for (uint32_t i = 0; i < schema->num_columns; i++) {
@@ -83,20 +82,55 @@ static void print_schema(const TableSchema* schema) {
                    column->size);
         }
     }
+    if (strcmp(schema->name, "users") == 0 && table->username_index_enabled) {
+        printf("Index: idx_users_username ON users(username)\n");
+    }
+}
+
+static bool get_table_stats(Table* table,
+                            const char* table_name,
+                            TinyDBTreeStats* stats) {
+    if (!tinydb_get_tree_stats(table, table_name, stats)) {
+        printf("Error: Unable to inspect table '%s'.\n", table_name);
+        return false;
+    }
+    return true;
 }
 
 static void print_table_stats(Table* table, const char* table_name) {
     TinyDBTreeStats stats;
-    if (!tinydb_get_tree_stats(table, table_name, &stats)) {
-        printf("Error: Unable to inspect table '%s'.\n", table_name);
-        return;
-    }
+    if (!get_table_stats(table, table_name, &stats)) return;
     printf("Table: %s\n", table_name);
     printf("  Root Page: %u\n", stats.root_page_num);
     printf("  Height: %u\n", stats.height);
     printf("  Rows: %u\n", stats.total_rows);
     printf("  Leaf Pages: %u\n", stats.leaf_pages);
     printf("  Internal Pages: %u\n", stats.internal_pages);
+}
+
+static void print_global_stats(Table* table) {
+    uint32_t total_rows = 0;
+    uint32_t leaf_pages = 0;
+    uint32_t internal_pages = 0;
+
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        TinyDBTreeStats stats;
+        if (tinydb_get_tree_stats(table, table->catalog.schemas[i].name, &stats)) {
+            total_rows += stats.total_rows;
+            leaf_pages += stats.leaf_pages;
+            internal_pages += stats.internal_pages;
+        }
+    }
+
+    /* Keep the long-standing field names for scripts/tests while extending
+     * their meaning to all catalog roots in a multi-table database. */
+    printf("Total Pages: %u\n", table->pager->num_pages);
+    printf("Leaf Pages: %u\n", leaf_pages);
+    printf("Internal Pages: %u\n", internal_pages);
+    printf("Free Pages: %u\n", table->pager->free_page_count);
+    printf("Total Rows: %u\n", total_rows);
+    printf("In Transaction: %s\n", table->in_transaction ? "Yes" : "No");
+    printf("Secondary Index: %s\n", table->username_index_enabled ? "Enabled" : "Disabled");
 }
 
 static void check_table(Table* table, const char* table_name) {
@@ -142,14 +176,14 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
 
     argument = meta_argument(input_buffer->buffer, ".stats");
     if (argument != NULL) {
-        printf("Database Pages: %u\n", table->pager->num_pages);
-        printf("Free Pages: %u\n", table->pager->free_page_count);
-        printf("In Transaction: %s\n", table->in_transaction ? "Yes" : "No");
         if (argument[0] != '\0') {
             print_table_stats(table, argument);
         } else {
-            for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
-                print_table_stats(table, table->catalog.schemas[i].name);
+            print_global_stats(table);
+            if (table->catalog.num_tables > 1) {
+                for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+                    print_table_stats(table, table->catalog.schemas[i].name);
+                }
             }
         }
         return META_COMMAND_SUCCESS;
@@ -172,11 +206,11 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
             if (schema == NULL) {
                 printf("Error: Table '%s' not found.\n", argument);
             } else {
-                print_schema(schema);
+                print_schema(table, schema);
             }
         } else {
             for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
-                print_schema(&table->catalog.schemas[i]);
+                print_schema(table, &table->catalog.schemas[i]);
             }
         }
         return META_COMMAND_SUCCESS;
@@ -215,7 +249,7 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
         printf("  .tables               List tables\n");
         printf("  .schema [table]       Show catalog-backed table schema(s)\n");
         printf("  .btree [table]        Print one table B+ tree (default: users)\n");
-        printf("  .stats [table]        Show per-root B+ tree statistics\n");
+        printf("  .stats [table]        Show global or per-root B+ tree statistics\n");
         printf("  .check [table|all]    Validate one or every catalog B+ tree root\n");
         printf("  .constants            Show database engine constants\n");
         printf("  .buffer_pool / .cache Display Buffer Pool Manager & LRU eviction stats\n");
