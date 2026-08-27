@@ -1,26 +1,33 @@
 # TinyDB C
 
-An educational relational database engine written in C. TinyDB implements a disk-backed B+ tree, write-ahead logging, transactions, secondary indexes, a buffer pool, a SQL execution layer, and a growing set of relational features in one compact codebase.
+An educational relational database engine written in C. TinyDB implements a disk-backed B+ tree, write-ahead logging, transactions, secondary indexes, a buffer pool, a reusable engine API, multi-root table execution, and a growing SQL layer in one compact codebase.
 
-> **Goal:** explore how storage, recovery, indexing and query execution fit together — not replace SQLite or claim production-level performance.
+> **Goal:** explore how storage, recovery, indexing, catalogs and query execution fit together — not replace SQLite or claim production-level performance.
 
 ## Verification at a glance
 
-- automated regression suites covering SQL, B+ tree, WAL, checksums, indexes and recovery paths
+The current PR head is exercised by **78 automated suites** on both Ubuntu and Windows through GitHub Actions.
+
+Coverage includes:
+
 - persistent B+ tree storage with split / merge behavior
 - growable heap-backed Pager metadata instead of a fixed page-table ceiling
 - no-steal buffer eviction: uncommitted dirty pages are never evicted into the main database file
-- WAL-based recovery and explicit checkpointing
+- WAL recovery, explicit checkpointing, rollback and savepoints
 - secondary and composite indexes
-- transactions and savepoints
 - page checksums and integrity verification
+- reusable `tinydb_core` engine facade tested without the REPL
+- persistent multi-table schema catalog and independent B+ tree roots
+- cross-root transactions, savepoints and hard-crash atomicity
+- primary-key cross-root INNER JOIN execution and profiling
+- catalog-aware `PRAGMA table_info(...)` / `PRAGMA index_list(...)`
+- per-root `.schema`, `.stats`, `.btree` and `.check` diagnostics
 - native benchmark runner with text and JSON output
 - deterministic repeated crash/recovery stress runner
 - regression coverage that writes and reopens more than 4096 database pages
 - large uncommitted-transaction crash coverage that forces eviction beyond the 16-frame buffer pool
 - offline binary page/checksum inspector that does not depend on opening the DB through TinyDB
 - `EXPLAIN ANALYZE` query profiling with execution time and buffer-pool deltas
-- REPL inspection commands for pages, B+ trees, cache state and schema metadata
 
 Run the complete suite with:
 
@@ -31,37 +38,224 @@ python tests/run_all.py
 ## Architecture
 
 ```text
-SQL / REPL
-    |
-    v
-Parser / planner / execution
-    |
-    +--------------------+
-    |                    |
-    v                    v
-Indexes / catalog    Transactions
-    |                    |
-    +---------+----------+
-              v
-        Buffer pool
+                REPL / embedded caller
+                        |
+                        v
+                 tinydb_core API
+             tinydb_execute_sql(...)
+                        |
+              +---------+----------+
+              |                    |
+              v                    v
+        parser / planner      schema catalog
+              |               + root routing
+              v                    |
+       query execution <------------+
               |
-       +------+------+
-       |             |
-       v             v
-  dirty spill     clean pages
-  (no-steal)          |
-       |              |
-       +------+-------+
-              v
-          B+ tree
-              |
-       +------+------+
-       |             |
-       v             v
-     WAL          DB pages
+      +-------+---------+
+      |                 |
+      v                 v
+  secondary         transactions
+   indexes          / savepoints
+      |                 |
+      +--------+--------+
+               v
+          buffer pool
+          (16 frames)
+               |
+       +-------+--------+
+       |                |
+       v                v
+ no-steal spill      clean pages
+       |                |
+       +-------+--------+
+               v
+       per-table B+ trees
+               |
+       +-------+--------+
+       |                |
+       v                v
+      WAL            DB pages
 ```
 
-The interesting part of the project is the interaction between these layers. A feature is only useful if the storage engine, index metadata, transaction path and recovery behavior agree on the same state.
+The interesting part of the project is the interaction between these layers. A feature is only useful if the parser, catalog, storage engine, transaction path and recovery behavior agree on the same state.
+
+## Reusable engine API
+
+The native implementation is exposed through the `tinydb_core` static library. The REPL is now a thin user-interface layer over the same API that embedded callers can use.
+
+```c
+#include "engine.h"
+
+TinyDB* db = tinydb_open("app.db");
+if (db == NULL) {
+    return 1;
+}
+
+TinyDBSqlResult result;
+TinyDBSqlStatus status = tinydb_execute_sql(
+    db,
+    "SELECT * FROM users WHERE id = 42;",
+    &result
+);
+
+if (status != TINYDB_SQL_SUCCESS) {
+    fprintf(stderr, "%s\n", result.message);
+}
+
+tinydb_close(db);
+```
+
+The facade centralizes:
+
+- parsing
+- multi-table root resolution
+- policy guards for unsupported destructive paths
+- cross-root JOIN dispatch
+- `EXPLAIN ANALYZE`
+- catalog-aware PRAGMAs
+- schema-catalog persistence
+- VM execution and result status mapping
+
+`tests/engine_api_probe.c` links directly against `tinydb_core`; it does not use stdin or the REPL. The probe creates an additional table, forces its non-zero B+ tree root to split, checks per-root statistics and integrity, executes a cross-root JOIN, closes the database, reopens it, and verifies that the catalog root and rows persisted.
+
+## Multi-table storage and routing
+
+TinyDB now persists a schema catalog in sidecar files:
+
+```text
+<database>.schema
+<database>.schema.wal
+```
+
+Each catalog table has its own `root_page_num`. Direct DML is routed to that root instead of implicitly using page 0:
+
+```sql
+CREATE TABLE archive (
+    id INT,
+    username VARCHAR,
+    email VARCHAR
+);
+
+INSERT INTO users VALUES (1, 'main', 'main@example.com');
+INSERT INTO archive VALUES (1, 'archived', 'archive@example.com');
+
+SELECT * FROM users WHERE id = 1;
+SELECT * FROM archive WHERE id = 1;
+```
+
+The same primary key can therefore exist independently in two table roots.
+
+Current executable secondary tables use the physical `Row` layout already implemented by TinyDB: `id`, `username`, `email`. The catalog can describe other schemas for metadata/DDL experiments, but arbitrary physical row layouts are **not yet implemented**. DML against an incompatible schema fails closed instead of reinterpreting bytes incorrectly.
+
+### Multi-root transactions
+
+Transactions operate over the shared Pager/WAL rather than one table root. Regression coverage verifies:
+
+- writes to `users` and another root in the same `BEGIN ... ROLLBACK`
+- writes to both roots in one `BEGIN ... COMMIT`
+- savepoint rollback across roots
+- reopen durability after commit
+- a hard kill during one large uncommitted transaction that dirties hundreds of rows across both roots
+
+After that crash, both tables must retain only their previously committed rows and `PRAGMA integrity_check` must pass.
+
+### Cross-root JOIN
+
+The currently implemented cross-root JOIN path is intentionally narrow and measurable:
+
+```sql
+SELECT *
+FROM users
+JOIN archive
+ON users.id = archive.id;
+```
+
+Execution uses a sequential scan of the left B+ tree and a primary-key B+ tree lookup on the right for every left key. It is not the old same-root self-scan behavior.
+
+```text
+left table scan
+      |
+      v
+ left_row.id
+      |
+      v
+right B+ tree PK lookup
+      |
+      v
+ matching joined row
+```
+
+`LIMIT` and `OFFSET` are supported on this path. More general cross-root JOIN predicates remain unsupported and fail closed rather than silently scanning the wrong root.
+
+## Cross-root EXPLAIN / EXPLAIN ANALYZE
+
+Plain `EXPLAIN` reports the join strategy without running the query:
+
+```sql
+EXPLAIN
+SELECT * FROM users
+JOIN archive ON users.id = archive.id;
+```
+
+Representative plan:
+
+```text
+PLAN: CROSS-ROOT PRIMARY KEY NESTED LOOP JOIN
+      LEFT: FULL TABLE SCAN users (root page 0)
+      RIGHT: PRIMARY KEY LOOKUP archive.id (root page ...)
+```
+
+`EXPLAIN ANALYZE` executes that same path and reports measured buffer-pool deltas:
+
+```sql
+EXPLAIN ANALYZE
+SELECT * FROM users
+JOIN archive ON users.id = archive.id;
+```
+
+```text
+QUERY PLAN
+PLAN: CROSS-ROOT PRIMARY KEY NESTED LOOP JOIN
+      LEFT: FULL TABLE SCAN users (root page 0)
+      RIGHT: PRIMARY KEY LOOKUP archive.id (root page ...)
+ACTUAL RESULT
+...
+ANALYZE: execution_time_ms=... cache_hits=... cache_misses=... evictions=... page_accesses=...
+```
+
+## Catalog-aware inspection
+
+Table-scoped PRAGMAs now resolve the requested catalog table instead of always reporting `users`:
+
+```sql
+PRAGMA table_info(users);
+PRAGMA table_info(archive);
+PRAGMA index_list(users);
+PRAGMA index_list(archive);
+```
+
+The parameterless forms remain compatible with the historical built-in table:
+
+```sql
+PRAGMA table_info;
+PRAGMA index_list;
+```
+
+For multi-table databases, `PRAGMA integrity_check` walks every catalog B+ tree root and rejects duplicate root assignments in addition to checking each tree's structure.
+
+The REPL diagnostics are also root-aware:
+
+```text
+.tables                 list catalog tables
+.schema [table]         inspect one or all schemas
+.btree [table]          visualize a selected B+ tree root
+.stats [table]          global totals or one root's rows/pages/height
+.check [table|all]      validate one or all catalog roots
+.page <n>               inspect a physical page
+.buffer_pool / .cache   inspect cache state
+.checkpoint              checkpoint WAL state
+```
 
 ## Core subsystems
 
@@ -76,9 +270,9 @@ The interesting part of the project is the interaction between these layers. A f
 - metadata capacity starts at `PAGER_INITIAL_CAPACITY` (64 pages by default) and doubles as required
 - 32-bit page numbers remain the logical page identifier; the old `TABLE_MAX_PAGES=4096` value is no longer the Pager's hard page ceiling
 - 64-bit file offsets for database positioning and truncation
-- page inspection and B+ tree visualization from the REPL
+- per-root page inspection and B+ tree visualization
 
-`TABLE_MAX_PAGES` is currently retained as a legacy compatibility/sanity constant for older auxiliary-file validation. Code that needs the current Pager allocation should use `pager_metadata_capacity()` rather than treating `TABLE_MAX_PAGES` as database capacity.
+`TABLE_MAX_PAGES` is retained as a legacy compatibility/sanity constant for older auxiliary-file validation. Code that needs the current Pager allocation should use `pager_metadata_capacity()` rather than treating `TABLE_MAX_PAGES` as database capacity.
 
 ### Transactions and recovery
 
@@ -92,16 +286,23 @@ The interesting part of the project is the interaction between these layers. A f
 - WAL transaction records include the final logical page count so shrink/truncate state can be recovered after a crash
 - backward recovery support for the repository's previous WAL record layout
 - exact transaction free-page-list snapshot/restore on rollback
-- backup / compaction workflows such as `VACUUM` and `VACUUM INTO`
 - deterministic crash/recovery stress testing for committed and uncommitted transactions
+
+Single-table backup / compaction workflows such as `VACUUM` and `VACUUM INTO` remain available. They are currently blocked once a database has multiple table roots, because the old compaction implementation assumes one root and `VACUUM INTO` does not yet package all catalog sidecars.
 
 ### Indexing and catalog
 
-- primary and secondary B+ tree indexes
+- primary-key B+ tree access
+- secondary indexes
+- generic secondary indexes
 - composite indexes
-- persisted schema / index metadata
+- persisted index metadata
+- persisted table/view schema catalog
 - `sqlite_master`-style catalog inspection
 - automatic index selection where supported by the current query path
+- catalog-aware `PRAGMA index_list(table)`
+
+Secondary indexes on non-primary table roots are currently blocked until their persistence and routing path is table-scoped end to end.
 
 ### Query layer
 
@@ -122,7 +323,7 @@ This is intentionally a teaching-oriented SQL surface rather than a claim of SQL
 
 ## Build
 
-CMake is used for the native build. The engine implementation is built as the reusable `tinydb_core` static library, with separate REPL, benchmark and pager-growth probe executables linked against it.
+CMake builds the reusable `tinydb_core` static library and separate executables for the REPL, benchmark, pager-growth probe and direct engine-API probe.
 
 ```sh
 cmake -S . -B build
@@ -175,21 +376,16 @@ The JSON payload includes workload counts, throughput, storage-page counts, look
 
 Use the benchmark for before/after comparisons on the same machine, compiler, build type, dataset size and storage device. Cross-machine numbers are not directly comparable without controlling those variables.
 
-## Query profiling with EXPLAIN ANALYZE
+## Query profiling
 
-Plain `EXPLAIN` only reports the chosen execution path and does not run the query:
+For a normal single-table query:
 
 ```sql
 EXPLAIN SELECT * FROM users WHERE id = 42;
-```
-
-`EXPLAIN ANALYZE` prints the same plan, executes the `SELECT`, and then reports execution-time and buffer-pool deltas measured around the real VM execution path:
-
-```sql
 EXPLAIN ANALYZE SELECT * FROM users WHERE id = 42;
 ```
 
-Representative output:
+Representative analyzed output:
 
 ```text
 QUERY PLAN
@@ -197,28 +393,17 @@ PLAN: PRIMARY KEY LOOKUP (id = 42)
 ACTUAL RESULT
 (42, user42, u42@example.com)
 ANALYZE: execution_time_ms=... cache_hits=... cache_misses=... evictions=... page_accesses=...
-Executed.
 ```
 
-The counters are deltas for that query execution, not process-lifetime totals. `page_accesses` is the sum of buffer-pool hits and misses during the measured query. This makes it useful for controlled before/after comparisons such as creating an index and checking whether the selected path and page-access profile change.
-
-For example:
-
-```sql
-EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
-CREATE INDEX idx_users_email ON users(email);
-EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
-```
-
-Timing uses the C runtime clock and should be treated as local diagnostic evidence rather than a cross-machine benchmark. Use `tinydb_bench` for larger repeatable workload comparisons.
+The counters are execution deltas, not process-lifetime totals. `page_accesses` is the sum of hits and misses during the measured query. Timing uses the C runtime clock and should be treated as local diagnostic evidence rather than a cross-machine benchmark.
 
 ## Pager growth and eviction regression tests
 
-The test suite now contains two targeted storage regressions in addition to normal SQL tests.
-
 `tinydb_pager_growth_probe` writes pages `0..4128`, deliberately crossing the historical 4096-page boundary while a 16-frame buffer pool repeatedly evicts pages. It commits, checkpoints, reopens the database, and verifies markers on both sides of the old boundary. The Python wrapper also checks that the physical file contains all 4129 pages.
 
-`test_large_transaction_crash.py` seeds committed data, starts one explicit transaction, inserts 700 additional rows (enough to dirty far more pages than fit in the buffer pool), then hard-kills the process before `COMMIT`. Reopening must show only the previously committed rows and must still pass `PRAGMA integrity_check`. This specifically protects the no-steal invariant: buffer eviction must not make uncommitted state durable.
+`test_large_transaction_crash.py` seeds committed data, starts one explicit transaction, inserts 700 additional rows, then hard-kills the process before `COMMIT`. Reopening must show only the previously committed rows and still pass `PRAGMA integrity_check`.
+
+`test_multi_table_crash.py` repeats the same no-steal invariant while alternating hundreds of writes between two independent table roots in one transaction. Neither root may expose a ghost row after the kill.
 
 ## Crash / recovery stress runner
 
@@ -232,14 +417,6 @@ After each recovery it reopens the database, checks the complete expected/forbid
 ```sh
 python tools/recovery_stress.py --iterations 20 --rows-per-round 2 --seed 1337
 ```
-
-For a shorter smoke run:
-
-```sh
-python tools/recovery_stress.py --iterations 3 --rows-per-round 2
-```
-
-The runner creates a temporary database unless `--db` is supplied and refuses to overwrite an existing explicit database path.
 
 ## Offline page inspector
 
@@ -269,75 +446,6 @@ python tools/page_inspect.py my_database.db --json --strict
 
 `--strict` returns a non-zero exit code when the inspector finds a checksum, header, key-order or pointer-range problem.
 
-## Example
-
-```sql
-CREATE TABLE users (
-    id INT PRIMARY KEY,
-    username VARCHAR(32),
-    email VARCHAR(64)
-);
-
-CREATE INDEX idx_users_email ON users(email);
-
-INSERT INTO users VALUES (1, 'alice', 'alice@example.com');
-INSERT INTO users VALUES (2, 'bob',   'bob@example.com');
-
-SELECT *
-FROM users
-WHERE id BETWEEN 1 AND 100
-ORDER BY id DESC;
-```
-
-Transactions and savepoints:
-
-```sql
-BEGIN;
-SAVEPOINT before_update;
-UPDATE users SET username = 'alice_new' WHERE id = 1;
-ROLLBACK TO before_update;
-COMMIT;
-```
-
-## REPL inspection tools
-
-TinyDB exposes internal state instead of hiding it, which makes the project easier to debug and learn from.
-
-```text
-.tables                 list tables
-.schema                 inspect schemas and indexes
-.btree                  visualize B+ tree structure
-.page <n>               inspect a physical page
-.stats                  show storage / WAL / transaction metrics
-.buffer_pool / .cache   inspect cache state, including dynamic metadata capacity
-.check                   run structural / checksum verification
-.checkpoint              flush / checkpoint WAL state
-```
-
-## Selected SQL examples
-
-```sql
-CREATE VIEW active_users AS
-SELECT * FROM users WHERE id > 0;
-
-WITH active AS (
-    SELECT * FROM users WHERE id > 0
-)
-SELECT * FROM active;
-
-SELECT id,
-       ROW_NUMBER() OVER (PARTITION BY username ORDER BY id)
-FROM users;
-
-SELECT *
-FROM users
-WHERE id IN (SELECT id FROM users WHERE id > 10);
-
-VACUUM;
-VACUUM INTO 'backup.db';
-PRAGMA integrity_check;
-```
-
 ## Scope and limitations
 
 TinyDB is an educational database engine. The project is useful for studying implementation tradeoffs, but it should not be described as a drop-in SQLite replacement or a production database.
@@ -345,10 +453,15 @@ TinyDB is an educational database engine. The project is useful for studying imp
 In particular:
 
 - SQL coverage is intentionally incomplete.
-- the Pager now grows its in-memory metadata on demand, but page identifiers are still 32-bit and mature databases use more sophisticated allocation/free-space structures.
+- the catalog supports multiple schemas, but executable additional tables currently require the fixed `id / username / email` physical Row shape.
+- arbitrary variable physical row formats and row migration are not implemented yet.
+- cross-root JOIN currently supports the primary-key `id = id` path; arbitrary join predicates, cross-root UNION and cross-root nested subqueries fail closed.
+- secondary indexes on non-primary roots are not enabled yet.
+- multi-table `VACUUM`, `VACUUM INTO` and prepared execution are blocked until those paths preserve/root-route every relevant sidecar and bound statement.
+- the Pager grows its in-memory metadata on demand, but page identifiers are still 32-bit and mature databases use more sophisticated allocation/free-space structures.
 - the no-steal implementation uses heap-backed page shadows for educational clarity; it is not intended to model the memory efficiency of a production buffer manager.
 - durability / crash semantics should be evaluated against the tests and documented recovery paths, not inferred from feature names alone.
-- performance claims require benchmarks against defined workloads; this repository includes a benchmark harness, but results still depend on hardware, compiler settings, build type and workload.
+- performance claims require benchmarks against defined workloads; results depend on hardware, compiler settings, build type and workload.
 - the offline inspector performs structural sanity checks but is not a formal proof that every possible B+ tree invariant holds.
 - concurrency, locking and production-hardening expectations are different from mature database systems.
 
