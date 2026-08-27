@@ -48,6 +48,25 @@ bool tinydb_record_insert(Table* table,
                           char* message,
                           size_t message_size);
 
+bool tinydb_record_update(Table* table,
+                          const TableSchema* schema,
+                          uint32_t id,
+                          const TinyDBValue* values,
+                          uint32_t value_count,
+                          char* message,
+                          size_t message_size);
+
+bool tinydb_record_delete(Table* table,
+                          const TableSchema* schema,
+                          uint32_t id,
+                          char* message,
+                          size_t message_size);
+
+uint32_t tinydb_record_delete_all(Table* table,
+                                  const TableSchema* schema,
+                                  char* message,
+                                  size_t message_size);
+
 bool tinydb_record_find(Table* table,
                         const TableSchema* schema,
                         uint32_t id,
