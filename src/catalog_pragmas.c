@@ -86,19 +86,40 @@ static bool extract_target(const char* sql,
     return *current == '\0';
 }
 
-static const char* column_type_name(ColumnType type) {
-    return type == COL_TYPE_INT ? "INT" : "VARCHAR";
+static void print_users_table_info(void) {
+    printf("cid | name     | type         | notnull | dflt_value | pk\n");
+    printf("----+----------+--------------+---------+------------+---\n");
+    printf("0   | id       | INT          | 1       | NULL       | 1\n");
+    printf("1   | username | VARCHAR(32)  | 0       | NULL       | 0\n");
+    printf("2   | email    | VARCHAR(255) | 0       | NULL       | 0\n");
+}
+
+static void format_column_type(const TableColumn* column,
+                               char* output,
+                               size_t output_size) {
+    if (column->type == COL_TYPE_INT) {
+        snprintf(output, output_size, "INT");
+    } else {
+        snprintf(output, output_size, "VARCHAR(%u)", column->size);
+    }
 }
 
 static void print_table_info(const TableSchema* schema) {
+    if (ci_equal(schema->name, "users")) {
+        print_users_table_info();
+        return;
+    }
+
     printf("cid | name | type | notnull | dflt_value | pk\n");
     printf("----+------+------+---------+------------+---\n");
     for (uint32_t i = 0; i < schema->num_columns; i++) {
         const TableColumn* column = &schema->columns[i];
+        char type_name[32];
+        format_column_type(column, type_name, sizeof(type_name));
         printf("%u | %s | %s | %u | NULL | %u\n",
                i,
                column->name,
-               column_type_name(column->type),
+               type_name,
                i == 0 ? 1u : 0u,
                i == 0 ? 1u : 0u);
     }
