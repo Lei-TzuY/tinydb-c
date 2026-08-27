@@ -19,7 +19,10 @@ set(TINYDB_CORE_SOURCES
     src/engine.c
     src/generic_compound_plan_guard.c
     src/generic_index_ddl.c
+    src/generic_index_epoch.c
     src/generic_index_policy.c
+    src/generic_index_record_guard.c
+    src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
     src/generic_or_sql.c
     src/generic_predicate.c
@@ -40,10 +43,10 @@ set(TINYDB_CORE_SOURCES
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
 # layer owns generic WHERE semantics. The compound planner wraps the historical
-# equality/range planner. The index layer can still promote proven single-term
-# equality plans, while the compound guard keeps AND plans aligned with the
-# current scan-plus-residual execution path. The outer OR layer only intercepts
-# disjunctions and delegates every other statement to the proven chain.
+# equality/range planner. The volatile index layer remains the proven fallback;
+# the persistent snapshot layer sits immediately above it. The outer OR layer
+# only intercepts disjunctions and delegates every other statement through the
+# persistent index layer into the established chain.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -80,9 +83,28 @@ set_source_files_properties(
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_index_base"
 )
 set_source_files_properties(
+    src/generic_index_snapshot_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_snapshot_base"
+)
+set_source_files_properties(
+    src/generic_or_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_snapshot_base"
+)
+set_source_files_properties(
     src/generic_compound_plan_guard.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_or_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_or_base"
+)
+
+# Generic record mutation APIs are wrapped so a durable index epoch is advanced
+# before indexed-table data changes. This makes old snapshots fail closed after
+# commit, rollback, crash recovery, direct API mutation, or REPL mutation.
+set_source_files_properties(
+    src/record.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base"
 )
 
 # The original multi-root policy intentionally allowed indexes only on root 0.
