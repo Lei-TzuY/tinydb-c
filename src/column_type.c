@@ -32,53 +32,61 @@ static bool at_end(const char* input) {
     return input != NULL && *input == '\0';
 }
 
-bool tinydb_column_type_parse(const char* text, TinyDBColumnTypeSpec* spec) {
+bool tinydb_column_type_parse_prefix(const char* text,
+                                     TinyDBColumnTypeSpec* spec,
+                                     const char** end_out) {
     if (text == NULL || spec == NULL) return false;
     memset(spec, 0, sizeof(*spec));
 
     const char* current = text;
     if (consume_word(&current, "INT") || consume_word(&current, "INTEGER")) {
-        if (!at_end(current)) return false;
         spec->type = COL_TYPE_INT;
         spec->storage_size = (uint32_t)sizeof(uint32_t);
+        if (end_out != NULL) *end_out = current;
         return true;
     }
 
     current = text;
     if (!consume_word(&current, "VARCHAR")) return false;
+    const char* after_word = current;
     current = skip_spaces(current);
 
-    if (*current == '\0') {
+    if (*current != '(') {
         spec->type = COL_TYPE_VARCHAR;
         spec->storage_size = 256u;
         spec->declared_capacity = 255u;
         spec->explicitly_sized = false;
+        if (end_out != NULL) *end_out = after_word;
         return true;
     }
 
-    if (*current != '(') return false;
     current = skip_spaces(current + 1);
     if (!isdigit((unsigned char)*current)) return false;
 
     uint32_t declared = 0;
     while (isdigit((unsigned char)*current)) {
         uint32_t digit = (uint32_t)(*current - '0');
-        if (declared > 255u) return false;
         declared = declared * 10u + digit;
         if (declared > 255u) return false;
         current++;
     }
 
     current = skip_spaces(current);
-    if (*current != ')') return false;
+    if (*current != ')' || declared == 0u) return false;
     current++;
-    if (!at_end(current) || declared == 0u) return false;
 
     spec->type = COL_TYPE_VARCHAR;
     spec->storage_size = declared + 1u;
     spec->declared_capacity = declared;
     spec->explicitly_sized = true;
+    if (end_out != NULL) *end_out = current;
     return true;
+}
+
+bool tinydb_column_type_parse(const char* text, TinyDBColumnTypeSpec* spec) {
+    const char* end = NULL;
+    if (!tinydb_column_type_parse_prefix(text, spec, &end)) return false;
+    return at_end(end);
 }
 
 bool tinydb_column_type_is_int(const char* text) {
