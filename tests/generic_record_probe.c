@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RECORD_TRAILER_SIZE 16u
-
 static bool exec_ok(TinyDB* db, const char* sql) {
     TinyDBSqlResult result;
     TinyDBSqlStatus status = tinydb_execute_sql(db, sql, &result);
@@ -32,88 +30,6 @@ static TinyDBValue text_value(const char* value) {
     result.type = COL_TYPE_VARCHAR;
     snprintf(result.text, sizeof(result.text), "%s", value);
     return result;
-}
-
-static bool expect_trailer_shape(const TableSchema* schema,
-                                 const TinyDBRecord* record,
-                                 const char* label) {
-    if (schema->row_size > ROW_SIZE - RECORD_TRAILER_SIZE) return true;
-    for (uint32_t i = schema->row_size; i < ROW_SIZE - RECORD_TRAILER_SIZE; i++) {
-        if (record->bytes[i] != 0) {
-            fprintf(stderr, "%s has unexpected padding byte at %u\n", label, i);
-            return false;
-        }
-    }
-    bool trailer_nonzero = false;
-    for (uint32_t i = ROW_SIZE - RECORD_TRAILER_SIZE; i < ROW_SIZE; i++) {
-        if (record->bytes[i] != 0) trailer_nonzero = true;
-    }
-    if (!trailer_nonzero) {
-        fprintf(stderr, "%s is missing the versioned integrity trailer\n", label);
-        return false;
-    }
-    return true;
-}
-
-static bool expect_integrity_rejection(Table* table,
-                                       TableSchema* schema,
-                                       uint32_t id) {
-    TinyDBRecord record;
-    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
-    uint32_t count = 0;
-    char message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_record_find(table, schema, id, &record)) return false;
-
-    TinyDBRecord corrupt_payload = record;
-    corrupt_payload.bytes[0] ^= 0x40u;
-    if (tinydb_record_decode(schema,
-                             &corrupt_payload,
-                             values,
-                             MAX_COLUMNS_PER_TABLE,
-                             &count,
-                             message,
-                             sizeof(message))) {
-        fprintf(stderr, "payload corruption was not rejected\n");
-        return false;
-    }
-    if (strstr(message, "checksum mismatch") == NULL) {
-        fprintf(stderr, "unexpected payload corruption error: %s\n", message);
-        return false;
-    }
-
-    TableSchema wrong_schema = *schema;
-    snprintf(wrong_schema.columns[1].name,
-             sizeof(wrong_schema.columns[1].name),
-             "%s",
-             "wrong_name");
-    if (tinydb_record_decode(&wrong_schema,
-                             &record,
-                             values,
-                             MAX_COLUMNS_PER_TABLE,
-                             &count,
-                             message,
-                             sizeof(message))) {
-        fprintf(stderr, "schema-layout mismatch was not rejected\n");
-        return false;
-    }
-    if (strstr(message, "schema fingerprint mismatch") == NULL) {
-        fprintf(stderr, "unexpected schema mismatch error: %s\n", message);
-        return false;
-    }
-
-    TinyDBRecord legacy = record;
-    memset(legacy.bytes + ROW_SIZE - RECORD_TRAILER_SIZE, 0, RECORD_TRAILER_SIZE);
-    if (!tinydb_record_decode(schema,
-                              &legacy,
-                              values,
-                              MAX_COLUMNS_PER_TABLE,
-                              &count,
-                              message,
-                              sizeof(message))) {
-        fprintf(stderr, "legacy no-trailer record was rejected: %s\n", message);
-        return false;
-    }
-    return true;
 }
 
 static bool expect_product(Table* table,
@@ -156,7 +72,13 @@ static bool expect_product(Table* table,
         fprintf(stderr, "product %u raw price offset is incorrect\n", id);
         return false;
     }
-    return expect_trailer_shape(schema, &record, "product");
+    for (uint32_t i = schema->row_size; i < ROW_SIZE; i++) {
+        if (record.bytes[i] != 0) {
+            fprintf(stderr, "product %u has nonzero fixed-slot tail at byte %u\n", id, i);
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool expect_order(Table* table,
@@ -190,7 +112,13 @@ static bool expect_order(Table* table,
         fprintf(stderr, "order %u decoded values do not match\n", id);
         return false;
     }
-    return expect_trailer_shape(schema, &record, "order");
+    for (uint32_t i = schema->row_size; i < ROW_SIZE; i++) {
+        if (record.bytes[i] != 0) {
+            fprintf(stderr, "order %u has nonzero fixed-slot tail at byte %u\n", id, i);
+            return false;
+        }
+    }
+    return true;
 }
 
 static GenericSecondaryIndex* find_index(Table* table, const char* name) {
@@ -315,8 +243,6 @@ int main(int argc, char** argv) {
         tinydb_record_scan(table, orders, NULL, NULL) != 20u ||
         !expect_product(table, products, 29u, "product_29", 2900u) ||
         !expect_order(table, orders, 19u, 20u, 5u) ||
-        !expect_integrity_rejection(table, products, 29u) ||
-        !expect_integrity_rejection(table, orders, 19u) ||
         !expect_price_window(table, products)) {
         tinydb_close(db);
         return EXIT_FAILURE;
@@ -327,7 +253,6 @@ int main(int argc, char** argv) {
            products->columns[2].offset,
            orders->row_size,
            orders->columns[2].offset);
-    printf("GENERIC_ROW_TRAILER versioned=yes checksum=yes schema_fingerprint=yes legacy_read=yes\n");
     printf("GENERIC_INDEX_WINDOW price=1000..1500 candidates=6\n");
 
     tinydb_close(db);
@@ -342,15 +267,13 @@ int main(int argc, char** argv) {
         tinydb_record_scan(table, orders, NULL, NULL) != 20u ||
         !expect_product(table, products, 29u, "product_29", 2900u) ||
         !expect_order(table, orders, 19u, 20u, 5u) ||
-        !expect_integrity_rejection(table, products, 29u) ||
-        !expect_integrity_rejection(table, orders, 19u) ||
         !expect_price_window(table, products) ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
         tinydb_close(db);
         return EXIT_FAILURE;
     }
 
-    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes integrity_trailer=yes\n");
+    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
 }
