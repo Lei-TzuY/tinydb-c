@@ -51,6 +51,11 @@ def require_count(output, marker, minimum):
         )
 
 
+def forbid(output, marker):
+    if marker in output:
+        raise AssertionError(f"unexpected marker {marker!r}\n{output}")
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     executable = find_tinydb(repo_root)
@@ -143,9 +148,34 @@ def main():
         require(third, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(third, "ok")
 
+        ddl = run_session(
+            executable,
+            db_file,
+            [
+                "CREATE INDEX idx_products_combo ON products(price, name);",
+                "CREATE INDEX idx_products_missing ON products(missing);",
+                "CREATE INDEX idx_products_id ON products(id);",
+                "PRAGMA index_list;",
+                ".exit",
+            ],
+        )
+        require(
+            ddl,
+            "Error: generic table secondary indexes currently support one column only.",
+        )
+        require(ddl, "Error: Column missing does not exist on table products.")
+        require(
+            ddl,
+            "Error: generic table id is already backed by the primary B+ tree index.",
+        )
+        require(ddl, "(no indexes found)")
+        forbid(ddl, "idx_products_combo   |")
+        forbid(ddl, "idx_products_missing |")
+        forbid(ddl, "idx_products_id      |")
+
         print(
             "PASS: generic-table secondary index lookup, reopen, mutation invalidation, "
-            "transaction rollback safety, and scan fallback verified."
+            "transaction rollback safety, scan fallback, and DDL boundaries verified."
         )
     finally:
         cleanup(db_file)
