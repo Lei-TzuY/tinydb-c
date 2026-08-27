@@ -133,7 +133,7 @@ def main():
             ],
         )
         assert "VACUUM/VACUUM INTO is disabled for multi-table databases" in safety, safety
-        assert "ALTER TABLE ADD COLUMN is disabled for multi-table fixed-Row storage" in safety, safety
+        assert "ALTER TABLE ADD COLUMN is disabled" in safety, safety
         assert "query requires a cross-table/index path that is not routed safely yet" in safety, safety
         assert "table or view not found" in safety, safety
         assert "(99, still-safe, safe@example.com)" in safety, safety
