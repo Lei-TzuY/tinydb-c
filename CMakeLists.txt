@@ -58,6 +58,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_sql.c
     src/join_plan.c
     src/leaf_format.c
+    src/leaf_migration.c
     src/leaf_value.c
     src/multi_vacuum_into.c
     src/multitable.c
@@ -273,3 +274,6 @@ target_link_libraries(tinydb_slotted_leaf_v2_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_leaf_format_discriminator_probe tests/leaf_format_discriminator_probe.c)
 target_link_libraries(tinydb_leaf_format_discriminator_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_leaf_migration_probe tests/leaf_migration_probe.c)
+target_link_libraries(tinydb_leaf_migration_probe PRIVATE tinydb_core)
