@@ -1,7 +1,9 @@
 #include "engine.h"
 #include "catalog_pragmas.h"
+#include "join_plan.h"
 
 #include <ctype.h>
+#include <time.h>
 
 static void initialize_result(TinyDBSqlResult* result) {
     memset(result, 0, sizeof(*result));
@@ -80,6 +82,59 @@ static bool extract_explain_analyze_query(const char* sql, const char** query) {
     return true;
 }
 
+static TinyDBSqlStatus profile_cross_root_join(TinyDB* database,
+                                                Statement* statement,
+                                                TinyDBSqlResult* result,
+                                                const TinyDBJoinPlan* plan) {
+    Table* table = database->table;
+    uint32_t hits_before = table->pager->cache_hits;
+    uint32_t misses_before = table->pager->cache_misses;
+    uint32_t evictions_before = table->pager->evictions;
+    bool handled = false;
+    ExecuteResult execute_result = EXECUTE_SUCCESS;
+
+    memset(&result->profile, 0, sizeof(result->profile));
+    result->has_profile = true;
+    result->profile.plan_result = EXECUTE_SUCCESS;
+
+    printf("QUERY PLAN\n");
+    tinydb_print_join_plan(plan, &statement->select);
+    printf("ACTUAL RESULT\n");
+
+    clock_t started = clock();
+    result->route_result = multitable_execute_join(
+        table, statement, &handled, &execute_result);
+    clock_t finished = clock();
+
+    result->join_handled = handled;
+    result->profile.execute_result = execute_result;
+    result->profile.execution_time_ms =
+        1000.0 * (double)(finished - started) / (double)CLOCKS_PER_SEC;
+    result->profile.cache_hits = table->pager->cache_hits - hits_before;
+    result->profile.cache_misses = table->pager->cache_misses - misses_before;
+    result->profile.evictions = table->pager->evictions - evictions_before;
+    result->profile.page_accesses =
+        result->profile.cache_hits + result->profile.cache_misses;
+    result->execute_result = execute_result;
+    result->executed = handled &&
+                       result->route_result == MULTITABLE_ROUTE_OK &&
+                       execute_result == EXECUTE_SUCCESS;
+
+    if (!handled || result->route_result != MULTITABLE_ROUTE_OK) {
+        result->status = TINYDB_SQL_ROUTE_ERROR;
+        set_result_message(result, multitable_route_error(result->route_result));
+        return result->status;
+    }
+    if (execute_result != EXECUTE_SUCCESS) {
+        result->status = TINYDB_SQL_EXECUTE_ERROR;
+        set_result_message(result, "cross-root JOIN execution failed");
+        return result->status;
+    }
+
+    result->status = TINYDB_SQL_SUCCESS;
+    return result->status;
+}
+
 static TinyDBSqlStatus execute_explain_analyze(TinyDB* database,
                                                 const char* query,
                                                 TinyDBSqlResult* result) {
@@ -97,6 +152,21 @@ static TinyDBSqlStatus execute_explain_analyze(TinyDB* database,
 
     result->statement_type = statement.type;
     result->statement_type_valid = true;
+
+    if (statement.select.has_join) {
+        TinyDBJoinPlan join_plan;
+        result->route_result = tinydb_build_join_plan(
+            database->table, &statement, &join_plan);
+        if (join_plan.applicable) {
+            if (result->route_result != MULTITABLE_ROUTE_OK) {
+                result->status = TINYDB_SQL_ROUTE_ERROR;
+                set_result_message(result, multitable_route_error(result->route_result));
+                return result->status;
+            }
+            return profile_cross_root_join(database, &statement, result, &join_plan);
+        }
+    }
+
     result->route_result = multitable_begin_statement_scope(
         database->table, &statement, query, &route_scope);
     if (result->route_result != MULTITABLE_ROUTE_OK &&
@@ -202,6 +272,25 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
     output->statement_type = statement.type;
     output->statement_type_valid = true;
     Table* table = database->table;
+
+    if (statement.explain &&
+        statement.type == STATEMENT_SELECT &&
+        statement.select.has_join) {
+        TinyDBJoinPlan join_plan;
+        output->route_result = tinydb_build_join_plan(table, &statement, &join_plan);
+        if (join_plan.applicable) {
+            if (output->route_result != MULTITABLE_ROUTE_OK) {
+                output->status = TINYDB_SQL_ROUTE_ERROR;
+                set_result_message(output, multitable_route_error(output->route_result));
+                return output->status;
+            }
+            tinydb_print_join_plan(&join_plan, &statement.select);
+            output->executed = true;
+            output->execute_result = EXECUTE_SUCCESS;
+            output->status = TINYDB_SQL_SUCCESS;
+            return output->status;
+        }
+    }
 
     if (statement.type == STATEMENT_PRAGMA_TABLE_INFO ||
         statement.type == STATEMENT_PRAGMA_INDEX_LIST) {
