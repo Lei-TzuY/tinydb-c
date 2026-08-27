@@ -41,6 +41,10 @@ typedef struct {
     uint32_t index_branch_count;
     uint32_t index_term_count;
     uint32_t index_fused_source_count;
+    uint32_t estimated_rows;
+    uint32_t estimated_table_rows;
+    uint64_t estimated_cost;
+    uint64_t estimated_scan_cost;
 } TinyDBGenericSelectPlan;
 
 typedef struct {
