@@ -22,6 +22,7 @@ set(TINYDB_CORE_SOURCES
     src/engine_open_guard.c
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
+    src/generic_error_status.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_stats.c
@@ -199,6 +200,11 @@ set_source_files_properties(
     src/generic_or_mutation_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_parenthesized_base"
+)
+set_source_files_properties(
+    src/generic_parenthesized_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_diagnostic_base"
 )
 set_source_files_properties(
     src/generic_compound_plan_guard.c
