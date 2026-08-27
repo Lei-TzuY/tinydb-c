@@ -228,20 +228,23 @@ static TinyDBGenericSqlStatus try_build_compound_plan(
     }
     predicate_count++;
 
-    if (!tinydb_generic_consume_word(&parser, "and")) {
+    bool saw_and = tinydb_generic_consume_word(&parser, "and");
+    if (!saw_and && predicates[0].op != TINYDB_GENERIC_COMPARE_LIKE) {
         return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
     }
 
-    do {
-        if (predicate_count >= MAX_COLUMNS_PER_TABLE ||
-            !tinydb_generic_parse_predicate(
-                &parser, schema, &predicates[predicate_count])) {
-            return syntax_error(
-                result,
-                "generic SELECT WHERE requires typed comparison predicates joined by AND");
-        }
-        predicate_count++;
-    } while (tinydb_generic_consume_word(&parser, "and"));
+    if (saw_and) {
+        do {
+            if (predicate_count >= MAX_COLUMNS_PER_TABLE ||
+                !tinydb_generic_parse_predicate(
+                    &parser, schema, &predicates[predicate_count])) {
+                return syntax_error(
+                    result,
+                    "generic SELECT WHERE requires typed predicates joined by AND");
+            }
+            predicate_count++;
+        } while (tinydb_generic_consume_word(&parser, "and"));
+    }
 
     if (tinydb_generic_consume_word(&parser, "limit")) {
         uint32_t ignored_limit = 0;
