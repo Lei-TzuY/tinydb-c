@@ -155,8 +155,10 @@ def main():
                 ".exit",
             ],
         )
-        if fallbacks.count("PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER") < 2:
-            raise AssertionError("single-index AND did not preserve anchor fallback\n" + fallbacks)
+        require(fallbacks, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(fallbacks, "PLAN: GENERIC SECONDARY INDEX FUSED RANGE")
+        require(fallbacks, "RANGE TERMS: 2 on price")
+        require(fallbacks, "FILTER: price >= 1000 AND price <= 3000")
         require(fallbacks, "PLAN: GENERIC PRIMARY KEY LOOKUP")
         if "PLAN: GENERIC SECONDARY INDEX INTERSECTION\n  TABLE: products" in fallbacks:
             raise AssertionError("unsafe/single-index predicate was promoted to intersection\n" + fallbacks)
@@ -197,10 +199,10 @@ def main():
         require(reopened, "ok")
 
         print(
-            "PASS: flat generic AND queries intersect two or more distinct ordered "
-            "secondary-index candidate sets, revalidate full predicates including residual "
-            "LIKE, preserve single-index anchor and PK-equality priority, rebuild stale "
-            "snapshots after mutation, and remain correct after reopen."
+            "PASS: flat generic AND queries intersect distinct ordered secondary indexes, "
+            "fuse compatible terms on one index, revalidate full predicates including residual "
+            "LIKE, preserve PK-equality priority, rebuild stale snapshots after mutation, and "
+            "remain correct after reopen."
         )
     finally:
         cleanup(db_file)
