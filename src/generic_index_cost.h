@@ -7,16 +7,16 @@
 #define TINYDB_GENERIC_COST_INDEX_ENTRY 1u
 #define TINYDB_GENERIC_COST_RANDOM_FETCH 4u
 
-static uint64_t tinydb_generic_scan_cost(uint32_t table_rows) {
+static inline uint64_t tinydb_generic_scan_cost(uint32_t table_rows) {
     return (uint64_t)table_rows * TINYDB_GENERIC_COST_SCAN_ROW;
 }
 
-static uint64_t tinydb_generic_anchor_cost(uint32_t candidate_rows) {
+static inline uint64_t tinydb_generic_anchor_cost(uint32_t candidate_rows) {
     return (uint64_t)candidate_rows *
            (TINYDB_GENERIC_COST_INDEX_ENTRY + TINYDB_GENERIC_COST_RANDOM_FETCH);
 }
 
-static uint64_t tinydb_generic_intersection_cost(
+static inline uint64_t tinydb_generic_intersection_cost(
     const uint32_t* source_rows,
     uint32_t source_count,
     uint32_t table_rows,
