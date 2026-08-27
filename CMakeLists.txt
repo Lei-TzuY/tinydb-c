@@ -87,6 +87,15 @@ set_source_files_properties(
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_snapshot_base"
 )
+if(NOT MSVC)
+    # capacity is uint32_t, so the SIZE_MAX guard is meaningful only on
+    # narrower size_t targets; GCC 64-bit diagnoses the portable guard as a
+    # constant-false comparison. Keep every other warning as an error.
+    set_source_files_properties(
+        src/generic_index_snapshot_sql.c
+        PROPERTIES COMPILE_OPTIONS "-Wno-type-limits"
+    )
+endif()
 set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
