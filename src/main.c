@@ -317,6 +317,19 @@ static void print_execute_result(const TinyDBSqlResult* result, const char* sql)
         return;
     }
 
+    /* Generic INSERT validation failures historically reuse the legacy
+     * EXECUTE_KEY_NOT_FOUND enum because ExecuteResult has no validation
+     * variant. Preserve the precise engine message instead of masking it as
+     * a missing-key error. Duplicate-key INSERTs keep their dedicated enum. */
+    if (result->status == TINYDB_SQL_EXECUTE_ERROR &&
+        result->statement_type_valid &&
+        result->statement_type == STATEMENT_INSERT &&
+        result->execute_result == EXECUTE_KEY_NOT_FOUND &&
+        result->message[0] != '\0') {
+        printf("Error: %s.\n", result->message);
+        return;
+    }
+
     switch (result->execute_result) {
         case EXECUTE_TABLE_FULL:
             printf("Error: Table full.\n");
