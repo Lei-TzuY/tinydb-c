@@ -56,6 +56,7 @@ bool tinydb_schema_supports_records(const TableSchema* schema,
         return false;
     }
 
+    uint32_t expected_offset = 0;
     for (uint32_t i = 0; i < schema->num_columns; i++) {
         const TableColumn* column = &schema->columns[i];
         if (column->size == 0 || column->offset > schema->row_size ||
@@ -63,6 +64,13 @@ bool tinydb_schema_supports_records(const TableSchema* schema,
             set_message(message,
                         message_size,
                         "schema contains a column outside its serialized row bounds",
+                        NULL);
+            return false;
+        }
+        if (column->offset != expected_offset) {
+            set_message(message,
+                        message_size,
+                        "schema columns must form a contiguous non-overlapping serialized row layout",
                         NULL);
             return false;
         }
@@ -77,6 +85,14 @@ bool tinydb_schema_supports_records(const TableSchema* schema,
             set_message(message, message_size, "schema contains an unsupported column type", NULL);
             return false;
         }
+        expected_offset += column->size;
+    }
+    if (expected_offset != schema->row_size) {
+        set_message(message,
+                    message_size,
+                    "schema row size must match the serialized column layout",
+                    NULL);
+        return false;
     }
     return true;
 }
