@@ -1,6 +1,7 @@
 #include "engine.h"
 #include "catalog_pragmas.h"
 #include "diagnostics.h"
+#include "generic_sql.h"
 #include "join_plan.h"
 
 #include <ctype.h>
@@ -294,6 +295,27 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
     const char* explain_query = NULL;
     if (extract_explain_analyze_query(sql, &explain_query)) {
         return execute_explain_analyze(database, explain_query, output);
+    }
+
+    TinyDBGenericSqlResult generic_result;
+    TinyDBGenericSqlStatus generic_status = tinydb_generic_sql_try_execute(
+        database->table, sql, &generic_result);
+    if (generic_status != TINYDB_GENERIC_SQL_NOT_APPLICABLE) {
+        output->statement_type = generic_result.statement_type;
+        output->statement_type_valid = generic_result.statement_type_valid;
+        output->execute_result = generic_result.execute_result;
+        output->executed = generic_result.executed;
+        set_result_message(output, generic_result.message);
+
+        if (generic_status == TINYDB_GENERIC_SQL_SUCCESS) {
+            output->status = TINYDB_SQL_SUCCESS;
+        } else if (generic_status == TINYDB_GENERIC_SQL_SYNTAX_ERROR) {
+            output->prepare_result = PREPARE_SYNTAX_ERROR;
+            output->status = TINYDB_SQL_SYNTAX_ERROR;
+        } else {
+            output->status = TINYDB_SQL_EXECUTE_ERROR;
+        }
+        return output->status;
     }
 
     Statement statement;
