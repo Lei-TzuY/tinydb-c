@@ -16,6 +16,7 @@ typedef enum {
 typedef struct {
     TinyDBAnalyzeStatus status;
     uint32_t refreshed_indexes;
+    uint32_t refreshed_correlations;
     char message[TINYDB_ANALYZE_MESSAGE_MAX];
 } TinyDBAnalyzeResult;
 
