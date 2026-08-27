@@ -18,6 +18,39 @@ static void set_result_message(TinyDBSqlResult* result, const char* message) {
     snprintf(result->message, sizeof(result->message), "%s", message);
 }
 
+static bool ci_equal(const char* left, const char* right) {
+    if (left == NULL || right == NULL) return false;
+    while (*left != '\0' && *right != '\0') {
+        if (tolower((unsigned char)*left) != tolower((unsigned char)*right)) {
+            return false;
+        }
+        left++;
+        right++;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static TableSchema* find_schema(Table* table, const char* name) {
+    if (table == NULL || name == NULL || name[0] == '\0') return NULL;
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (ci_equal(table->catalog.schemas[i].name, name)) {
+            return &table->catalog.schemas[i];
+        }
+    }
+    return NULL;
+}
+
+static bool schema_uses_fixed_row_shape(const TableSchema* schema) {
+    return schema != NULL &&
+           schema->num_columns == 3 &&
+           ci_equal(schema->columns[0].name, "id") &&
+           ci_equal(schema->columns[1].name, "username") &&
+           ci_equal(schema->columns[2].name, "email") &&
+           schema->columns[0].type == COL_TYPE_INT &&
+           schema->columns[1].type == COL_TYPE_VARCHAR &&
+           schema->columns[2].type == COL_TYPE_VARCHAR;
+}
+
 static bool consume_ci_word(const char** input, const char* word) {
     const char* p = *input;
     const char* w = word;
@@ -193,10 +226,15 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
     if (table->catalog.num_tables > 1 &&
         statement.type == STATEMENT_ALTER_TABLE &&
         statement.alter_table.is_add_column) {
-        output->status = TINYDB_SQL_POLICY_ERROR;
-        set_result_message(output,
-                           "ALTER TABLE ADD COLUMN is disabled for multi-table fixed-Row storage until physical row migration is implemented");
-        return output->status;
+        TableSchema* target = find_schema(table, statement.alter_table.table_name);
+        if (target != NULL &&
+            !ci_equal(target->name, "users") &&
+            schema_uses_fixed_row_shape(target)) {
+            output->status = TINYDB_SQL_POLICY_ERROR;
+            set_result_message(output,
+                               "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented");
+            return output->status;
+        }
     }
 
     if (statement.type == STATEMENT_CREATE_INDEX &&
