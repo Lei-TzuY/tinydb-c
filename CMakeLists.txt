@@ -262,3 +262,6 @@ target_link_libraries(tinydb_column_type_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_record_payload_probe tests/record_payload_probe.c)
 target_link_libraries(tinydb_record_payload_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_leaf_value_probe tests/leaf_value_probe.c)
+target_link_libraries(tinydb_leaf_value_probe PRIVATE tinydb_core)
