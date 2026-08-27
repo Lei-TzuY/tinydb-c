@@ -18,6 +18,7 @@ set(TINYDB_CORE_SOURCES
     src/diagnostics.c
     src/engine.c
     src/generic_compound_plan_guard.c
+    src/generic_index_ddl.c
     src/generic_index_policy.c
     src/generic_index_sql.c
     src/generic_predicate.c
@@ -84,6 +85,16 @@ set_source_files_properties(
     src/multitable.c
     PROPERTIES COMPILE_DEFINITIONS
     "multitable_index_target_supported=multitable_index_target_supported_legacy"
+)
+
+# Keep the historical index catalog implementation as the storage delegate.
+# generic_index_ddl.c validates non-users generic roots before calling it, so
+# unsupported composite/unknown/primary-key generic index definitions never
+# enter the catalog.
+set_source_files_properties(
+    src/table.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "table_create_index=table_create_index_legacy"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
