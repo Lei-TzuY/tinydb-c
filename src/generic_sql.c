@@ -341,8 +341,7 @@ static bool parse_predicate(GenericParser* parser,
 static bool append_collected_id(GenericKeyCollector* collector, uint32_t id) {
     if (collector->count == collector->capacity) {
         uint32_t new_capacity = collector->capacity == 0 ? 16u : collector->capacity * 2u;
-        if (new_capacity < collector->capacity ||
-            (size_t)new_capacity > SIZE_MAX / sizeof(uint32_t)) {
+        if (new_capacity < collector->capacity) {
             collector->allocation_failed = true;
             return false;
         }
