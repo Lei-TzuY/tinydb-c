@@ -270,3 +270,6 @@ target_link_libraries(tinydb_leaf_value_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_slotted_leaf_v2_probe tests/slotted_leaf_v2_probe.c)
 target_link_libraries(tinydb_slotted_leaf_v2_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_leaf_format_discriminator_probe tests/leaf_format_discriminator_probe.c)
+target_link_libraries(tinydb_leaf_format_discriminator_probe PRIVATE tinydb_core)
