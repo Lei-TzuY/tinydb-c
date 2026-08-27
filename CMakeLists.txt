@@ -17,6 +17,8 @@ set(TINYDB_CORE_SOURCES
     src/compiler.c
     src/diagnostics.c
     src/engine.c
+    src/generic_predicate.c
+    src/generic_predicate_sql.c
     src/generic_range_mutation_sql.c
     src/generic_range_plan_sql.c
     src/generic_range_select_sql.c
@@ -30,9 +32,11 @@ set(TINYDB_CORE_SOURCES
     src/vm.c
 )
 
-# Keep the existing generic executor/planner intact as base implementations.
-# Thin front-ends add range execution/planning while equality SELECTs continue
-# reaching the original primary-key fast path and equality EXPLAIN behavior.
+# Keep the historical generic layers intact as fallbacks. The shared predicate
+# front-end owns generic SELECT/UPDATE/DELETE statements that contain WHERE,
+# including compound AND predicates. INSERT, SELECT without WHERE, DELETE ALL,
+# legacy users routing, and older fail-closed behavior continue through the
+# established executor chain.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -42,6 +46,11 @@ set_source_files_properties(
     src/generic_range_mutation_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_mutations"
+)
+set_source_files_properties(
+    src/generic_range_select_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_predicate_base"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
