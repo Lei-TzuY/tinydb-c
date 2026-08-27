@@ -18,6 +18,11 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_or_scan_base(
     const char* sql,
     TinyDBGenericSqlResult* result);
 
+TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_anchor_index_base(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSqlResult* result);
+
 TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_range(
     Table* table,
     const char* sql,
@@ -31,6 +36,12 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_like_base(
     TinyDBGenericSqlResult* result);
 
 TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_or_scan_base(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSelectPlan* plan,
+    TinyDBGenericSqlResult* result);
+
+TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan_anchor_index_base(
     Table* table,
     const char* sql,
     TinyDBGenericSelectPlan* plan,
@@ -86,14 +97,21 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(
     TinyDBGenericSqlResult* result) {
     if (sql != NULL && contains_keyword(sql, "like")) {
         /*
-         * LIKE is residual-only: never send it to ordered equality/range,
-         * compound-anchor, or OR-union paths. Flat OR still needs the existing
-         * OR evaluator because the flat AND residual executor cannot parse OR.
+         * LIKE remains residual-only. Flat OR must stay on the boolean scan
+         * evaluator because index union cannot use LIKE as a candidate source.
+         * For flat AND, however, the intersection/anchor chain may safely use
+         * other ordered predicates to narrow candidates and then re-evaluate
+         * LIKE against the fetched row. A lone LIKE predicate stays on the
+         * schema-aware residual scan path.
+         *
          * Parenthesized expressions are intercepted by the outer grouped layer
          * before this router is reached.
          */
         if (contains_keyword(sql, "or")) {
             return tinydb_generic_sql_try_execute_or_scan_base(table, sql, result);
+        }
+        if (contains_keyword(sql, "and")) {
+            return tinydb_generic_sql_try_execute_anchor_index_base(table, sql, result);
         }
         return tinydb_generic_sql_try_execute_range_select(table, sql, result);
     }
@@ -108,6 +126,10 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     if (sql != NULL && contains_keyword(sql, "like")) {
         if (contains_keyword(sql, "or")) {
             return tinydb_generic_sql_build_select_plan_or_scan_base(
+                table, sql, plan, result);
+        }
+        if (contains_keyword(sql, "and")) {
+            return tinydb_generic_sql_build_select_plan_anchor_index_base(
                 table, sql, plan, result);
         }
         return tinydb_generic_sql_build_select_plan_range(table, sql, plan, result);
