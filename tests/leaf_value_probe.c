@@ -141,11 +141,11 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    unsigned char small[4];
+    unsigned char small_buffer[4];
     unsigned char dummy[ROW_SIZE + 1u];
     if (tinydb_leaf_value_read(update_cursor,
-                               small,
-                               sizeof(small),
+                               small_buffer,
+                               sizeof(small_buffer),
                                PROBE_PAYLOAD_SIZE) ||
         tinydb_leaf_value_write(update_cursor, dummy, ROW_SIZE + 1u) ||
         tinydb_leaf_value_write(update_cursor, dummy, 0u)) {
