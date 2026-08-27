@@ -1,0 +1,238 @@
+#include "leaf_migration.h"
+
+#include "leaf_format.h"
+#include "slotted_leaf_v2.h"
+
+#include <string.h>
+
+static bool full_page(const void* page, size_t capacity) {
+    return page != NULL && capacity >= PAGE_SIZE;
+}
+
+static uint16_t read_u16_le(const unsigned char* bytes) {
+    return (uint16_t)((uint16_t)bytes[0] |
+                      ((uint16_t)bytes[1] << 8));
+}
+
+static uint32_t read_u32_le(const unsigned char* bytes) {
+    return (uint32_t)bytes[0] |
+           ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+
+static void write_u32_le(unsigned char* bytes, uint32_t value) {
+    bytes[0] = (unsigned char)(value & 0xffu);
+    bytes[1] = (unsigned char)((value >> 8) & 0xffu);
+    bytes[2] = (unsigned char)((value >> 16) & 0xffu);
+    bytes[3] = (unsigned char)((value >> 24) & 0xffu);
+}
+
+static const unsigned char* v1_cell(const void* page, uint32_t index) {
+    return (const unsigned char*)page + LEAF_NODE_HEADER_SIZE +
+           index * LEAF_NODE_CELL_SIZE;
+}
+
+static unsigned char* mutable_v1_cell(void* page, uint32_t index) {
+    return (unsigned char*)page + LEAF_NODE_HEADER_SIZE +
+           index * LEAF_NODE_CELL_SIZE;
+}
+
+static uint32_t v1_count(const void* page) {
+    uint32_t count = 0u;
+    memcpy(&count,
+           (const unsigned char*)page + LEAF_NODE_NUM_CELLS_OFFSET,
+           sizeof(count));
+    return count;
+}
+
+static uint32_t v1_key(const void* page, uint32_t index) {
+    uint32_t key = 0u;
+    memcpy(&key,
+           v1_cell(page, index) + LEAF_NODE_KEY_OFFSET,
+           sizeof(key));
+    return key;
+}
+
+static const unsigned char* v1_value(const void* page, uint32_t index) {
+    return v1_cell(page, index) + LEAF_NODE_VALUE_OFFSET;
+}
+
+static TinyDBSlottedLeafV2Slot v2_slot(const void* page, uint16_t index) {
+    const unsigned char* bytes = (const unsigned char*)page +
+        TINYDB_SLOTTED_V2_HEADER_SIZE +
+        (uint32_t)index * TINYDB_SLOTTED_V2_SLOT_SIZE;
+    TinyDBSlottedLeafV2Slot slot;
+    slot.key = read_u32_le(bytes + TINYDB_SLOTTED_V2_SLOT_KEY_OFFSET);
+    slot.value_offset = read_u16_le(bytes + TINYDB_SLOTTED_V2_SLOT_VALUE_OFFSET);
+    slot.value_length = read_u16_le(bytes + TINYDB_SLOTTED_V2_SLOT_LENGTH_OFFSET);
+    return slot;
+}
+
+static uint32_t v2_next_leaf(const void* page) {
+    return read_u32_le((const unsigned char*)page +
+                       TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET);
+}
+
+static uint32_t v2_prev_leaf(const void* page) {
+    return read_u32_le((const unsigned char*)page +
+                       TINYDB_SLOTTED_V2_PREV_LEAF_OFFSET);
+}
+
+static bool v1_keys_strictly_increasing(const void* source) {
+    uint32_t count = v1_count(source);
+    uint32_t previous = 0u;
+    for (uint32_t i = 0u; i < count; i++) {
+        uint32_t key = v1_key(source, i);
+        if (i > 0u && key <= previous) return false;
+        previous = key;
+    }
+    return true;
+}
+
+static void copy_v1_identity_to_v2(const void* source, void* destination) {
+    const unsigned char* src = (const unsigned char*)source;
+    unsigned char* dst = (unsigned char*)destination;
+
+    dst[IS_ROOT_OFFSET] = src[IS_ROOT_OFFSET];
+    memcpy(dst + PARENT_POINTER_OFFSET,
+           src + PARENT_POINTER_OFFSET,
+           PARENT_POINTER_SIZE);
+
+    uint32_t next_leaf = 0u;
+    uint32_t prev_leaf = 0u;
+    memcpy(&next_leaf,
+           src + LEAF_NODE_NEXT_LEAF_OFFSET,
+           sizeof(next_leaf));
+    memcpy(&prev_leaf,
+           src + LEAF_NODE_PREV_LEAF_OFFSET,
+           sizeof(prev_leaf));
+    write_u32_le(dst + TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET, next_leaf);
+    write_u32_le(dst + TINYDB_SLOTTED_V2_PREV_LEAF_OFFSET, prev_leaf);
+}
+
+static void init_v1_identity_from_v2(const void* source,
+                                     void* destination,
+                                     uint32_t count) {
+    const unsigned char* src = (const unsigned char*)source;
+    unsigned char* dst = (unsigned char*)destination;
+
+    memset(dst, 0, PAGE_USABLE_SIZE);
+    dst[NODE_TYPE_OFFSET] = (unsigned char)NODE_LEAF;
+    dst[IS_ROOT_OFFSET] = src[IS_ROOT_OFFSET];
+    memcpy(dst + PARENT_POINTER_OFFSET,
+           src + PARENT_POINTER_OFFSET,
+           PARENT_POINTER_SIZE);
+    memcpy(dst + LEAF_NODE_NUM_CELLS_OFFSET, &count, sizeof(count));
+
+    uint32_t next_leaf = v2_next_leaf(source);
+    uint32_t prev_leaf = v2_prev_leaf(source);
+    memcpy(dst + LEAF_NODE_NEXT_LEAF_OFFSET,
+           &next_leaf,
+           sizeof(next_leaf));
+    memcpy(dst + LEAF_NODE_PREV_LEAF_OFFSET,
+           &prev_leaf,
+           sizeof(prev_leaf));
+}
+
+bool tinydb_leaf_migrate_v1_to_v2(const void* source,
+                                   size_t source_capacity,
+                                   uint32_t logical_value_length,
+                                   void* destination,
+                                   size_t destination_capacity) {
+    if (!full_page(source, source_capacity) ||
+        !full_page(destination, destination_capacity) ||
+        source == destination ||
+        logical_value_length == 0u ||
+        logical_value_length > ROW_SIZE ||
+        logical_value_length > UINT16_MAX ||
+        tinydb_leaf_format_detect_page(source, source_capacity) !=
+            TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 ||
+        !v1_keys_strictly_increasing(source)) {
+        return false;
+    }
+
+    uint32_t count = v1_count(source);
+    uint32_t required = TINYDB_SLOTTED_V2_HEADER_SIZE +
+                        count * TINYDB_SLOTTED_V2_SLOT_SIZE +
+                        count * logical_value_length;
+    if (required > PAGE_USABLE_SIZE) return false;
+
+    unsigned char scratch[PAGE_SIZE];
+    memset(scratch, 0, sizeof(scratch));
+    if (!tinydb_slotted_leaf_v2_init(scratch, sizeof(scratch))) return false;
+    copy_v1_identity_to_v2(source, scratch);
+
+    for (uint32_t i = 0u; i < count; i++) {
+        if (!tinydb_slotted_leaf_v2_insert(
+                scratch,
+                sizeof(scratch),
+                v1_key(source, i),
+                v1_value(source, i),
+                (uint16_t)logical_value_length)) {
+            return false;
+        }
+    }
+
+    if (tinydb_leaf_format_detect_page(scratch, sizeof(scratch)) !=
+        TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return false;
+    }
+
+    memcpy(destination, scratch, PAGE_USABLE_SIZE);
+    return true;
+}
+
+bool tinydb_leaf_v2_can_downgrade_to_v1(const void* source,
+                                        size_t source_capacity) {
+    if (!full_page(source, source_capacity) ||
+        tinydb_leaf_format_detect_page(source, source_capacity) !=
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return false;
+    }
+
+    uint16_t count = tinydb_slotted_leaf_v2_count(source, source_capacity);
+    if (count > LEAF_NODE_MAX_CELLS) return false;
+
+    for (uint16_t i = 0u; i < count; i++) {
+        TinyDBSlottedLeafV2Slot slot = v2_slot(source, i);
+        if (slot.value_length == 0u || slot.value_length > ROW_SIZE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool tinydb_leaf_migrate_v2_to_v1(const void* source,
+                                   size_t source_capacity,
+                                   void* destination,
+                                   size_t destination_capacity) {
+    if (!full_page(destination, destination_capacity) ||
+        source == destination ||
+        !tinydb_leaf_v2_can_downgrade_to_v1(source, source_capacity)) {
+        return false;
+    }
+
+    uint16_t count = tinydb_slotted_leaf_v2_count(source, source_capacity);
+    unsigned char scratch[PAGE_SIZE];
+    memset(scratch, 0, sizeof(scratch));
+    init_v1_identity_from_v2(source, scratch, count);
+
+    for (uint16_t i = 0u; i < count; i++) {
+        TinyDBSlottedLeafV2Slot slot = v2_slot(source, i);
+        unsigned char* cell = mutable_v1_cell(scratch, i);
+        memcpy(cell + LEAF_NODE_KEY_OFFSET, &slot.key, sizeof(slot.key));
+        memset(cell + LEAF_NODE_VALUE_OFFSET, 0, ROW_SIZE);
+        memcpy(cell + LEAF_NODE_VALUE_OFFSET,
+               (const unsigned char*)source + slot.value_offset,
+               slot.value_length);
+    }
+
+    if (tinydb_leaf_format_detect_page(scratch, sizeof(scratch)) !=
+        TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        return false;
+    }
+
+    memcpy(destination, scratch, PAGE_USABLE_SIZE);
+    return true;
+}
