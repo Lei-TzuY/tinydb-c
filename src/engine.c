@@ -1,5 +1,6 @@
 #include "engine.h"
 #include "catalog_pragmas.h"
+#include "diagnostics.h"
 #include "join_plan.h"
 
 #include <ctype.h>
@@ -199,6 +200,45 @@ static TinyDBSqlStatus execute_explain_analyze(TinyDB* database,
     return result->status;
 }
 
+static TinyDBSqlStatus execute_catalog_integrity_check(Table* table,
+                                                       TinyDBSqlResult* result) {
+    bool ok = true;
+    char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        const TableSchema* schema = &table->catalog.schemas[i];
+        for (uint32_t j = 0; j < i; j++) {
+            if (table->catalog.schemas[j].root_page_num == schema->root_page_num) {
+                printf("Error: Tables '%s' and '%s' share root page %u.\n",
+                       table->catalog.schemas[j].name,
+                       schema->name,
+                       schema->root_page_num);
+                ok = false;
+            }
+        }
+
+        if (!tinydb_check_table_tree(table,
+                                     schema->name,
+                                     message,
+                                     sizeof(message))) {
+            printf("Error: Table '%s': %s\n", schema->name, message);
+            ok = false;
+        }
+    }
+
+    result->executed = true;
+    result->execute_result = ok ? EXECUTE_SUCCESS : EXECUTE_KEY_NOT_FOUND;
+    if (ok) {
+        printf("ok\n");
+        result->status = TINYDB_SQL_SUCCESS;
+        return result->status;
+    }
+
+    result->status = TINYDB_SQL_EXECUTE_ERROR;
+    set_result_message(result, "catalog B+ tree integrity check failed");
+    return result->status;
+}
+
 TinyDB* tinydb_open(const char* filename) {
     if (filename == NULL || filename[0] == '\0' ||
         strlen(filename) >= TINYDB_ENGINE_FILENAME_MAX) {
@@ -314,6 +354,11 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
             output->status = TINYDB_SQL_SYNTAX_ERROR;
             return output->status;
         }
+    }
+
+    if (statement.type == STATEMENT_PRAGMA_INTEGRITY_CHECK &&
+        table->catalog.num_tables > 1) {
+        return execute_catalog_integrity_check(table, output);
     }
 
     if (multitable_is_schema_ddl(statement.type) && table->in_transaction) {
