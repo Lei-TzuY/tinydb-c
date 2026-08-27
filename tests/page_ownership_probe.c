@@ -44,6 +44,10 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("clean database did not pass ownership check");
     }
+    if (!tinydb_check_database(table, &stats, message, sizeof(message))) {
+        tinydb_close(database);
+        return fail("clean database did not pass whole-database diagnostics");
+    }
 
     uint32_t orphan_page = get_unused_page_num(table->pager);
     (void)get_page(table->pager, orphan_page);
@@ -52,13 +56,19 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("orphan page was not detected");
     }
+    if (tinydb_check_database(table, &stats, message, sizeof(message)) ||
+        stats.orphan_pages != 1 || strstr(message, "page ownership:") == NULL) {
+        tinydb_close(database);
+        return fail("whole-database diagnostics accepted orphan page");
+    }
     if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) == TINYDB_SQL_SUCCESS) {
         tinydb_close(database);
         return fail("PRAGMA integrity_check accepted orphan page");
     }
 
     pager_free_page(table->pager, orphan_page);
-    if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message))) {
+    if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
+        !tinydb_check_database(table, &stats, message, sizeof(message))) {
         tinydb_close(database);
         return fail("freeing orphan page did not restore ownership validity");
     }
@@ -79,13 +89,19 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("shared root/page was not detected");
     }
+    if (tinydb_check_database(table, &stats, message, sizeof(message)) ||
+        strstr(message, "share root page") == NULL) {
+        tinydb_close(database);
+        return fail("whole-database diagnostics accepted duplicate table roots");
+    }
     if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) == TINYDB_SQL_SUCCESS) {
         tinydb_close(database);
         return fail("PRAGMA integrity_check accepted shared root/page");
     }
 
     table->catalog.schemas[archive_index].root_page_num = archive_root;
-    if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message))) {
+    if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
+        !tinydb_check_database(table, &stats, message, sizeof(message))) {
         tinydb_close(database);
         return fail("restoring root did not restore ownership validity");
     }
