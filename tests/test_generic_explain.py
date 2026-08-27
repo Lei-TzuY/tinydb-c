@@ -82,10 +82,7 @@ def main():
         plain_pk = run_session(
             executable,
             db_file,
-            [
-                "EXPLAIN SELECT name FROM products WHERE id = 2;",
-                ".exit",
-            ],
+            ["EXPLAIN SELECT name FROM products WHERE id = 2;", ".exit"],
         )
         require(plain_pk, "PLAN: GENERIC PRIMARY KEY LOOKUP")
         require(plain_pk, "TABLE: products (root page ")
@@ -97,10 +94,7 @@ def main():
         plain_scan = run_session(
             executable,
             db_file,
-            [
-                "EXPLAIN SELECT name FROM products WHERE price = 1299;",
-                ".exit",
-            ],
+            ["EXPLAIN SELECT name FROM products WHERE price = 1299;", ".exit"],
         )
         require(plain_scan, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(plain_scan, "PROJECTION: name")
@@ -108,13 +102,27 @@ def main():
         if "ACTUAL RESULT" in plain_scan or "db > mouse\n" in plain_scan:
             raise AssertionError("plain generic scan EXPLAIN executed the query\n" + plain_scan)
 
-        analyze_pk = run_session(
+        plain_range = run_session(
             executable,
             db_file,
             [
-                "EXPLAIN ANALYZE SELECT name FROM products WHERE id = 2;",
+                "EXPLAIN SELECT name FROM products WHERE price >= 1000 LIMIT 2;",
+                "EXPLAIN SELECT COUNT(*) FROM products WHERE name < 'mouse';",
+                "EXPLAIN SELECT * FROM products WHERE id > 1;",
                 ".exit",
             ],
+        )
+        require(plain_range, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(plain_range, "FILTER: price >= 1000")
+        require(plain_range, "FILTER: name < 'mouse'")
+        require(plain_range, "FILTER: id > 1")
+        if "ACTUAL RESULT" in plain_range:
+            raise AssertionError("plain generic range EXPLAIN executed a query\n" + plain_range)
+
+        analyze_pk = run_session(
+            executable,
+            db_file,
+            ["EXPLAIN ANALYZE SELECT name FROM products WHERE id = 2;", ".exit"],
         )
         require(analyze_pk, "QUERY PLAN")
         require(analyze_pk, "PLAN: GENERIC PRIMARY KEY LOOKUP")
@@ -125,35 +133,46 @@ def main():
         analyze_scan = run_session(
             executable,
             db_file,
-            [
-                "EXPLAIN ANALYZE SELECT * FROM products WHERE price = 399;",
-                ".exit",
-            ],
+            ["EXPLAIN ANALYZE SELECT * FROM products WHERE price = 399;", ".exit"],
         )
         require(analyze_scan, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(analyze_scan, "ACTUAL RESULT")
         require(analyze_scan, "(3, cable, 399)")
         require_metrics(analyze_scan)
 
+        analyze_range = run_session(
+            executable,
+            db_file,
+            [
+                "EXPLAIN ANALYZE SELECT name FROM products WHERE price >= 1000 LIMIT 1;",
+                ".exit",
+            ],
+        )
+        require(analyze_range, "QUERY PLAN")
+        require(analyze_range, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(analyze_range, "FILTER: price >= 1000")
+        require(analyze_range, "ACTUAL RESULT")
+        require(analyze_range, "keyboard")
+        require_metrics(analyze_range)
+
         invalid = run_session(
             executable,
             db_file,
             [
                 "EXPLAIN SELECT * FROM products WHERE price = '1299';",
+                "EXPLAIN SELECT * FROM products WHERE price >= '1299';",
                 ".exit",
             ],
         )
-        require(invalid, "Syntax error. Could not parse statement.")
+        if invalid.count("Syntax error. Could not parse statement.") < 2:
+            raise AssertionError("typed invalid filters were not rejected\n" + invalid)
         if "PLAN: GENERIC" in invalid:
             raise AssertionError("invalid typed generic filter produced a plan\n" + invalid)
 
         legacy = run_session(
             executable,
             db_file,
-            [
-                "EXPLAIN ANALYZE SELECT * FROM users WHERE id = 42;",
-                ".exit",
-            ],
+            ["EXPLAIN ANALYZE SELECT * FROM users WHERE id = 42;", ".exit"],
         )
         require(legacy, "QUERY PLAN")
         require(legacy, "ACTUAL RESULT")
@@ -162,7 +181,10 @@ def main():
         if "PLAN: GENERIC" in legacy:
             raise AssertionError("legacy users query was incorrectly captured by generic planner\n" + legacy)
 
-        print("PASS: generic EXPLAIN/ANALYZE reports PK vs scan plans while preserving legacy profiling.")
+        print(
+            "PASS: generic EXPLAIN/ANALYZE reports equality PK lookup versus "
+            "typed equality/range scans while preserving legacy profiling."
+        )
     finally:
         cleanup(db_file)
 
