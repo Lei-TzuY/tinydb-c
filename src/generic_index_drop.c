@@ -1,7 +1,9 @@
+#include "generic_index_correlation.h"
 #include "table.h"
 
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 
 bool table_drop_index_legacy(Table* table, const char* index_name);
 
@@ -28,6 +30,9 @@ static bool remove_sidecar(const char* filename, const char* description) {
 bool table_drop_index(Table* table, const char* index_name) {
     char range_filename[640];
     char stats_filename[672];
+    char pair_filenames[MAX_INDEXES][768];
+    uint32_t pair_filename_count = 0;
+
     bool has_range_filename = build_range_filename(table,
                                                     index_name,
                                                     range_filename,
@@ -42,6 +47,27 @@ bool table_drop_index(Table* table, const char* index_name) {
             written >= 0 && (size_t)written < sizeof(stats_filename);
     }
 
+    GenericSecondaryIndex* target = table_find_index_by_name(table, index_name);
+    if (target != NULL) {
+        for (uint32_t i = 0;
+             i < table->num_sec_indexes && pair_filename_count < MAX_INDEXES;
+             i++) {
+            GenericSecondaryIndex* other = &table->sec_indexes[i];
+            if (other == target || !other->enabled || other->num_columns != 1 ||
+                strcmp(other->table_name, target->table_name) != 0) {
+                continue;
+            }
+            if (tinydb_generic_index_pair_stats_filename(
+                    table,
+                    target,
+                    other,
+                    pair_filenames[pair_filename_count],
+                    sizeof(pair_filenames[pair_filename_count]))) {
+                pair_filename_count++;
+            }
+        }
+    }
+
     bool dropped = table_drop_index_legacy(table, index_name);
     if (!dropped) return false;
 
@@ -52,6 +78,12 @@ bool table_drop_index(Table* table, const char* index_name) {
     if (has_stats_filename &&
         !remove_sidecar(stats_filename, "generic index optimizer statistics")) {
         return false;
+    }
+    for (uint32_t i = 0; i < pair_filename_count; i++) {
+        if (!remove_sidecar(pair_filenames[i],
+                            "generic pairwise correlation statistics")) {
+            return false;
+        }
     }
     return true;
 }
