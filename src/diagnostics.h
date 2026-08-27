@@ -3,6 +3,8 @@
 
 #include "table.h"
 
+#include <ctype.h>
+
 #define TINYDB_DIAGNOSTIC_MESSAGE_MAX 256
 
 typedef struct {
