@@ -21,7 +21,8 @@ typedef enum {
     TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP,
     TINYDB_GENERIC_PLAN_SECONDARY_INDEX_LOOKUP,
     TINYDB_GENERIC_PLAN_SECONDARY_INDEX_RANGE,
-    TINYDB_GENERIC_PLAN_SECONDARY_INDEX_RESIDUAL
+    TINYDB_GENERIC_PLAN_SECONDARY_INDEX_RESIDUAL,
+    TINYDB_GENERIC_PLAN_SECONDARY_INDEX_UNION
 } TinyDBGenericPlanKind;
 
 typedef struct {
@@ -36,6 +37,7 @@ typedef struct {
     char filter_value[TINYDB_GENERIC_PLAN_TEXT_MAX];
     char filter_expression[TINYDB_GENERIC_PLAN_FILTER_EXPRESSION_MAX];
     char index_name[MAX_NAME_SIZE];
+    uint32_t index_branch_count;
 } TinyDBGenericSelectPlan;
 
 typedef struct {
