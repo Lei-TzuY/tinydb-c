@@ -21,6 +21,7 @@ set(TINYDB_CORE_SOURCES
     src/multitable.c
     src/pager.c
     src/profile.c
+    src/record.c
     src/table.c
     src/vm.c
 )
@@ -42,3 +43,6 @@ target_link_libraries(tinydb_engine_api_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_page_ownership_probe tests/page_ownership_probe.c)
 target_link_libraries(tinydb_page_ownership_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_generic_record_probe tests/generic_record_probe.c)
+target_link_libraries(tinydb_generic_record_probe PRIVATE tinydb_core)
