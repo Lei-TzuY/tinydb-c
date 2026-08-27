@@ -110,14 +110,17 @@ def main():
 
         require(first, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(first, "FILTER: name LIKE 'alp%'")
+        require(first, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(first, "INDEX: idx_docs_price")
+        require(first, "ANCHOR: price >= 20")
         require(first, "FILTER: name LIKE 'alp%' AND price >= 20")
         require(first, "QUERY PLAN")
         require(first, "ACTUAL RESULT")
         require(first, "ok")
         if "PLAN: GENERIC SECONDARY INDEX RANGE SCAN" in first:
             raise AssertionError("LIKE was incorrectly planned as an ordered range scan\n" + first)
-        if "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER" in first:
-            raise AssertionError("LIKE was incorrectly selected as a flat-AND index anchor\n" + first)
+        if "ANCHOR: name LIKE" in first:
+            raise AssertionError("LIKE was incorrectly selected as an index anchor\n" + first)
         require_scalars(first, [4, 1, 1, 0, 6, 3, 2, 3, 4, 3, 0, 3])
 
         reopened = run_session(
@@ -152,8 +155,8 @@ def main():
         print(
             "PASS: generic VARCHAR LIKE supports %/_ wildcards across SELECT, AND/OR, "
             "parenthesized predicates, UPDATE/DELETE, EXPLAIN ANALYZE, rollback and "
-            "reopen durability on a mixed VARCHAR/INT schema while typed mismatches fail "
-            "closed and ordered indexes are not misused as LIKE range plans."
+            "reopen durability; LIKE stays residual-only while another ordered AND "
+            "predicate may safely provide the candidate anchor."
         )
     finally:
         cleanup(db_file)
