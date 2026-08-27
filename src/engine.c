@@ -56,6 +56,19 @@ static bool schema_uses_fixed_row_shape(const TableSchema* schema) {
            schema->columns[2].type == COL_TYPE_VARCHAR;
 }
 
+static bool schema_uses_generic_fixed_slot(const TableSchema* schema) {
+    if (schema == NULL || schema_uses_fixed_row_shape(schema)) return false;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    return tinydb_schema_supports_records(schema, message, sizeof(message));
+}
+
+static uint32_t schema_column_storage_size(const char* type) {
+    if (ci_equal(type, "INT") || ci_equal(type, "INTEGER")) {
+        return (uint32_t)sizeof(uint32_t);
+    }
+    return 256u;
+}
+
 static bool consume_ci_word(const char** input, const char* word) {
     const char* p = *input;
     const char* w = word;
@@ -498,6 +511,18 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
             set_result_message(output,
                                "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented");
             return output->status;
+        }
+
+        if (target != NULL && schema_uses_generic_fixed_slot(target)) {
+            uint32_t added_size = schema_column_storage_size(
+                statement.alter_table.new_col_type);
+            if (target->row_size > ROW_SIZE ||
+                added_size > ROW_SIZE - target->row_size) {
+                output->status = TINYDB_SQL_POLICY_ERROR;
+                set_result_message(output,
+                                   "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented");
+                return output->status;
+            }
         }
     }
 
