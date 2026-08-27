@@ -100,7 +100,10 @@ static void format_column_type(const TableColumn* column,
     if (column->type == COL_TYPE_INT) {
         snprintf(output, output_size, "INT");
     } else {
-        snprintf(output, output_size, "VARCHAR(%u)", column->size);
+        /* Serialized VARCHAR fields reserve one byte for the mandatory NUL
+         * terminator. Report character capacity rather than physical bytes. */
+        uint32_t character_capacity = column->size > 0u ? column->size - 1u : 0u;
+        snprintf(output, output_size, "VARCHAR(%u)", character_capacity);
     }
 }
 
