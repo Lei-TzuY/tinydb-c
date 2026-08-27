@@ -15,6 +15,7 @@ endif()
 set(TINYDB_CORE_SOURCES
     src/alter_varchar_policy.c
     src/catalog_pragmas.c
+    src/column_type.c
     src/compiler.c
     src/create_table_policy.c
     src/database_diagnostics.c
@@ -276,3 +277,6 @@ target_link_libraries(tinydb_schema_catalog_v1_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_committed_crash_probe tests/committed_crash_probe.c)
 target_link_libraries(tinydb_committed_crash_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_column_type_probe tests/column_type_probe.c)
+target_link_libraries(tinydb_column_type_probe PRIVATE tinydb_core)
