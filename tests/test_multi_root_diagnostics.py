@@ -60,6 +60,7 @@ def main():
             ".schema archive",
             ".btree archive",
             ".check all",
+            "PRAGMA integrity_check;",
             ".exit",
         ])
         first = run_session(executable, db_path, commands)
@@ -72,6 +73,7 @@ def main():
         assert "B+ tree for archive (root page " in first, first
         assert "archive: ok: root=" in first, first
         assert "users: ok: root=0" in first, first
+        assert "\nok\n" in first or "db > ok\n" in first, first
 
         second = run_session(
             executable,
@@ -79,11 +81,13 @@ def main():
             [
                 ".stats archive",
                 ".check archive",
+                "PRAGMA integrity_check;",
                 ".exit",
             ],
         )
         assert "Rows: 20" in second, second
         assert "archive: ok: root=" in second, second
+        assert "ok" in second, second
 
         print("PASS: multi-root schema/stats/btree/check diagnostics verified")
     finally:
