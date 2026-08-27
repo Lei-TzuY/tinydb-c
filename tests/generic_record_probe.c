@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "generic_index_candidates.h"
 #include "record.h"
 
 #include <stdio.h>
@@ -120,6 +121,57 @@ static bool expect_order(Table* table,
     return true;
 }
 
+static GenericSecondaryIndex* find_index(Table* table, const char* name) {
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        if (table->sec_indexes[i].enabled &&
+            strcmp(table->sec_indexes[i].name, name) == 0) {
+            return &table->sec_indexes[i];
+        }
+    }
+    return NULL;
+}
+
+static bool expect_price_window(Table* table, TableSchema* products) {
+    GenericSecondaryIndex* index = find_index(table, "idx_products_price");
+    if (index == NULL) {
+        fprintf(stderr, "price index not found\n");
+        return false;
+    }
+
+    TinyDBGenericPredicate predicates[2];
+    memset(predicates, 0, sizeof(predicates));
+    predicates[0].column_index = 2;
+    predicates[0].op = TINYDB_GENERIC_COMPARE_GTE;
+    predicates[0].value = int_value(1000u);
+    predicates[1].column_index = 2;
+    predicates[1].op = TINYDB_GENERIC_COMPARE_LTE;
+    predicates[1].value = int_value(1500u);
+
+    TinyDBGenericIndexCandidates candidates;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_generic_index_collect_conjunctive_candidates(table,
+                                                             products,
+                                                             index,
+                                                             predicates,
+                                                             2,
+                                                             &candidates,
+                                                             message,
+                                                             sizeof(message))) {
+        fprintf(stderr, "conjunctive candidates failed: %s\n", message);
+        return false;
+    }
+
+    bool ok = candidates.count == 6u;
+    for (uint32_t i = 0; ok && i < candidates.count; i++) {
+        if (candidates.ids[i] != 10u + i) ok = false;
+    }
+    if (!ok) {
+        fprintf(stderr, "unexpected conjunctive candidate window count=%u\n", candidates.count);
+    }
+    tinydb_generic_index_candidates_free(&candidates);
+    return ok;
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s DATABASE\n", argv[0]);
@@ -182,10 +234,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!exec_ok(db, "CREATE INDEX idx_products_price ON products(price);")) {
+        tinydb_close(db);
+        return EXIT_FAILURE;
+    }
+
     if (tinydb_record_scan(table, products, NULL, NULL) != 30u ||
         tinydb_record_scan(table, orders, NULL, NULL) != 20u ||
         !expect_product(table, products, 29u, "product_29", 2900u) ||
-        !expect_order(table, orders, 19u, 20u, 5u)) {
+        !expect_order(table, orders, 19u, 20u, 5u) ||
+        !expect_price_window(table, products)) {
         tinydb_close(db);
         return EXIT_FAILURE;
     }
@@ -195,6 +253,7 @@ int main(int argc, char** argv) {
            products->columns[2].offset,
            orders->row_size,
            orders->columns[2].offset);
+    printf("GENERIC_INDEX_WINDOW price=1000..1500 candidates=6\n");
 
     tinydb_close(db);
     db = tinydb_open(argv[1]);
@@ -208,12 +267,13 @@ int main(int argc, char** argv) {
         tinydb_record_scan(table, orders, NULL, NULL) != 20u ||
         !expect_product(table, products, 29u, "product_29", 2900u) ||
         !expect_order(table, orders, 19u, 20u, 5u) ||
+        !expect_price_window(table, products) ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
         tinydb_close(db);
         return EXIT_FAILURE;
     }
 
-    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes\n");
+    printf("GENERIC_RECORD_OK products=30 orders=20 reopen=yes conjunctive_index=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
 }
