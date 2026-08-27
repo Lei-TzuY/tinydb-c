@@ -50,12 +50,14 @@ set(TINYDB_CORE_SOURCES
     src/vm.c
 )
 
-# Keep the historical generic layers intact as fallbacks. Ordered generic
-# secondary-index paths now share generic_index_candidates.c for snapshot load,
-# checksum/epoch validation, numeric/text ordering and candidate bounds. LIKE is
-# explicitly residual-only. A flat AND may use one ordered anchor; a flat OR may
-# use an index union only when every disjunct has a proven PK or ordered-index
-# anchor. Unsupported forms delegate to the established scan evaluators.
+# Keep historical generic layers as fallbacks while sharing ordered-index
+# snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Routing is
+# deliberately ordered as follows for SELECT:
+#   parenthesized -> OR mutation wrapper -> LIKE router -> OR index union
+#   -> OR scan -> flat AND index anchor -> single range/equality -> residual.
+# LIKE therefore never enters an ordered index layer. Flat OR uses index union
+# only when every disjunct has a proven PK or ordered secondary-index anchor;
+# otherwise it falls back to the existing OR scan evaluator.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -97,9 +99,6 @@ set_source_files_properties(
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_snapshot_base"
 )
 if(NOT MSVC)
-    # capacity is uint32_t, so the SIZE_MAX guard is meaningful only on
-    # narrower size_t targets; GCC 64-bit diagnoses the portable guard as a
-    # constant-false comparison. Keep every other warning as an error.
     set_source_files_properties(
         src/generic_index_snapshot_sql.c
         PROPERTIES COMPILE_OPTIONS "-Wno-type-limits"
@@ -113,17 +112,22 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_index_anchor_v2_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_like_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_like_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_like_base"
-)
-set_source_files_properties(
-    src/generic_like_route_sql.c
-    PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_anchor_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_anchor_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_anchor_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_anchor_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_anchor_index_base"
 )
 set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_scan_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_or_scan_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_or_scan_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_anchor_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_anchor_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_scan_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_anchor_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_or_scan_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_or_scan_base;tinydb_generic_sql_build_select_plan_or_base=tinydb_generic_sql_build_select_plan_anchor_index_base;tinydb_generic_sql_print_plan_or_base=tinydb_generic_sql_print_plan_anchor_index_base"
+)
+set_source_files_properties(
+    src/generic_index_union_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute_or_select_base=tinydb_generic_sql_try_execute_union_base;tinydb_generic_sql_build_select_plan_parenthesized_base=tinydb_generic_sql_build_select_plan_union_base;tinydb_generic_sql_print_plan_parenthesized_base=tinydb_generic_sql_print_plan_union_base"
+)
+set_source_files_properties(
+    src/generic_like_route_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_like_base=tinydb_generic_sql_try_execute_union_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_parenthesized_base;tinydb_generic_sql_build_select_plan_like_base=tinydb_generic_sql_build_select_plan_union_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_parenthesized_base;tinydb_generic_sql_print_plan_like_base=tinydb_generic_sql_print_plan_union_base"
 )
 set_source_files_properties(
     src/generic_or_mutation_sql.c
@@ -145,9 +149,8 @@ set_source_files_properties(
     "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base"
 )
 
-# The original multi-root policy intentionally allowed indexes only on root 0.
-# Preserve it under a private symbol and expose the narrower schema-aware policy
-# from generic_index_policy.c for generic fixed-slot table roots.
+# Preserve historical root-0-only index policy behind a private delegate; the
+# generic policy adapter opens only proven schema-aware fixed-slot targets.
 set_source_files_properties(
     src/multitable.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -155,8 +158,7 @@ set_source_files_properties(
 )
 
 # Keep historical index catalog/drop implementations as delegates. Generic DDL
-# validates non-users roots before creation; the drop wrapper additionally
-# removes the typed range sidecar so no orphan snapshot remains.
+# validates non-users roots before creation; drop also removes typed snapshots.
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
