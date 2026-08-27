@@ -1,5 +1,6 @@
 #include "record.h"
 #include "record_payload.h"
+#include "leaf_value.h"
 
 #include <ctype.h>
 
@@ -224,38 +225,31 @@ static void commit_if_autocommit(Table* table) {
     if (!table->in_transaction) pager_commit(table->pager);
 }
 
-static bool record_to_legacy_slot(const TableSchema* schema,
-                                  const TinyDBRecord* record,
-                                  unsigned char slot[ROW_SIZE],
-                                  char* message,
-                                  size_t message_size) {
-    TinyDBRecordPayload payload;
-    if (!tinydb_record_payload_from_record(schema,
-                                           record,
-                                           &payload,
-                                           message,
-                                           message_size)) {
-        return false;
-    }
-    return tinydb_record_payload_pack_fixed_slot(&payload,
-                                                 slot,
-                                                 ROW_SIZE,
-                                                 message,
-                                                 message_size);
+static bool record_to_payload(const TableSchema* schema,
+                              const TinyDBRecord* record,
+                              TinyDBRecordPayload* payload,
+                              char* message,
+                              size_t message_size) {
+    return tinydb_record_payload_from_record(schema,
+                                             record,
+                                             payload,
+                                             message,
+                                             message_size);
 }
 
-static bool legacy_slot_to_record(const TableSchema* schema,
-                                  const void* slot,
-                                  TinyDBRecord* record,
-                                  char* message,
-                                  size_t message_size) {
+static bool cursor_to_record(const TableSchema* schema,
+                             Cursor* cursor,
+                             TinyDBRecord* record,
+                             char* message,
+                             size_t message_size) {
     TinyDBRecordPayload payload;
-    if (!tinydb_record_payload_unpack_fixed_slot(schema,
-                                                 slot,
-                                                 ROW_SIZE,
-                                                 &payload,
-                                                 message,
-                                                 message_size)) {
+    memset(&payload, 0, sizeof(payload));
+    payload.length = schema->row_size;
+    if (!tinydb_leaf_value_read(cursor,
+                                payload.bytes,
+                                sizeof(payload.bytes),
+                                payload.length)) {
+        set_message(message, message_size, "unable to read logical leaf value", NULL);
         return false;
     }
     return tinydb_record_payload_to_record(schema,
@@ -287,8 +281,17 @@ bool tinydb_record_insert(Table* table,
         return false;
     }
 
+    TinyDBRecordPayload payload;
+    if (!record_to_payload(schema,
+                           &record,
+                           &payload,
+                           message,
+                           message_size)) {
+        return false;
+    }
+
     uint32_t key = 0;
-    memcpy(&key, record.bytes, sizeof(key));
+    memcpy(&key, payload.bytes, sizeof(key));
     uint32_t previous_root = 0;
     begin_root_scope(table, schema, &previous_root);
 
@@ -300,17 +303,15 @@ bool tinydb_record_insert(Table* table,
         return false;
     }
 
-    unsigned char slot[ROW_SIZE];
-    if (!record_to_legacy_slot(schema, &record, slot, message, message_size)) {
+    if (!tinydb_leaf_value_insert(cursor,
+                                  key,
+                                  payload.bytes,
+                                  payload.length)) {
         free(cursor);
         end_root_scope(table, previous_root);
+        set_message(message, message_size, "unable to insert logical leaf value", NULL);
         return false;
     }
-
-    Row carrier;
-    memset(&carrier, 0, sizeof(carrier));
-    memcpy(&carrier, slot, ROW_SIZE);
-    leaf_node_insert(cursor, key, &carrier);
     free(cursor);
     end_root_scope(table, previous_root);
 
@@ -341,18 +342,23 @@ bool tinydb_record_update(Table* table,
                               message_size)) {
         return false;
     }
+
+    TinyDBRecordPayload payload;
+    if (!record_to_payload(schema,
+                           &record,
+                           &payload,
+                           message,
+                           message_size)) {
+        return false;
+    }
+
     uint32_t encoded_id = 0;
-    memcpy(&encoded_id, record.bytes, sizeof(encoded_id));
+    memcpy(&encoded_id, payload.bytes, sizeof(encoded_id));
     if (encoded_id != id) {
         set_message(message,
                     message_size,
                     "generic UPDATE cannot change the primary-key id",
                     NULL);
-        return false;
-    }
-
-    unsigned char slot[ROW_SIZE];
-    if (!record_to_legacy_slot(schema, &record, slot, message, message_size)) {
         return false;
     }
 
@@ -366,8 +372,12 @@ bool tinydb_record_update(Table* table,
         return false;
     }
 
-    memcpy(cursor_value(cursor), slot, ROW_SIZE);
-    mark_page_dirty(table->pager, cursor->page_num);
+    if (!tinydb_leaf_value_write(cursor, payload.bytes, payload.length)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message, message_size, "unable to update logical leaf value", NULL);
+        return false;
+    }
     free(cursor);
     end_root_scope(table, previous_root);
 
@@ -450,11 +460,11 @@ bool tinydb_record_find(Table* table,
     Cursor* cursor = table_find(table, id);
     bool found = cursor_matches_key(table, cursor, id);
     if (found) {
-        found = legacy_slot_to_record(schema,
-                                      cursor_value(cursor),
-                                      record,
-                                      ignored,
-                                      sizeof(ignored));
+        found = cursor_to_record(schema,
+                                 cursor,
+                                 record,
+                                 ignored,
+                                 sizeof(ignored));
     }
     free(cursor);
     end_root_scope(table, previous_root);
@@ -475,11 +485,11 @@ uint32_t tinydb_record_scan(Table* table,
     uint32_t count = 0;
     while (!cursor->end_of_table) {
         TinyDBRecord record;
-        if (!legacy_slot_to_record(schema,
-                                   cursor_value(cursor),
-                                   &record,
-                                   ignored,
-                                   sizeof(ignored))) {
+        if (!cursor_to_record(schema,
+                              cursor,
+                              &record,
+                              ignored,
+                              sizeof(ignored))) {
             break;
         }
         count++;
