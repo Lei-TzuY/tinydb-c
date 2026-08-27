@@ -1,4 +1,5 @@
 #include "generic_index_candidates.h"
+#include "generic_index_cost.h"
 #include "generic_sql.h"
 
 #include <ctype.h>
@@ -22,6 +23,11 @@ typedef struct {
     bool has_limit;
     uint32_t limit;
     uint32_t offset;
+    bool cost_estimated;
+    uint32_t estimated_candidate_count;
+    uint32_t estimated_table_rows;
+    uint64_t estimated_cost;
+    uint64_t estimated_scan_cost;
 } AnchorV2Select;
 
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_range_index_base(
@@ -150,7 +156,58 @@ static bool has_primary_key_equality(const AnchorV2Select* select) {
     return false;
 }
 
-static bool choose_anchor(Table* table, AnchorV2Select* select) {
+static uint32_t collect_column_predicates(
+    const AnchorV2Select* select,
+    uint32_t column_index,
+    TinyDBGenericPredicate* predicates,
+    uint32_t capacity) {
+    if (select == NULL || predicates == NULL || capacity == 0) return 0;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < select->predicate_count && count < capacity; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index == column_index &&
+            predicate->op <= TINYDB_GENERIC_COMPARE_LTE) {
+            predicates[count++] = *predicate;
+        }
+    }
+    return count;
+}
+
+static bool column_seen_before(const AnchorV2Select* select,
+                               uint32_t predicate_index) {
+    uint32_t column_index = select->predicates[predicate_index].column_index;
+    for (uint32_t i = 0; i < predicate_index; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index == column_index &&
+            predicate->op <= TINYDB_GENERIC_COMPARE_LTE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint32_t preferred_predicate_for_column(
+    const AnchorV2Select* select,
+    uint32_t column_index,
+    bool* has_equality) {
+    uint32_t first = UINT32_MAX;
+    *has_equality = false;
+    for (uint32_t i = 0; i < select->predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index != column_index ||
+            predicate->op > TINYDB_GENERIC_COMPARE_LTE) {
+            continue;
+        }
+        if (first == UINT32_MAX) first = i;
+        if (predicate->op == TINYDB_GENERIC_COMPARE_EQ) {
+            *has_equality = true;
+            return i;
+        }
+    }
+    return first;
+}
+
+static bool choose_anchor_legacy(Table* table, AnchorV2Select* select) {
     uint32_t best_score = 0;
     GenericSecondaryIndex* best_index = NULL;
     uint32_t best_predicate = 0;
@@ -173,6 +230,97 @@ static bool choose_anchor(Table* table, AnchorV2Select* select) {
     return true;
 }
 
+static bool choose_anchor(Table* table, AnchorV2Select* select) {
+    GenericSecondaryIndex* best_index = NULL;
+    uint32_t best_predicate = UINT32_MAX;
+    uint32_t best_candidate_count = UINT32_MAX;
+    uint32_t best_term_count = 0;
+    uint32_t best_table_rows = 0;
+    bool best_has_equality = false;
+    bool estimated_any = false;
+
+    for (uint32_t i = 0; i < select->predicate_count; i++) {
+        TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->op == TINYDB_GENERIC_COMPARE_LIKE ||
+            predicate->column_index == 0 ||
+            column_seen_before(select, i)) {
+            continue;
+        }
+        GenericSecondaryIndex* index = find_single_column_index(
+            table, select->schema, predicate->column_index);
+        if (index == NULL) continue;
+
+        TinyDBGenericPredicate source_predicates[MAX_COLUMNS_PER_TABLE];
+        uint32_t source_count = collect_column_predicates(
+            select,
+            predicate->column_index,
+            source_predicates,
+            MAX_COLUMNS_PER_TABLE);
+        if (source_count == 0) continue;
+
+        TinyDBGenericIndexEstimate estimate;
+        char message[TINYDB_GENERIC_SQL_MESSAGE_MAX] = {0};
+        bool estimated = source_count >= 2
+            ? tinydb_generic_index_estimate_conjunctive_candidates(
+                  table,
+                  select->schema,
+                  index,
+                  source_predicates,
+                  source_count,
+                  &estimate,
+                  message,
+                  sizeof(message))
+            : tinydb_generic_index_estimate_candidates(
+                  table,
+                  select->schema,
+                  index,
+                  &source_predicates[0],
+                  &estimate,
+                  message,
+                  sizeof(message));
+        if (!estimated) continue;
+        estimated_any = true;
+
+        bool has_equality = false;
+        uint32_t preferred = preferred_predicate_for_column(
+            select, predicate->column_index, &has_equality);
+        if (preferred == UINT32_MAX) continue;
+
+        if (best_index == NULL ||
+            estimate.candidate_count < best_candidate_count ||
+            (estimate.candidate_count == best_candidate_count &&
+             has_equality && !best_has_equality) ||
+            (estimate.candidate_count == best_candidate_count &&
+             has_equality == best_has_equality && source_count > best_term_count)) {
+            best_index = index;
+            best_predicate = preferred;
+            best_candidate_count = estimate.candidate_count;
+            best_term_count = source_count;
+            best_table_rows = estimate.total_count;
+            best_has_equality = has_equality;
+        }
+    }
+
+    if (!estimated_any || best_index == NULL) {
+        return choose_anchor_legacy(table, select);
+    }
+
+    uint64_t anchor_cost = tinydb_generic_anchor_cost(best_candidate_count);
+    uint64_t scan_cost = tinydb_generic_scan_cost(best_table_rows);
+    if (anchor_cost > scan_cost) {
+        return false;
+    }
+
+    select->index = best_index;
+    select->anchor_predicate_index = best_predicate;
+    select->cost_estimated = true;
+    select->estimated_candidate_count = best_candidate_count;
+    select->estimated_table_rows = best_table_rows;
+    select->estimated_cost = anchor_cost;
+    select->estimated_scan_cost = scan_cost;
+    return true;
+}
+
 static uint32_t collect_anchor_predicates(
     const AnchorV2Select* select,
     TinyDBGenericPredicate* predicates,
@@ -180,15 +328,10 @@ static uint32_t collect_anchor_predicates(
     if (select == NULL || predicates == NULL || capacity == 0) return 0;
     uint32_t column_index =
         select->predicates[select->anchor_predicate_index].column_index;
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < select->predicate_count && count < capacity; i++) {
-        const TinyDBGenericPredicate* predicate = &select->predicates[i];
-        if (predicate->column_index == column_index &&
-            predicate->op <= TINYDB_GENERIC_COMPARE_LTE) {
-            predicates[count++] = *predicate;
-        }
-    }
-    return count;
+    return collect_column_predicates(select,
+                                     column_index,
+                                     predicates,
+                                     capacity);
 }
 
 static bool parse_anchor_select(Table* table,
@@ -504,6 +647,11 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     plan->root_page_num = select.schema->root_page_num;
     plan->has_filter = true;
     plan->index_branch_count = index_predicate_count;
+    plan->has_cost_estimate = select.cost_estimated;
+    plan->estimated_rows = select.estimated_candidate_count;
+    plan->estimated_table_rows = select.estimated_table_rows;
+    plan->estimated_cost = select.estimated_cost;
+    plan->estimated_scan_cost = select.estimated_scan_cost;
     snprintf(plan->table_name, sizeof(plan->table_name), "%s", select.schema->name);
     snprintf(plan->index_name, sizeof(plan->index_name), "%s", select.index->name);
     snprintf(plan->filter_column,
@@ -538,6 +686,16 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     return output->status;
 }
 
+static void print_cost(const TinyDBGenericSelectPlan* plan) {
+    if (!plan->has_cost_estimate) return;
+    printf("  ESTIMATED ROWS: %u / %u\n",
+           plan->estimated_rows,
+           plan->estimated_table_rows);
+    printf("  ESTIMATED COST: %llu (scan %llu)\n",
+           (unsigned long long)plan->estimated_cost,
+           (unsigned long long)plan->estimated_scan_cost);
+}
+
 void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
     if (plan == NULL || !plan->applicable ||
         plan->kind != TINYDB_GENERIC_PLAN_SECONDARY_INDEX_RESIDUAL) {
@@ -552,6 +710,7 @@ void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
         printf("  RANGE TERMS: %u on %s\n",
                plan->index_branch_count,
                plan->filter_column);
+        print_cost(plan);
         printf("  FILTER: %s\n", plan->filter_expression);
         return;
     }
@@ -563,5 +722,6 @@ void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
            plan->filter_column,
            plan->filter_operator,
            plan->filter_value);
+    print_cost(plan);
     printf("  FILTER: %s\n", plan->filter_expression);
 }
