@@ -21,6 +21,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_ddl.c
     src/generic_index_policy.c
     src/generic_index_sql.c
+    src/generic_or_sql.c
     src/generic_predicate.c
     src/generic_predicate_plan_sql.c
     src/generic_predicate_sql.c
@@ -40,8 +41,9 @@ set(TINYDB_CORE_SOURCES
 # Keep the historical generic layers intact as fallbacks. The shared predicate
 # layer owns generic WHERE semantics. The compound planner wraps the historical
 # equality/range planner. The index layer can still promote proven single-term
-# equality plans, while the final guard keeps compound plans aligned with the
-# current scan-plus-residual execution path.
+# equality plans, while the compound guard keeps AND plans aligned with the
+# current scan-plus-residual execution path. The outer OR layer only intercepts
+# disjunctions and delegates every other statement to the proven chain.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -75,7 +77,12 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_index_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_index_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_index_base"
+)
+set_source_files_properties(
+    src/generic_compound_plan_guard.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_or_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_or_base"
 )
 
 # The original multi-root policy intentionally allowed indexes only on root 0.
