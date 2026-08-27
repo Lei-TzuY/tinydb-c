@@ -70,13 +70,13 @@ def main():
             executable,
             db_file,
             [
-                "CREATE TABLE products (id INT, name VARCHAR, price INT, category VARCHAR);",
-                "INSERT INTO products VALUES (1, 'cheap-active', 100, 'active');",
-                "INSERT INTO products VALUES (2, 'clearance-mid', 2000, 'clearance');",
-                "INSERT INTO products VALUES (3, 'clearance-cheap', 100, 'clearance');",
-                "INSERT INTO products VALUES (4, 'premium', 5000, 'premium');",
-                "INSERT INTO products VALUES (5, 'clearance-high', 5000, 'clearance');",
-                "INSERT INTO products VALUES (6, 'regular', 700, 'regular');",
+                "CREATE TABLE products (id INT, name VARCHAR, price INT, category INT);",
+                "INSERT INTO products VALUES (1, 'cheap-active', 100, 1);",
+                "INSERT INTO products VALUES (2, 'clearance-mid', 2000, 2);",
+                "INSERT INTO products VALUES (3, 'clearance-cheap', 100, 2);",
+                "INSERT INTO products VALUES (4, 'premium', 5000, 3);",
+                "INSERT INTO products VALUES (5, 'clearance-high', 5000, 2);",
+                "INSERT INTO products VALUES (6, 'regular', 700, 4);",
                 "CREATE INDEX idx_products_price ON products(price);",
                 "CREATE INDEX idx_products_category ON products(category);",
                 ".exit",
@@ -89,15 +89,15 @@ def main():
             executable,
             db_file,
             [
-                "EXPLAIN SELECT name FROM products WHERE price < 500 OR category = 'clearance';",
-                "SELECT COUNT(*) FROM products WHERE price < 500 OR category = 'clearance';",
-                "SELECT name FROM products WHERE price < 500 OR category = 'clearance' LIMIT 2 OFFSET 1;",
+                "EXPLAIN SELECT name FROM products WHERE price < 500 OR category = 2;",
+                "SELECT COUNT(*) FROM products WHERE price < 500 OR category = 2;",
+                "SELECT name FROM products WHERE price < 500 OR category = 2 LIMIT 2 OFFSET 1;",
                 ".exit",
             ],
         )
         require(union, "PLAN: GENERIC INDEX UNION")
         require(union, "BRANCHES: 2")
-        require(union, "FILTER: price < 500 OR category = 'clearance'")
+        require(union, "FILTER: price < 500 OR category = 2")
         require(union, "db > 4\nExecuted.")
         require(union, "clearance-mid")
         require(union, "clearance-cheap")
@@ -111,9 +111,9 @@ def main():
             executable,
             db_file,
             [
-                "EXPLAIN SELECT name FROM products WHERE price < 500 AND category = 'active' OR category = 'clearance' AND price >= 1000;",
-                "SELECT COUNT(*) FROM products WHERE price < 500 AND category = 'active' OR category = 'clearance' AND price >= 1000;",
-                "SELECT name FROM products WHERE price < 500 AND category = 'active' OR category = 'clearance' AND price >= 1000;",
+                "EXPLAIN SELECT name FROM products WHERE price < 500 AND category = 1 OR category = 2 AND price >= 1000;",
+                "SELECT COUNT(*) FROM products WHERE price < 500 AND category = 1 OR category = 2 AND price >= 1000;",
+                "SELECT name FROM products WHERE price < 500 AND category = 1 OR category = 2 AND price >= 1000;",
                 ".exit",
             ],
         )
@@ -129,8 +129,8 @@ def main():
             executable,
             db_file,
             [
-                "EXPLAIN SELECT name FROM products WHERE id = 4 OR category = 'clearance';",
-                "SELECT COUNT(*) FROM products WHERE id = 4 OR category = 'clearance';",
+                "EXPLAIN SELECT name FROM products WHERE id = 4 OR category = 2;",
+                "SELECT COUNT(*) FROM products WHERE id = 4 OR category = 2;",
                 ".exit",
             ],
         )
@@ -144,7 +144,7 @@ def main():
             [
                 "EXPLAIN SELECT name FROM products WHERE name = 'premium' OR price < 500;",
                 "SELECT COUNT(*) FROM products WHERE name = 'premium' OR price < 500;",
-                "EXPLAIN SELECT name FROM products WHERE (price < 500 OR category = 'clearance') AND name = 'cheap-active';",
+                "EXPLAIN SELECT name FROM products WHERE (price < 500 OR category = 2) AND name = 'cheap-active';",
                 ".exit",
             ],
         )
@@ -157,9 +157,9 @@ def main():
             executable,
             db_file,
             [
-                "UPDATE products SET category = 'clearance' WHERE id = 6;",
-                "SELECT COUNT(*) FROM products WHERE price < 500 OR category = 'clearance';",
-                "EXPLAIN ANALYZE SELECT name FROM products WHERE price < 500 OR category = 'clearance';",
+                "UPDATE products SET category = 2 WHERE id = 6;",
+                "SELECT COUNT(*) FROM products WHERE price < 500 OR category = 2;",
+                "EXPLAIN ANALYZE SELECT name FROM products WHERE price < 500 OR category = 2;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
@@ -173,9 +173,9 @@ def main():
         require_metrics(mutation)
 
         print(
-            "PASS: generic OR index union combines PK/equality/range anchors, deduplicates "
-            "candidates, revalidates residual predicates, preserves safe scan fallback, "
-            "and rebuilds stale snapshots after mutation."
+            "PASS: generic OR index union combines PK/equality/range anchors across a "
+            "mixed VARCHAR/INT schema, deduplicates candidates, revalidates residual "
+            "predicates, preserves safe scan fallback, and rebuilds stale snapshots after mutation."
         )
     finally:
         cleanup(db_file)
