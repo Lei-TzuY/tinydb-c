@@ -39,4 +39,9 @@ bool tinydb_check_page_ownership(Table* table,
                                  char* message,
                                  size_t message_size);
 
+bool tinydb_check_database(Table* table,
+                           TinyDBPageOwnershipStats* ownership_stats,
+                           char* message,
+                           size_t message_size);
+
 #endif /* DIAGNOSTICS_H */
