@@ -1,4 +1,5 @@
 #include "analyze_sql.h"
+#include "generic_index_correlation.h"
 #include "generic_index_stats_refresh.h"
 #include "generic_predicate.h"
 
@@ -126,6 +127,54 @@ static bool refresh_one(Table* table,
     return true;
 }
 
+static bool refresh_pair(Table* table,
+                         const TableSchema* schema,
+                         GenericSecondaryIndex* first,
+                         GenericSecondaryIndex* second,
+                         TinyDBAnalyzeResult* result) {
+    char refresh_message[TINYDB_ANALYZE_MESSAGE_MAX];
+    if (!tinydb_generic_index_refresh_pair_statistics(
+            table,
+            schema,
+            first,
+            second,
+            refresh_message,
+            sizeof(refresh_message))) {
+        char message[TINYDB_ANALYZE_MESSAGE_MAX];
+        snprintf(message,
+                 sizeof(message),
+                 "ANALYZE failed for correlation '%s' + '%s': %.128s",
+                 first->name,
+                 second->name,
+                 refresh_message);
+        finish(result, TINYDB_ANALYZE_EXECUTE_ERROR, message);
+        return false;
+    }
+    result->refreshed_correlations++;
+    return true;
+}
+
+static bool refresh_table_pairs(Table* table,
+                                const TableSchema* schema,
+                                TinyDBAnalyzeResult* result) {
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        GenericSecondaryIndex* first = &table->sec_indexes[i];
+        if (!first->enabled || !ci_equal(first->table_name, schema->name) ||
+            !index_is_eligible(table, first, NULL)) {
+            continue;
+        }
+        for (uint32_t j = i + 1u; j < table->num_sec_indexes; j++) {
+            GenericSecondaryIndex* second = &table->sec_indexes[j];
+            if (!second->enabled || !ci_equal(second->table_name, schema->name) ||
+                !index_is_eligible(table, second, NULL)) {
+                continue;
+            }
+            if (!refresh_pair(table, schema, first, second, result)) return false;
+        }
+    }
+    return true;
+}
+
 static bool refresh_table_indexes(Table* table,
                                   const TableSchema* schema,
                                   TinyDBAnalyzeResult* result) {
@@ -137,7 +186,7 @@ static bool refresh_table_indexes(Table* table,
         if (!index_is_eligible(table, index, NULL)) continue;
         if (!refresh_one(table, index, result)) return false;
     }
-    return true;
+    return refresh_table_pairs(table, schema, result);
 }
 
 static bool refresh_all_indexes(Table* table, TinyDBAnalyzeResult* result) {
@@ -146,6 +195,11 @@ static bool refresh_all_indexes(Table* table, TinyDBAnalyzeResult* result) {
         if (!index_is_eligible(table, index, NULL)) continue;
         if (!refresh_one(table, index, result)) return false;
     }
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        if (!refresh_table_pairs(table, &table->catalog.schemas[i], result)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -153,9 +207,11 @@ static TinyDBAnalyzeStatus finish_success(TinyDBAnalyzeResult* result) {
     char message[TINYDB_ANALYZE_MESSAGE_MAX];
     snprintf(message,
              sizeof(message),
-             "ANALYZE refreshed %u generic secondary index statistic%s",
+             "ANALYZE refreshed %u generic secondary index statistic%s and %u pairwise correlation synopsis%s",
              result->refreshed_indexes,
-             result->refreshed_indexes == 1u ? "" : "s");
+             result->refreshed_indexes == 1u ? "" : "s",
+             result->refreshed_correlations,
+             result->refreshed_correlations == 1u ? "" : "es");
     return finish(result, TINYDB_ANALYZE_SUCCESS, message);
 }
 
