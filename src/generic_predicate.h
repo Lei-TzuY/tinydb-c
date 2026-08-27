@@ -8,9 +8,12 @@ typedef enum {
     TINYDB_GENERIC_COMPARE_GT,
     TINYDB_GENERIC_COMPARE_GTE,
     TINYDB_GENERIC_COMPARE_LT,
-    TINYDB_GENERIC_COMPARE_LTE,
-    TINYDB_GENERIC_COMPARE_LIKE
+    TINYDB_GENERIC_COMPARE_LTE
 } TinyDBGenericCompareOp;
+
+/* LIKE is deliberately outside the ordered-comparison enum so legacy range
+ * switches remain exhaustive over the only operators they can order. */
+#define TINYDB_GENERIC_COMPARE_LIKE ((TinyDBGenericCompareOp)5)
 
 typedef struct {
     const char* current;
