@@ -76,6 +76,12 @@ def run_test():
             "SELECT COUNT(*) FROM products;",
             "SELECT COUNT(*) FROM orders;",
             "SELECT * FROM products LIMIT 1 OFFSET 1;",
+            "SELECT name FROM products WHERE price = 2599;",
+            "SELECT price FROM products WHERE name = 'mouse';",
+            "SELECT COUNT(*) FROM products WHERE name = 'mouse';",
+            "SELECT * FROM products WHERE name = 'O''Reilly cable';",
+            "SELECT id FROM products WHERE price = 399 LIMIT 1;",
+            "SELECT name FROM products WHERE id = 1;",
             "BEGIN;",
             "INSERT INTO products VALUES (99, 'ghost', 9999);",
             "UPDATE products SET price = 1 WHERE id = 2;",
@@ -89,7 +95,7 @@ def run_test():
             "UPDATE products SET price = 7778 WHERE id = 100;",
             "COMMIT;",
             "UPDATE products SET id = 55 WHERE id = 1;",
-            "SELECT * FROM products WHERE price = 2599;",
+            "SELECT * FROM products WHERE price = '2599';",
             "PRAGMA integrity_check;",
             ".exit",
         ],
@@ -98,12 +104,17 @@ def run_test():
     require(first, "(1, keyboard pro, 2599)")
     require(first, "(11, 2, 5)")
     require(first, "(2, mouse, 1299)")
+    require(first, "(3, O'Reilly cable, 399)")
+    require(first, "db > keyboard pro\nExecuted.")
+    require(first, "db > 1299\nExecuted.")
+    require(first, "db > 3\nExecuted.")
     require(first, "Syntax error. Could not parse statement.")
     require(first, "ok")
 
     # COUNT(*) is printed before the REPL's Executed line. The first generic
-    # counts are 3 products and 1 surviving order; id=99 must be 0 after the
-    # explicit transaction rolls back INSERT + UPDATE + DELETE together.
+    # counts are 3 products and 1 surviving order; the filtered mouse count is
+    # also 1; id=99 must be 0 after the explicit transaction rolls back
+    # INSERT + UPDATE + DELETE together.
     require(first, "db > 3\nExecuted.")
     require(first, "db > 1\nExecuted.")
     require(first, "db > 0\nExecuted.")
@@ -114,6 +125,8 @@ def run_test():
         [
             "PRAGMA table_info(products);",
             "SELECT * FROM products WHERE id = 1;",
+            "SELECT name FROM products WHERE price = 2599;",
+            "SELECT price FROM products WHERE name = 'mouse';",
             "SELECT * FROM products WHERE id = 3;",
             "SELECT * FROM products WHERE id = 99;",
             "SELECT * FROM products WHERE id = 100;",
@@ -127,6 +140,8 @@ def run_test():
     )
 
     require(second, "(1, keyboard pro, 2599)")
+    require(second, "db > keyboard pro\nExecuted.")
+    require(second, "db > 1299\nExecuted.")
     require(second, "(3, O'Reilly cable, 399)")
     require(second, "(100, durable, 7778)")
     require(second, "db > 4\nExecuted.")
@@ -144,17 +159,21 @@ def run_test():
         db_file,
         [
             "SELECT COUNT(*) FROM orders;",
-            "SELECT * FROM products WHERE id = 100;",
+            "SELECT * FROM products WHERE price = 7778;",
+            "SELECT name FROM products WHERE id = 100;",
             "PRAGMA integrity_check;",
             ".exit",
         ],
     )
     require(third, "db > 0\nExecuted.")
     require(third, "(100, durable, 7778)")
+    require(third, "db > durable\nExecuted.")
     require(third, "ok")
 
     cleanup(db_file)
-    print("PASS: generic schema SQL INSERT/SELECT/UPDATE/DELETE and transaction persistence verified.")
+    print(
+        "PASS: generic schema CRUD, projections, equality filters and transaction persistence verified."
+    )
 
 
 if __name__ == "__main__":
