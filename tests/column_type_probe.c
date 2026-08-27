@@ -30,6 +30,35 @@ static void expect_parse(const char* text,
     }
 }
 
+static void expect_prefix(const char* text,
+                          ColumnType type,
+                          uint32_t storage_size,
+                          uint32_t declared_capacity,
+                          bool explicitly_sized,
+                          const char* expected_suffix) {
+    TinyDBColumnTypeSpec spec;
+    const char* end = NULL;
+    if (!tinydb_column_type_parse_prefix(text, &spec, &end)) {
+        printf("FAIL prefix parse: %s\n", text);
+        failures++;
+        return;
+    }
+    if (end == NULL || strcmp(end, expected_suffix) != 0 ||
+        spec.type != type ||
+        spec.storage_size != storage_size ||
+        spec.declared_capacity != declared_capacity ||
+        spec.explicitly_sized != explicitly_sized) {
+        printf("FAIL prefix values: %s suffix=%s type=%d storage=%u capacity=%u sized=%d\n",
+               text,
+               end != NULL ? end : "(null)",
+               (int)spec.type,
+               spec.storage_size,
+               spec.declared_capacity,
+               spec.explicitly_sized ? 1 : 0);
+        failures++;
+    }
+}
+
 static void expect_reject(const char* text) {
     TinyDBColumnTypeSpec spec;
     if (tinydb_column_type_parse(text, &spec)) {
@@ -71,6 +100,31 @@ int main(void) {
     expect_parse("varchar(1)", COL_TYPE_VARCHAR, 2u, 1u, true);
     expect_parse("VARCHAR(32)", COL_TYPE_VARCHAR, 33u, 32u, true);
     expect_parse(" varchar ( 255 ) ", COL_TYPE_VARCHAR, 256u, 255u, true);
+
+    expect_prefix("VARCHAR(32), next INT",
+                  COL_TYPE_VARCHAR,
+                  33u,
+                  32u,
+                  true,
+                  ", next INT");
+    expect_prefix(" varchar ( 7 ) ;",
+                  COL_TYPE_VARCHAR,
+                  8u,
+                  7u,
+                  true,
+                  " ;");
+    expect_prefix("INTEGER, x",
+                  COL_TYPE_INT,
+                  4u,
+                  0u,
+                  false,
+                  ", x");
+    expect_prefix("VARCHAR, x",
+                  COL_TYPE_VARCHAR,
+                  256u,
+                  255u,
+                  false,
+                  ", x");
 
     expect_reject("");
     expect_reject("CHAR");
