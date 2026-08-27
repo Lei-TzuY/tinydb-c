@@ -17,6 +17,7 @@ set(TINYDB_CORE_SOURCES
     src/compiler.c
     src/diagnostics.c
     src/engine.c
+    src/generic_compound_plan_guard.c
     src/generic_index_sql.c
     src/generic_predicate.c
     src/generic_predicate_plan_sql.c
@@ -36,8 +37,9 @@ set(TINYDB_CORE_SOURCES
 
 # Keep the historical generic layers intact as fallbacks. The shared predicate
 # layer owns generic WHERE semantics. The compound planner wraps the historical
-# equality/range planner, while the outer index layer still gets the final say
-# for eligible single-column equality index plans.
+# equality/range planner. The index layer can still promote proven single-term
+# equality plans, while the final guard keeps compound plans aligned with the
+# current scan-plus-residual execution path.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -67,6 +69,11 @@ set_source_files_properties(
     src/generic_predicate_plan_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range;tinydb_generic_sql_build_select_plan_predicate_base=tinydb_generic_sql_build_select_plan_range_base;tinydb_generic_sql_print_plan_predicate_base=tinydb_generic_sql_print_plan_range_base"
+)
+set_source_files_properties(
+    src/generic_index_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_index_base"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
