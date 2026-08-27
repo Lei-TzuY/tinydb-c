@@ -54,12 +54,23 @@ set(TINYDB_CORE_SOURCES
     src/multitable.c
     src/schema_catalog_v2.c
     src/schema_catalog_guard.c
+    src/sized_table_create.c
     src/pager.c
     src/prepared_route.c
     src/profile.c
     src/record.c
     src/table.c
+    src/varchar_width_parser.c
     src/vm.c
+)
+
+# Keep the historical parser behind a facade that normalizes VARCHAR(n) into
+# syntax the legacy compiler understands, then restores the declared width on
+# the parsed CREATE TABLE statement for schema construction/policy checks.
+set_source_files_properties(
+    src/compiler.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "prepare_statement=prepare_statement_legacy_base"
 )
 
 # Keep the historical engine body private behind facade wrappers. CREATE TABLE
@@ -219,13 +230,13 @@ set_source_files_properties(
     "multitable_catalog_load=multitable_catalog_load_checksums_base"
 )
 
-# Keep historical index catalog/drop implementations as delegates. Generic DDL
-# validates non-users roots before creation; drop also removes typed snapshots
-# and optimizer-statistics sidecars.
+# Keep historical CREATE TABLE/index/drop implementations as delegates. Sized
+# CREATE TABLE validates/rewrites only explicitly bounded VARCHAR layouts before
+# returning to the engine, while index facades retain their existing policy.
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
-    "table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy"
+    "table_create_table=table_create_table_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
