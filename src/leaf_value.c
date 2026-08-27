@@ -1,13 +1,18 @@
 #include "leaf_value.h"
+#include "leaf_format.h"
 
 #include <stddef.h>
 #include <string.h>
 
 bool tinydb_leaf_value_legacy_layout_compatible(void) {
-    return offsetof(Row, id) == ID_OFFSET &&
+    const TinyDBLeafFormatDescriptor* format = tinydb_leaf_format_current();
+    return tinydb_leaf_format_validate_current() &&
+           format->format_version == TINYDB_LEAF_FORMAT_FIXED_V1 &&
+           format->value_capacity == ROW_SIZE &&
+           offsetof(Row, id) == ID_OFFSET &&
            offsetof(Row, username) == USERNAME_OFFSET &&
            offsetof(Row, email) == EMAIL_OFFSET &&
-           sizeof(Row) >= ROW_SIZE;
+           sizeof(Row) >= format->value_capacity;
 }
 
 static bool valid_cursor(const Cursor* cursor) {
@@ -21,8 +26,7 @@ static bool valid_args(Cursor* cursor,
                        uint32_t length) {
     return valid_cursor(cursor) &&
            bytes != NULL &&
-           length > 0u &&
-           length <= ROW_SIZE;
+           tinydb_leaf_format_can_store_value(length);
 }
 
 bool tinydb_leaf_value_insert(Cursor* cursor,
@@ -50,8 +54,9 @@ bool tinydb_leaf_value_write(Cursor* cursor,
                              uint32_t length) {
     if (!valid_args(cursor, bytes, length)) return false;
 
+    const TinyDBLeafFormatDescriptor* format = tinydb_leaf_format_current();
     void* slot = cursor_value(cursor);
-    memset(slot, 0, ROW_SIZE);
+    memset(slot, 0, format->value_capacity);
     memcpy(slot, bytes, length);
     mark_page_dirty(cursor->table->pager, cursor->page_num);
     return true;
@@ -62,7 +67,7 @@ bool tinydb_leaf_value_read(Cursor* cursor,
                             size_t output_capacity,
                             uint32_t length) {
     if (!valid_cursor(cursor) || output == NULL ||
-        length == 0u || length > ROW_SIZE ||
+        !tinydb_leaf_format_can_store_value(length) ||
         output_capacity < length) {
         return false;
     }
