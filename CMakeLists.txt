@@ -46,19 +46,26 @@ set(TINYDB_CORE_SOURCES
     src/join_plan.c
     src/multitable.c
     src/pager.c
+    src/prepared_route.c
     src/profile.c
     src/record.c
     src/table.c
     src/vm.c
 )
 
-# Keep CREATE TABLE catalog state executable: the public engine entry point
-# validates generic fixed-slot layouts before the historical engine is allowed
-# to allocate/persist a table root. All non-CREATE SQL delegates unchanged.
+# Keep the historical engine body private behind facade wrappers. CREATE TABLE
+# fixed-slot validation stays inside create_table_policy.c; prepared_route.c is
+# the public entry point so bound prepared SQL re-enters the complete engine
+# pipeline instead of calling the VM directly and bypassing root routing.
 set_source_files_properties(
     src/engine.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_execute_sql=tinydb_execute_sql_base"
+)
+set_source_files_properties(
+    src/create_table_policy.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_execute_sql=tinydb_execute_sql_create_policy_base"
 )
 
 # Keep historical generic layers as fallbacks while sharing ordered-index
