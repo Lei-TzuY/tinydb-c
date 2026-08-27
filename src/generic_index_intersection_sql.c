@@ -326,39 +326,65 @@ static void intersect_ids(TinyDBGenericIndexCandidates* left,
     left->count = write_index;
 }
 
+static void free_candidate_sets(TinyDBGenericIndexCandidates* sets,
+                                uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        tinydb_generic_index_candidates_free(&sets[i]);
+    }
+}
+
 static bool collect_intersection(Table* table,
                                  const IntersectionSelect* select,
                                  TinyDBGenericIndexCandidates* intersection,
                                  char* message,
                                  size_t message_size) {
     memset(intersection, 0, sizeof(*intersection));
+    TinyDBGenericIndexCandidates sets[INTERSECTION_MAX_SOURCES];
+    memset(sets, 0, sizeof(sets));
 
+    uint32_t collected = 0;
     for (uint32_t i = 0; i < select->source_count; i++) {
         const IntersectionSource* source = &select->sources[i];
         const TinyDBGenericPredicate* predicate =
             &select->predicates[source->predicate_index];
-        TinyDBGenericIndexCandidates candidates;
         if (!tinydb_generic_index_collect_candidates(table,
                                                      select->schema,
                                                      source->index,
                                                      predicate,
-                                                     &candidates,
+                                                     &sets[i],
                                                      message,
                                                      message_size)) {
-            tinydb_generic_index_candidates_free(intersection);
+            free_candidate_sets(sets, collected);
             return false;
         }
-        sort_ids(&candidates);
+        collected++;
+        sort_ids(&sets[i]);
 
-        if (i == 0) {
-            *intersection = candidates;
-        } else {
-            intersect_ids(intersection, &candidates);
-            tinydb_generic_index_candidates_free(&candidates);
+        if (sets[i].count == 0) {
+            *intersection = sets[i];
+            memset(&sets[i], 0, sizeof(sets[i]));
+            free_candidate_sets(sets, collected);
+            return true;
         }
-
-        if (intersection->count == 0) return true;
     }
+
+    uint32_t smallest = 0;
+    for (uint32_t i = 1; i < collected; i++) {
+        if (sets[i].count < sets[smallest].count) smallest = i;
+    }
+    if (smallest != 0) {
+        TinyDBGenericIndexCandidates swap = sets[0];
+        sets[0] = sets[smallest];
+        sets[smallest] = swap;
+    }
+
+    *intersection = sets[0];
+    memset(&sets[0], 0, sizeof(sets[0]));
+    for (uint32_t i = 1; i < collected; i++) {
+        intersect_ids(intersection, &sets[i]);
+        if (intersection->count == 0) break;
+    }
+    free_candidate_sets(sets, collected);
     return true;
 }
 
