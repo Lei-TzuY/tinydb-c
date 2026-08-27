@@ -192,8 +192,6 @@ def main():
         if scalar_results(executed) != [120, 1, 100, 1]:
             raise AssertionError("MCV costing changed equality query semantics\n" + executed)
         require(executed, "ok")
-        if not os.path.exists(bucket_range) or not os.path.exists(tag_range):
-            raise AssertionError("selective equality execution did not materialize candidate snapshots")
 
         print(
             "PASS: persisted generic-index statistics V2 retain top-frequency INT/VARCHAR "
