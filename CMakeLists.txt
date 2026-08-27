@@ -32,6 +32,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
     src/generic_index_union_sql.c
+    src/generic_index_union_cost_sql.c
     src/generic_like_route_sql.c
     src/generic_or_mutation_sql.c
     src/generic_or_sql.c
@@ -77,13 +78,12 @@ set_source_files_properties(
 # Keep historical generic layers as fallbacks while sharing ordered-index
 # snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Routing is
 # deliberately ordered as follows for SELECT:
-#   parenthesized -> OR mutation wrapper -> LIKE router -> OR index union
-#   -> OR scan -> flat AND index intersection -> single index anchor
+#   parenthesized -> OR mutation wrapper -> LIKE router -> costed OR index union
+#   -> OR scan -> flat AND intersection/anchor cost planner
 #   -> single range/equality -> residual.
 # LIKE therefore never enters an ordered index layer. Flat OR uses index union
-# only when every disjunct has a proven PK or ordered secondary-index anchor;
-# flat AND uses intersection only when at least two distinct secondary indexes
-# can supply safe ordered candidates, otherwise it keeps the existing anchor path.
+# only when every disjunct has a proven PK or ordered secondary-index anchor and
+# the estimated union work is not more expensive than the schema-aware scan.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -153,7 +153,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_index_union_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute_or_select_base=tinydb_generic_sql_try_execute_union_base;tinydb_generic_sql_build_select_plan_parenthesized_base=tinydb_generic_sql_build_select_plan_union_base;tinydb_generic_sql_print_plan_parenthesized_base=tinydb_generic_sql_print_plan_union_base"
+    "tinydb_generic_sql_try_execute_or_select_base=tinydb_generic_sql_try_execute_union_uncosted_base;tinydb_generic_sql_build_select_plan_parenthesized_base=tinydb_generic_sql_build_select_plan_union_uncosted_base;tinydb_generic_sql_print_plan_parenthesized_base=tinydb_generic_sql_print_plan_union_uncosted_base"
 )
 set_source_files_properties(
     src/generic_like_route_sql.c
