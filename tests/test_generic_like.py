@@ -91,6 +91,8 @@ def main():
                 "SELECT COUNT(*) FROM docs WHERE name LIKE '%';",
                 "EXPLAIN SELECT id FROM docs WHERE name LIKE 'alp%' AND price >= 20;",
                 "SELECT COUNT(*) FROM docs WHERE name LIKE 'alp%' AND price >= 20;",
+                "EXPLAIN SELECT id FROM docs WHERE name LIKE 'alp%' AND price = 60;",
+                "SELECT COUNT(*) FROM docs WHERE name LIKE 'alp%' AND price = 60;",
                 "SELECT COUNT(*) FROM docs WHERE name LIKE 'bet%' OR category = 3;",
                 "SELECT COUNT(*) FROM docs WHERE (name LIKE 'alp%' OR name LIKE 'bet%') AND price >= 30;",
                 "EXPLAIN ANALYZE SELECT id FROM docs WHERE (name LIKE 'alp%' OR category = 3) AND price >= 20 LIMIT 2;",
@@ -108,12 +110,17 @@ def main():
             ],
         )
 
-        require(first, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        if first.count("PLAN: GENERIC SCHEMA-AWARE TABLE SCAN") < 2:
+            raise AssertionError("LIKE scan or broad-anchor scan fallback was not selected\n" + first)
         require(first, "FILTER: name LIKE 'alp%'")
+        require(first, "FILTER: name LIKE 'alp%' AND price >= 20")
+        if "ANCHOR: price >= 20" in first:
+            raise AssertionError("broad LIKE residual anchor ignored scan cost\n" + first)
         require(first, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
         require(first, "INDEX: idx_docs_price")
-        require(first, "ANCHOR: price >= 20")
-        require(first, "FILTER: name LIKE 'alp%' AND price >= 20")
+        require(first, "ANCHOR: price = 60")
+        require(first, "ESTIMATED ROWS: 1 / 6")
+        require(first, "FILTER: name LIKE 'alp%' AND price = 60")
         require(first, "QUERY PLAN")
         require(first, "ACTUAL RESULT")
         require(first, "ok")
@@ -121,7 +128,7 @@ def main():
             raise AssertionError("LIKE was incorrectly planned as an ordered range scan\n" + first)
         if "ANCHOR: name LIKE" in first:
             raise AssertionError("LIKE was incorrectly selected as an index anchor\n" + first)
-        require_scalars(first, [4, 1, 1, 0, 6, 3, 2, 3, 4, 3, 0, 3])
+        require_scalars(first, [4, 1, 1, 0, 6, 3, 1, 2, 3, 4, 3, 0, 3])
 
         reopened = run_session(
             executable,
@@ -155,8 +162,8 @@ def main():
         print(
             "PASS: generic VARCHAR LIKE supports %/_ wildcards across SELECT, AND/OR, "
             "parenthesized predicates, UPDATE/DELETE, EXPLAIN ANALYZE, rollback and "
-            "reopen durability; LIKE stays residual-only while another ordered AND "
-            "predicate may safely provide the candidate anchor."
+            "reopen durability; LIKE stays residual-only while cost-aware planning chooses "
+            "scan for a broad ordered predicate and an index anchor for a selective one."
         )
     finally:
         cleanup(db_file)
