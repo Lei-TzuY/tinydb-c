@@ -28,6 +28,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_intersection_sql.c
     src/generic_index_policy.c
     src/generic_index_range_v2_sql.c
+    src/generic_index_single_cost_sql.c
     src/generic_index_record_guard.c
     src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
@@ -80,7 +81,7 @@ set_source_files_properties(
 # deliberately ordered as follows for SELECT:
 #   parenthesized -> OR mutation wrapper -> LIKE router -> costed OR index union
 #   -> OR scan -> flat AND intersection/anchor cost planner
-#   -> single range/equality -> residual.
+#   -> costed single range/equality -> residual.
 # LIKE therefore never enters an ordered index layer. Flat OR uses index union
 # only when every disjunct has a proven PK or ordered secondary-index anchor and
 # the estimated union work is not more expensive than the schema-aware scan.
@@ -133,7 +134,7 @@ endif()
 set_source_files_properties(
     src/generic_index_range_v2_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range_index_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_index_uncosted_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range_index_uncosted_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range_index_uncosted_base"
 )
 set_source_files_properties(
     src/generic_index_anchor_v2_sql.c
