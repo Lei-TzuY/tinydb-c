@@ -25,6 +25,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
+    src/generic_index_intersection_sql.c
     src/generic_index_policy.c
     src/generic_index_range_v2_sql.c
     src/generic_index_record_guard.c
@@ -64,10 +65,12 @@ set_source_files_properties(
 # snapshot/checksum/epoch/bounds logic in generic_index_candidates.c. Routing is
 # deliberately ordered as follows for SELECT:
 #   parenthesized -> OR mutation wrapper -> LIKE router -> OR index union
-#   -> OR scan -> flat AND index anchor -> single range/equality -> residual.
+#   -> OR scan -> flat AND index intersection -> single index anchor
+#   -> single range/equality -> residual.
 # LIKE therefore never enters an ordered index layer. Flat OR uses index union
 # only when every disjunct has a proven PK or ordered secondary-index anchor;
-# otherwise it falls back to the existing OR scan evaluator.
+# flat AND uses intersection only when at least two distinct secondary indexes
+# can supply safe ordered candidates, otherwise it keeps the existing anchor path.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -121,6 +124,11 @@ set_source_files_properties(
 )
 set_source_files_properties(
     src/generic_index_anchor_v2_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_single_anchor_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_single_anchor_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_single_anchor_base"
+)
+set_source_files_properties(
+    src/generic_index_intersection_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_anchor_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_anchor_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_anchor_index_base"
 )
