@@ -1,3 +1,4 @@
+#include "leaf_format.h"
 #include "leaf_value.h"
 
 #include <stdio.h>
@@ -74,12 +75,36 @@ static uint32_t count_rows(Table* table) {
     return count;
 }
 
+static bool expect_fixed_v1_format(void) {
+    const TinyDBLeafFormatDescriptor* format = tinydb_leaf_format_current();
+    if (format == NULL || !tinydb_leaf_format_validate_current()) return false;
+    if (format->format_version != TINYDB_LEAF_FORMAT_FIXED_V1 ||
+        format->variable_length_values ||
+        format->page_size != PAGE_SIZE ||
+        format->usable_size != PAGE_USABLE_SIZE ||
+        format->header_size != LEAF_NODE_HEADER_SIZE ||
+        format->key_size != LEAF_NODE_KEY_SIZE ||
+        format->value_capacity != ROW_SIZE ||
+        format->cell_size != LEAF_NODE_CELL_SIZE ||
+        format->max_cells != LEAF_NODE_MAX_CELLS) {
+        return false;
+    }
+    return tinydb_leaf_format_can_store_value(PROBE_PAYLOAD_SIZE) &&
+           tinydb_leaf_format_can_store_value(ROW_SIZE) &&
+           !tinydb_leaf_format_can_store_value(0u) &&
+           !tinydb_leaf_format_can_store_value(ROW_SIZE + 1u);
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s DATABASE\n", argv[0]);
         return EXIT_FAILURE;
     }
 
+    if (!expect_fixed_v1_format()) {
+        fprintf(stderr, "current leaf format descriptor is inconsistent\n");
+        return EXIT_FAILURE;
+    }
     if (!tinydb_leaf_value_legacy_layout_compatible()) {
         fprintf(stderr,
                 "legacy Row ABI is incompatible with the canonical leaf value layout\n");
@@ -177,7 +202,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    printf("LEAF_VALUE_OK rows=%u split=yes reopen=yes legacy_layout=yes padding=canonical\n",
+    printf("LEAF_VALUE_OK rows=%u split=yes reopen=yes legacy_layout=yes padding=canonical format=v1\n",
            PROBE_ROWS);
     db_close(table);
     return EXIT_SUCCESS;
