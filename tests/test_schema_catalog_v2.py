@@ -203,9 +203,22 @@ def main():
         corrupted_main[28] ^= 0x33
         with open(schema_file, "wb") as handle:
             handle.write(corrupted_main)
-        _, corrupt_output = run_session(tinydb, db_file, [".exit"], check=False)
+        corrupt_code, corrupt_output = run_session(
+            tinydb, db_file, ["SELECT COUNT(*) FROM archive;"], check=False
+        )
+        if corrupt_code == 0:
+            raise AssertionError(
+                "corrupted main schema catalog did not make database open fail closed\n"
+                + corrupt_output
+            )
         require(corrupt_output, "Ignoring invalid checksummed schema catalog.")
-        require(corrupt_output, "schema catalog could not be loaded")
+        require(corrupt_output, "Error: schema catalog could not be loaded safely.")
+        require(corrupt_output, "Unable to open database.")
+        if "db >" in corrupt_output:
+            raise AssertionError(
+                "REPL became available after corrupt schema catalog detection\n"
+                + corrupt_output
+            )
 
         with open(schema_file, "wb") as handle:
             handle.write(upgraded_bytes)
@@ -224,7 +237,8 @@ def main():
         print(
             "PASS: schema catalog V2 uses a fixed little-endian checksummed envelope, "
             "reads legacy V1 catalogs, upgrades them on DDL, recovers committed V2 WAL, "
-            "rejects corrupted WAL/main payloads, and preserves multi-root catalog state."
+            "rejects corrupted WAL, fails closed on a corrupted main catalog, and "
+            "preserves multi-root catalog state."
         )
     finally:
         cleanup(db_file)
