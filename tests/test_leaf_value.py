@@ -43,8 +43,10 @@ def main():
         raise AssertionError("leaf value split/reopen coverage missing\n" + output)
     if "legacy_layout=yes" not in output or "padding=canonical" not in output:
         raise AssertionError("leaf value compatibility invariant missing\n" + output)
+    if "format=v1" not in output:
+        raise AssertionError("versioned leaf format descriptor coverage missing\n" + output)
 
-    print("PASS: leaf value compatibility seam survives split, update, and reopen")
+    print("PASS: V1 leaf format and compatibility seam survive split, update, and reopen")
 
 
 if __name__ == "__main__":
