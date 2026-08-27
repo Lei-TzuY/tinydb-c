@@ -155,7 +155,8 @@ def main():
                 ".exit",
             ],
         )
-        require(fallbacks, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(fallbacks, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(fallbacks, "FILTER: price >= 1000 AND name > 'm'")
         require(fallbacks, "PLAN: GENERIC SECONDARY INDEX FUSED RANGE")
         require(fallbacks, "RANGE TERMS: 2 on price")
         require(fallbacks, "FILTER: price >= 1000 AND price <= 3000")
@@ -199,7 +200,7 @@ def main():
         require(reopened, "ok")
 
         print(
-            "PASS: flat generic AND queries intersect distinct ordered secondary indexes, "
+            "PASS: flat generic AND queries use cost-aware intersection or scan fallback, "
             "fuse compatible terms on one index, revalidate full predicates including residual "
             "LIKE, preserve PK-equality priority, rebuild stale snapshots after mutation, and "
             "remain correct after reopen."
