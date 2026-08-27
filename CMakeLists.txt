@@ -13,6 +13,7 @@ else()
 endif()
 
 set(TINYDB_CORE_SOURCES
+    src/catalog_pragmas.c
     src/compiler.c
     src/diagnostics.c
     src/engine.c
