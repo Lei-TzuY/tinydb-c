@@ -65,6 +65,7 @@ set(TINYDB_CORE_SOURCES
     src/prepared_route.c
     src/profile.c
     src/record.c
+    src/record_payload.c
     src/table.c
     src/varchar_width_parser.c
     src/vm.c
@@ -286,3 +287,6 @@ target_link_libraries(tinydb_committed_crash_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_column_type_probe tests/column_type_probe.c)
 target_link_libraries(tinydb_column_type_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_record_payload_probe tests/record_payload_probe.c)
+target_link_libraries(tinydb_record_payload_probe PRIVATE tinydb_core)
