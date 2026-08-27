@@ -291,3 +291,176 @@ bool tinydb_check_table_tree(Table* table,
     }
     return ok;
 }
+
+typedef struct {
+    Table* table;
+    uint32_t* owners;
+    bool* shared;
+    TinyDBPageOwnershipStats* stats;
+    char* message;
+    size_t message_size;
+} OwnershipContext;
+
+static void ownership_message(OwnershipContext* context, const char* format, ...) {
+    if (context->message == NULL || context->message_size == 0 ||
+        context->message[0] != '\0') {
+        return;
+    }
+    va_list args;
+    va_start(args, format);
+    vsnprintf(context->message, context->message_size, format, args);
+    va_end(args);
+}
+
+static bool claim_tree_pages(OwnershipContext* context,
+                             uint32_t page_num,
+                             uint32_t table_index) {
+    Pager* pager = context->table->pager;
+    if (page_num >= pager->num_pages) {
+        ownership_message(context,
+                          "table '%s' references out-of-range page %u",
+                          context->table->catalog.schemas[table_index].name,
+                          page_num);
+        return false;
+    }
+    if (page_is_free(pager, page_num)) {
+        ownership_message(context,
+                          "table '%s' references free page %u",
+                          context->table->catalog.schemas[table_index].name,
+                          page_num);
+        return false;
+    }
+
+    if (context->owners[page_num] != UINT32_MAX) {
+        if (!context->shared[page_num]) {
+            context->shared[page_num] = true;
+            context->stats->shared_pages++;
+        }
+        ownership_message(
+            context,
+            "page %u is referenced by both '%s' and '%s' (or more than once by one tree)",
+            page_num,
+            context->table->catalog.schemas[context->owners[page_num]].name,
+            context->table->catalog.schemas[table_index].name);
+        return false;
+    }
+
+    context->owners[page_num] = table_index;
+    context->stats->owned_pages++;
+
+    void* node = get_page(pager, page_num);
+    NodeType type = get_node_type(node);
+    if (type == NODE_LEAF) return true;
+    if (type != NODE_INTERNAL) {
+        ownership_message(context,
+                          "owned page %u has unknown node type %u",
+                          page_num,
+                          (uint32_t)type);
+        return false;
+    }
+
+    uint32_t num_keys = *internal_node_num_keys(node);
+    if (num_keys > INTERNAL_NODE_MAX_KEYS) {
+        ownership_message(context,
+                          "internal page %u has invalid key count %u",
+                          page_num,
+                          num_keys);
+        return false;
+    }
+
+    uint32_t child_count = num_keys + 1;
+    uint32_t* children = (uint32_t*)malloc(sizeof(uint32_t) * child_count);
+    if (children == NULL) {
+        ownership_message(context,
+                          "unable to allocate ownership child snapshot for page %u",
+                          page_num);
+        return false;
+    }
+    for (uint32_t i = 0; i < child_count; i++) {
+        children[i] = *internal_node_child(node, i);
+    }
+
+    bool ok = true;
+    for (uint32_t i = 0; i < child_count; i++) {
+        if (!claim_tree_pages(context, children[i], table_index)) {
+            ok = false;
+        }
+    }
+    free(children);
+    return ok;
+}
+
+bool tinydb_check_page_ownership(Table* table,
+                                 TinyDBPageOwnershipStats* stats,
+                                 char* message,
+                                 size_t message_size) {
+    if (table == NULL || stats == NULL) return false;
+
+    memset(stats, 0, sizeof(*stats));
+    stats->total_pages = table->pager->num_pages;
+    stats->free_pages = table->pager->free_page_count;
+    if (message != NULL && message_size > 0) message[0] = '\0';
+
+    if (table->pager->num_pages == 0) {
+        if (message != NULL && message_size > 0) {
+            snprintf(message, message_size, "ok: no pages allocated");
+        }
+        return true;
+    }
+
+    uint32_t* owners = (uint32_t*)malloc(sizeof(uint32_t) * table->pager->num_pages);
+    bool* shared = (bool*)calloc(table->pager->num_pages, sizeof(bool));
+    if (owners == NULL || shared == NULL) {
+        free(owners);
+        free(shared);
+        if (message != NULL && message_size > 0) {
+            snprintf(message, message_size, "unable to allocate page ownership map");
+        }
+        return false;
+    }
+    for (uint32_t i = 0; i < table->pager->num_pages; i++) {
+        owners[i] = UINT32_MAX;
+    }
+
+    OwnershipContext context;
+    context.table = table;
+    context.owners = owners;
+    context.shared = shared;
+    context.stats = stats;
+    context.message = message;
+    context.message_size = message_size;
+
+    bool ok = true;
+    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
+        uint32_t root = table->catalog.schemas[i].root_page_num;
+        if (!claim_tree_pages(&context, root, i)) {
+            ok = false;
+        }
+    }
+
+    for (uint32_t page_num = 0; page_num < table->pager->num_pages; page_num++) {
+        if (page_is_free(table->pager, page_num)) continue;
+        if (owners[page_num] == UINT32_MAX) {
+            stats->orphan_pages++;
+            ownership_message(&context,
+                              "page %u is allocated but unreachable from every catalog root",
+                              page_num);
+            ok = false;
+        }
+    }
+
+    if (ok && message != NULL && message_size > 0) {
+        snprintf(message,
+                 message_size,
+                 "ok: total=%u owned=%u free=%u orphan=%u shared=%u",
+                 stats->total_pages,
+                 stats->owned_pages,
+                 stats->free_pages,
+                 stats->orphan_pages,
+                 stats->shared_pages);
+    }
+
+    free(owners);
+    free(shared);
+    return ok;
+}
