@@ -1,3 +1,4 @@
+#include "column_type.h"
 #include "compiler.h"
 
 #include <ctype.h>
@@ -74,32 +75,6 @@ static bool copy_span(char* output,
     return true;
 }
 
-static bool parse_width_suffix(const char* input,
-                               const char** end_out,
-                               uint32_t* declared_width) {
-    const char* current = skip_spaces(input);
-    if (*current != '(') return false;
-    current++;
-    current = skip_spaces(current);
-    if (!isdigit((unsigned char)*current)) return false;
-
-    uint32_t value = 0;
-    while (isdigit((unsigned char)*current)) {
-        uint32_t digit = (uint32_t)(*current - '0');
-        if (value > 100000u) return false;
-        value = value * 10u + digit;
-        current++;
-    }
-    current = skip_spaces(current);
-    if (*current != ')') return false;
-    current++;
-
-    if (value == 0u || value > 255u) return false;
-    if (declared_width != NULL) *declared_width = value;
-    if (end_out != NULL) *end_out = current;
-    return true;
-}
-
 static bool normalize_varchar_widths(const char* input,
                                      char* output,
                                      size_t output_size,
@@ -125,11 +100,11 @@ static bool normalize_varchar_widths(const char* input,
             (current == input || current[-1] != '_')) {
             size_t word_length = 0;
             if (ci_word_at(current, "varchar", &word_length)) {
-                const char* suffix_end = NULL;
-                uint32_t ignored_width = 0;
-                if (parse_width_suffix(current + word_length,
-                                       &suffix_end,
-                                       &ignored_width)) {
+                TinyDBColumnTypeSpec type;
+                const char* type_end = NULL;
+                if (tinydb_column_type_parse_prefix(current, &type, &type_end) &&
+                    type.type == COL_TYPE_VARCHAR &&
+                    type.explicitly_sized) {
                     if (!copy_span(output,
                                    output_size,
                                    &written,
@@ -137,15 +112,15 @@ static bool normalize_varchar_widths(const char* input,
                                    word_length)) {
                         return false;
                     }
-                    current = suffix_end;
+                    current = type_end;
                     *had_sized_varchar = true;
                     continue;
                 }
 
                 const char* after_word = skip_spaces(current + word_length);
                 if (*after_word == '(') {
-                    /* A VARCHAR suffix was present but was malformed or outside
-                     * the supported 1..255 character range. */
+                    /* A VARCHAR suffix was present but malformed or outside
+                     * the shared 1..255 character range. */
                     return false;
                 }
             }
@@ -197,24 +172,24 @@ static bool annotate_create_widths(const char* input,
         }
 
         if (is_varchar) {
-            const char* suffix_end = NULL;
-            uint32_t declared_width = 0;
             const char* after_type = skip_spaces(current);
             if (*after_type == '(') {
-                if (!parse_width_suffix(current,
-                                        &suffix_end,
-                                        &declared_width)) {
+                TinyDBColumnTypeSpec type;
+                const char* type_end = NULL;
+                if (!tinydb_column_type_parse_prefix(type_start, &type, &type_end) ||
+                    type.type != COL_TYPE_VARCHAR ||
+                    !type.explicitly_sized) {
                     return false;
                 }
                 int formatted = snprintf(create->col_types[column],
                                          sizeof(create->col_types[column]),
                                          "VARCHAR(%u)",
-                                         declared_width);
+                                         type.declared_capacity);
                 if (formatted < 0 ||
                     (size_t)formatted >= sizeof(create->col_types[column])) {
                     return false;
                 }
-                current = suffix_end;
+                current = type_end;
             }
         }
 
@@ -264,22 +239,22 @@ static bool annotate_alter_width(const char* input,
         return false;
     }
 
-    current = skip_spaces(current);
-    size_t word_length = 0;
-    if (!ci_word_at(current, "varchar", &word_length)) return false;
-    current += word_length;
+    TinyDBColumnTypeSpec type;
+    const char* type_end = NULL;
+    if (!tinydb_column_type_parse_prefix(current, &type, &type_end) ||
+        type.type != COL_TYPE_VARCHAR ||
+        !type.explicitly_sized) {
+        return false;
+    }
 
-    const char* suffix_end = NULL;
-    uint32_t declared_width = 0;
-    if (!parse_width_suffix(current, &suffix_end, &declared_width)) return false;
-    current = skip_spaces(suffix_end);
+    current = skip_spaces(type_end);
     if (*current == ';') current = skip_spaces(current + 1);
     if (*current != '\0') return false;
 
     int formatted = snprintf(alter->new_col_type,
                              sizeof(alter->new_col_type),
                              "VARCHAR(%u)",
-                             declared_width);
+                             type.declared_capacity);
     return formatted >= 0 &&
            (size_t)formatted < sizeof(alter->new_col_type);
 }
