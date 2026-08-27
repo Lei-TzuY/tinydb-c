@@ -50,37 +50,17 @@ static TinyDBSqlStatus execute_integrity_check(TinyDB* database,
     output->statement_type_valid = true;
     output->executed = true;
 
-    Table* table = database->table;
-    bool ok = true;
+    TinyDBPageOwnershipStats ownership_stats;
     char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
-
-    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
-        const TableSchema* schema = &table->catalog.schemas[i];
-
-        for (uint32_t j = 0; j < i; j++) {
-            if (table->catalog.schemas[j].root_page_num == schema->root_page_num) {
-                printf("Error: Tables '%s' and '%s' share root page %u.\n",
-                       table->catalog.schemas[j].name,
-                       schema->name,
-                       schema->root_page_num);
-                ok = false;
-            }
-        }
-
-        if (!tinydb_check_table_tree(table,
-                                     schema->name,
-                                     message,
-                                     sizeof(message))) {
-            printf("Error: Table '%s': %s\n", schema->name, message);
-            ok = false;
-        }
-    }
-
-    if (ok) {
+    if (tinydb_check_database(database->table,
+                              &ownership_stats,
+                              message,
+                              sizeof(message))) {
         printf("ok\n");
         return output->status;
     }
 
+    printf("Error: %s\n", message);
     output->status = TINYDB_SQL_EXECUTE_ERROR;
     snprintf(output->message,
              sizeof(output->message),
