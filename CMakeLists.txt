@@ -13,6 +13,7 @@ else()
 endif()
 
 set(TINYDB_CORE_SOURCES
+    src/alter_varchar_policy.c
     src/catalog_pragmas.c
     src/compiler.c
     src/create_table_policy.c
@@ -55,6 +56,7 @@ set(TINYDB_CORE_SOURCES
     src/multitable.c
     src/schema_catalog_v2.c
     src/schema_catalog_guard.c
+    src/sized_table_alter.c
     src/sized_table_create.c
     src/pager.c
     src/prepared_route.c
@@ -67,7 +69,7 @@ set(TINYDB_CORE_SOURCES
 
 # Keep the historical parser behind a facade that normalizes VARCHAR(n) into
 # syntax the legacy compiler understands, then restores the declared width on
-# the parsed CREATE TABLE statement for schema construction/policy checks.
+# parsed CREATE TABLE / ALTER TABLE statements for physical layout policy.
 set_source_files_properties(
     src/compiler.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -76,9 +78,9 @@ set_source_files_properties(
 
 # Keep the historical engine body private behind facade wrappers. CREATE TABLE
 # fixed-slot validation stays inside create_table_policy.c. Multi-table
-# VACUUM INTO is a logical-rebuild facade inside prepared_route.c, so bound
-# prepared VACUUM statements still re-enter the same safety pipeline. The
-# public tinydb_open() lives in engine_open_guard.c and fails closed when a
+# VACUUM INTO is followed by the sized-ALTER route, then prepared_route.c owns
+# the public facade so bound ALTER statements re-enter the same safety policy.
+# The public tinydb_open() lives in engine_open_guard.c and fails closed when a
 # persisted schema catalog cannot be loaded safely.
 set_source_files_properties(
     src/engine.c
@@ -93,7 +95,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/multi_vacuum_into.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_execute_sql=tinydb_execute_sql_prepared_delegate_base"
+    "tinydb_execute_sql=tinydb_execute_sql_alter_delegate_base"
 )
 
 # Keep historical generic layers as fallbacks while sharing ordered-index
@@ -236,13 +238,13 @@ set_source_files_properties(
     "multitable_catalog_load=multitable_catalog_load_checksums_base"
 )
 
-# Keep historical CREATE TABLE/index/drop implementations as delegates. Sized
-# CREATE TABLE validates/rewrites only explicitly bounded VARCHAR layouts before
-# returning to the engine, while index facades retain their existing policy.
+# Keep historical CREATE TABLE/ALTER/index/drop implementations as delegates.
+# Sized facades patch only explicitly bounded VARCHAR layouts after the legacy
+# catalog mutators perform their duplicate/name/max-column policy checks.
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
-    "table_create_table=table_create_table_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy"
+    "table_create_table=table_create_table_legacy_base;table_add_column=table_add_column_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
