@@ -35,6 +35,19 @@ static bool is_identifier_char(char value) {
     return isalnum((unsigned char)value) || value == '_';
 }
 
+static bool starts_like_keyword(const char* current, const char* sql) {
+    if (current[0] == '\0' || current[1] == '\0' ||
+        current[2] == '\0' || current[3] == '\0') {
+        return false;
+    }
+    return ci_char(current[0]) == 'l' &&
+           ci_char(current[1]) == 'i' &&
+           ci_char(current[2]) == 'k' &&
+           ci_char(current[3]) == 'e' &&
+           (current == sql || !is_identifier_char(current[-1])) &&
+           !is_identifier_char(current[4]);
+}
+
 static bool contains_like_keyword(const char* sql) {
     bool in_string = false;
     const char* current = sql;
@@ -50,15 +63,7 @@ static bool contains_like_keyword(const char* sql) {
             continue;
         }
 
-        if (!in_string &&
-            ci_char(current[0]) == 'l' &&
-            ci_char(current[1]) == 'i' &&
-            ci_char(current[2]) == 'k' &&
-            ci_char(current[3]) == 'e' &&
-            (current == sql || !is_identifier_char(current[-1])) &&
-            !is_identifier_char(current[4])) {
-            return true;
-        }
+        if (!in_string && starts_like_keyword(current, sql)) return true;
         current++;
     }
     return false;
