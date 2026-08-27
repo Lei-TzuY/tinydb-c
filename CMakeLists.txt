@@ -16,6 +16,7 @@ set(TINYDB_CORE_SOURCES
     src/catalog_pragmas.c
     src/compiler.c
     src/create_table_policy.c
+    src/database_diagnostics.c
     src/diagnostics.c
     src/engine.c
     src/engine_open_guard.c
