@@ -89,9 +89,9 @@ def main():
                 ".exit",
             ],
         )
-        require(anchored_range, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(anchored_range, "PLAN: GENERIC SECONDARY INDEX FUSED RANGE")
         require(anchored_range, "INDEX: idx_products_price")
-        require(anchored_range, "ANCHOR: price >= 1000")
+        require(anchored_range, "RANGE TERMS: 2 on price")
         require(anchored_range, "FILTER: price >= 1000 AND price <= 3000")
         require(anchored_range, "keyboard")
         require(anchored_range, "mouse")
@@ -108,7 +108,7 @@ def main():
         )
         require(pk, "PLAN: GENERIC PRIMARY KEY LOOKUP")
         require(pk, "FILTER: id = 2 AND price >= 1000")
-        if "SECONDARY INDEX + RESIDUAL" in pk:
+        if "SECONDARY INDEX + RESIDUAL" in pk or "SECONDARY INDEX FUSED RANGE" in pk:
             raise AssertionError("secondary index incorrectly displaced PK equality\n" + pk)
 
         indexed_residual = run_session(
@@ -151,7 +151,7 @@ def main():
             ],
         )
         require(analyzed, "QUERY PLAN")
-        require(analyzed, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(analyzed, "PLAN: GENERIC SECONDARY INDEX FUSED RANGE")
         require(analyzed, "PLAN: GENERIC INDEX UNION")
         require(analyzed, "FILTER: price >= 1000 AND price <= 3000")
         require(analyzed, "FILTER: id = 1 OR price >= 4000")
@@ -173,10 +173,9 @@ def main():
             raise AssertionError("invalid typed EXPLAIN predicate was accepted\n" + invalid)
 
         print(
-            "PASS: generic EXPLAIN/ANALYZE uses a persistent secondary-index anchor "
-            "plus residual filtering for flat AND predicates, preserves PK equality "
-            "priority, promotes fully-indexable OR predicates to index union, and rejects "
-            "invalid typed filters."
+            "PASS: generic EXPLAIN/ANALYZE fuses compatible same-index range terms, "
+            "keeps residual filtering for mixed predicates, preserves PK equality priority, "
+            "promotes fully-indexable OR predicates to index union, and rejects invalid typed filters."
         )
     finally:
         cleanup(db_file)
