@@ -1,4 +1,5 @@
 #include "record.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 
@@ -223,6 +224,47 @@ static void commit_if_autocommit(Table* table) {
     if (!table->in_transaction) pager_commit(table->pager);
 }
 
+static bool record_to_legacy_slot(const TableSchema* schema,
+                                  const TinyDBRecord* record,
+                                  unsigned char slot[ROW_SIZE],
+                                  char* message,
+                                  size_t message_size) {
+    TinyDBRecordPayload payload;
+    if (!tinydb_record_payload_from_record(schema,
+                                           record,
+                                           &payload,
+                                           message,
+                                           message_size)) {
+        return false;
+    }
+    return tinydb_record_payload_pack_fixed_slot(&payload,
+                                                 slot,
+                                                 ROW_SIZE,
+                                                 message,
+                                                 message_size);
+}
+
+static bool legacy_slot_to_record(const TableSchema* schema,
+                                  const void* slot,
+                                  TinyDBRecord* record,
+                                  char* message,
+                                  size_t message_size) {
+    TinyDBRecordPayload payload;
+    if (!tinydb_record_payload_unpack_fixed_slot(schema,
+                                                 slot,
+                                                 ROW_SIZE,
+                                                 &payload,
+                                                 message,
+                                                 message_size)) {
+        return false;
+    }
+    return tinydb_record_payload_to_record(schema,
+                                           &payload,
+                                           record,
+                                           message,
+                                           message_size);
+}
+
 bool tinydb_record_insert(Table* table,
                           const TableSchema* schema,
                           const TinyDBValue* values,
@@ -258,9 +300,16 @@ bool tinydb_record_insert(Table* table,
         return false;
     }
 
+    unsigned char slot[ROW_SIZE];
+    if (!record_to_legacy_slot(schema, &record, slot, message, message_size)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        return false;
+    }
+
     Row carrier;
     memset(&carrier, 0, sizeof(carrier));
-    memcpy(&carrier, record.bytes, ROW_SIZE);
+    memcpy(&carrier, slot, ROW_SIZE);
     leaf_node_insert(cursor, key, &carrier);
     free(cursor);
     end_root_scope(table, previous_root);
@@ -302,6 +351,11 @@ bool tinydb_record_update(Table* table,
         return false;
     }
 
+    unsigned char slot[ROW_SIZE];
+    if (!record_to_legacy_slot(schema, &record, slot, message, message_size)) {
+        return false;
+    }
+
     uint32_t previous_root = 0;
     begin_root_scope(table, schema, &previous_root);
     Cursor* cursor = table_find(table, id);
@@ -312,7 +366,7 @@ bool tinydb_record_update(Table* table,
         return false;
     }
 
-    memcpy(cursor_value(cursor), record.bytes, ROW_SIZE);
+    memcpy(cursor_value(cursor), slot, ROW_SIZE);
     mark_page_dirty(table->pager, cursor->page_num);
     free(cursor);
     end_root_scope(table, previous_root);
@@ -396,7 +450,11 @@ bool tinydb_record_find(Table* table,
     Cursor* cursor = table_find(table, id);
     bool found = cursor_matches_key(table, cursor, id);
     if (found) {
-        memcpy(record->bytes, cursor_value(cursor), ROW_SIZE);
+        found = legacy_slot_to_record(schema,
+                                      cursor_value(cursor),
+                                      record,
+                                      ignored,
+                                      sizeof(ignored));
     }
     free(cursor);
     end_root_scope(table, previous_root);
@@ -417,7 +475,13 @@ uint32_t tinydb_record_scan(Table* table,
     uint32_t count = 0;
     while (!cursor->end_of_table) {
         TinyDBRecord record;
-        memcpy(record.bytes, cursor_value(cursor), ROW_SIZE);
+        if (!legacy_slot_to_record(schema,
+                                   cursor_value(cursor),
+                                   &record,
+                                   ignored,
+                                   sizeof(ignored))) {
+            break;
+        }
         count++;
         if (visitor != NULL && !visitor(schema, &record, context)) break;
         cursor_advance(cursor);
