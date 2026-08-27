@@ -24,6 +24,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_index_record_guard.c
     src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
+    src/generic_or_mutation_sql.c
     src/generic_or_sql.c
     src/generic_predicate.c
     src/generic_predicate_plan_sql.c
@@ -44,9 +45,9 @@ set(TINYDB_CORE_SOURCES
 # Keep the historical generic layers intact as fallbacks. The shared predicate
 # layer owns generic WHERE semantics. The compound planner wraps the historical
 # equality/range planner. The volatile index layer remains the proven fallback;
-# the persistent snapshot layer sits immediately above it. The outer OR layer
-# only intercepts disjunctions and delegates every other statement through the
-# persistent index layer into the established chain.
+# the persistent snapshot layer sits immediately above it. The OR SELECT layer
+# owns disjunctive reads/plans, while the outer OR mutation layer adds UPDATE /
+# DELETE disjunctions and delegates every other statement into that chain.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -99,7 +100,7 @@ endif()
 set_source_files_properties(
     src/generic_or_sql.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_snapshot_base"
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_or_select_base;tinydb_generic_sql_try_execute_index_base=tinydb_generic_sql_try_execute_snapshot_base"
 )
 set_source_files_properties(
     src/generic_compound_plan_guard.c
