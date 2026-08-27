@@ -19,13 +19,13 @@ set(TINYDB_CORE_SOURCES
     src/engine.c
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
-    src/generic_index_anchor_sql.c
+    src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
     src/generic_index_policy.c
-    src/generic_index_range_sql.c
+    src/generic_index_range_v2_sql.c
     src/generic_index_record_guard.c
     src/generic_index_snapshot_sql.c
     src/generic_index_sql.c
@@ -50,15 +50,12 @@ set(TINYDB_CORE_SOURCES
     src/vm.c
 )
 
-# Keep the historical generic layers intact as fallbacks. The shared predicate
-# layer owns typed comparisons and LIKE matching. Equality/range indexes remain
-# the proven ordered single-term paths. A LIKE router deliberately bypasses
-# those ordered paths and sends flat LIKE predicates to schema-aware residual
-# execution/planning. The compound-anchor layer can narrow a flat AND expression
-# with one indexed comparison term before evaluating residual predicates. Flat
-# OR SELECTs may use an index union only when every disjunct has a proven PK or
-# secondary-index anchor; otherwise they delegate to the established OR scan.
-# Parenthesized boolean handling stays outside those flat-expression layers.
+# Keep the historical generic layers intact as fallbacks. Ordered generic
+# secondary-index paths now share generic_index_candidates.c for snapshot load,
+# checksum/epoch validation, numeric/text ordering and candidate bounds. LIKE is
+# explicitly residual-only. A flat AND may use one ordered anchor; a flat OR may
+# use an index union only when every disjunct has a proven PK or ordered-index
+# anchor. Unsupported forms delegate to the established scan evaluators.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
@@ -109,12 +106,12 @@ if(NOT MSVC)
     )
 endif()
 set_source_files_properties(
-    src/generic_index_range_sql.c
+    src/generic_index_range_v2_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_range_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_range_index_base"
 )
 set_source_files_properties(
-    src/generic_index_anchor_sql.c
+    src/generic_index_anchor_v2_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_like_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_like_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_like_base"
 )
