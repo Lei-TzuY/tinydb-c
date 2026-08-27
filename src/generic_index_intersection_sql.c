@@ -16,6 +16,7 @@ typedef enum {
 
 typedef struct {
     uint32_t predicate_index;
+    uint32_t column_index;
     GenericSecondaryIndex* index;
 } IntersectionSource;
 
@@ -193,10 +194,56 @@ static bool choose_sources(Table* table, IntersectionSelect* select) {
 
         if (select->source_count >= INTERSECTION_MAX_SOURCES) return false;
         select->sources[select->source_count].predicate_index = i;
+        select->sources[select->source_count].column_index = predicate->column_index;
         select->sources[select->source_count].index = index;
         select->source_count++;
     }
     return select->source_count >= 2;
+}
+
+static uint32_t collect_source_predicates(
+    const IntersectionSelect* select,
+    const IntersectionSource* source,
+    TinyDBGenericPredicate* predicates,
+    uint32_t capacity) {
+    if (select == NULL || source == NULL || predicates == NULL || capacity == 0) {
+        return 0;
+    }
+
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < select->predicate_count && count < capacity; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index == source->column_index &&
+            predicate->op <= TINYDB_GENERIC_COMPARE_LTE) {
+            predicates[count++] = *predicate;
+        }
+    }
+    return count;
+}
+
+static uint32_t ordered_source_term_count(const IntersectionSelect* select) {
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < select->source_count; i++) {
+        TinyDBGenericPredicate predicates[MAX_COLUMNS_PER_TABLE];
+        total += collect_source_predicates(select,
+                                           &select->sources[i],
+                                           predicates,
+                                           MAX_COLUMNS_PER_TABLE);
+    }
+    return total;
+}
+
+static uint32_t fused_source_count(const IntersectionSelect* select) {
+    uint32_t fused = 0;
+    for (uint32_t i = 0; i < select->source_count; i++) {
+        TinyDBGenericPredicate predicates[MAX_COLUMNS_PER_TABLE];
+        uint32_t count = collect_source_predicates(select,
+                                                   &select->sources[i],
+                                                   predicates,
+                                                   MAX_COLUMNS_PER_TABLE);
+        if (count >= 2) fused++;
+    }
+    return fused;
 }
 
 static bool parse_intersection_select(Table* table,
@@ -345,15 +392,40 @@ static bool collect_intersection(Table* table,
     uint32_t collected = 0;
     for (uint32_t i = 0; i < select->source_count; i++) {
         const IntersectionSource* source = &select->sources[i];
-        const TinyDBGenericPredicate* predicate =
-            &select->predicates[source->predicate_index];
-        if (!tinydb_generic_index_collect_candidates(table,
-                                                     select->schema,
-                                                     source->index,
-                                                     predicate,
-                                                     &sets[i],
-                                                     message,
-                                                     message_size)) {
+        TinyDBGenericPredicate source_predicates[MAX_COLUMNS_PER_TABLE];
+        uint32_t source_predicate_count = collect_source_predicates(
+            select,
+            source,
+            source_predicates,
+            MAX_COLUMNS_PER_TABLE);
+        if (source_predicate_count == 0) {
+            snprintf(message,
+                     message_size,
+                     "%s",
+                     "generic intersection source has no ordered predicate");
+            free_candidate_sets(sets, collected);
+            return false;
+        }
+
+        bool source_collected = source_predicate_count >= 2
+            ? tinydb_generic_index_collect_conjunctive_candidates(
+                  table,
+                  select->schema,
+                  source->index,
+                  source_predicates,
+                  source_predicate_count,
+                  &sets[i],
+                  message,
+                  message_size)
+            : tinydb_generic_index_collect_candidates(
+                  table,
+                  select->schema,
+                  source->index,
+                  &source_predicates[0],
+                  &sets[i],
+                  message,
+                  message_size);
+        if (!source_collected) {
             free_candidate_sets(sets, collected);
             return false;
         }
@@ -581,6 +653,8 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
     plan->root_page_num = select.schema->root_page_num;
     plan->has_filter = true;
     plan->index_branch_count = select.source_count;
+    plan->index_term_count = ordered_source_term_count(&select);
+    plan->index_fused_source_count = fused_source_count(&select);
     snprintf(plan->table_name, sizeof(plan->table_name), "%s", select.schema->name);
     snprintf(plan->index_name, sizeof(plan->index_name), "%s", "multiple");
     snprintf(plan->projection,
@@ -615,6 +689,10 @@ void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
     printf("PLAN: GENERIC SECONDARY INDEX INTERSECTION\n");
     printf("  TABLE: %s (root page %u)\n", plan->table_name, plan->root_page_num);
     printf("  INDEXES: %u\n", plan->index_branch_count);
+    printf("  INDEX TERMS: %u\n", plan->index_term_count);
+    if (plan->index_fused_source_count > 0) {
+        printf("  FUSED SOURCES: %u\n", plan->index_fused_source_count);
+    }
     printf("  PROJECTION: %s\n", plan->projection);
     printf("  FILTER: %s\n", plan->filter_expression);
 }
