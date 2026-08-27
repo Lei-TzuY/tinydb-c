@@ -11,10 +11,17 @@ typedef struct {
 
 typedef struct {
     const TableSchema* schema;
-    uint32_t seen;
+    bool has_filter;
+    uint32_t filter_column_index;
+    TinyDBValue filter_value;
+    bool project_column;
+    uint32_t projection_column_index;
+    uint32_t matched;
+    uint32_t emitted;
     uint32_t offset;
     uint32_t limit;
     bool has_limit;
+    bool count_only;
 } GenericSelectContext;
 
 typedef struct {
@@ -179,6 +186,22 @@ static bool parse_target_after_prefix(const char* sql,
     return parse_identifier(&parser, table_name, table_name_size);
 }
 
+static bool parse_select_projection_for_routing(GenericParser* parser) {
+    if (consume_char(parser, '*')) return true;
+
+    GenericParser backup = *parser;
+    if (consume_word(parser, "count") &&
+        consume_char(parser, '(') &&
+        consume_char(parser, '*') &&
+        consume_char(parser, ')')) {
+        return true;
+    }
+    *parser = backup;
+
+    char column[MAX_NAME_SIZE];
+    return parse_identifier(parser, column, sizeof(column));
+}
+
 static TableSchema* resolve_generic_target(Table* table,
                                            const char* sql,
                                            StatementType* type) {
@@ -204,20 +227,9 @@ static TableSchema* resolve_generic_target(Table* table,
     } else {
         GenericParser parser;
         parser.current = sql;
-        if (!consume_word(&parser, "select")) return NULL;
-
-        if (consume_char(&parser, '*')) {
-            /* SELECT * */
-        } else if (consume_word(&parser, "count")) {
-            if (!consume_char(&parser, '(') ||
-                !consume_char(&parser, '*') ||
-                !consume_char(&parser, ')')) {
-                return NULL;
-            }
-        } else {
-            return NULL;
-        }
-        if (!consume_word(&parser, "from") ||
+        if (!consume_word(&parser, "select") ||
+            !parse_select_projection_for_routing(&parser) ||
+            !consume_word(&parser, "from") ||
             !parse_identifier(&parser, table_name, sizeof(table_name))) {
             return NULL;
         }
@@ -261,6 +273,17 @@ static TinyDBGenericSqlStatus generic_success(TinyDBGenericSqlResult* result,
     return result->status;
 }
 
+static bool parse_value_for_column(GenericParser* parser,
+                                   const TableColumn* column,
+                                   TinyDBValue* value) {
+    memset(value, 0, sizeof(*value));
+    value->type = column->type;
+    if (column->type == COL_TYPE_INT) {
+        return parse_uint32(parser, &value->int_value);
+    }
+    return parse_string(parser, value->text, sizeof(value->text));
+}
+
 static TinyDBGenericSqlStatus execute_insert(Table* table,
                                               TableSchema* schema,
                                               const char* sql,
@@ -283,14 +306,7 @@ static TinyDBGenericSqlStatus execute_insert(Table* table,
     }
 
     for (uint32_t i = 0; i < schema->num_columns; i++) {
-        values[i].type = schema->columns[i].type;
-        bool parsed = false;
-        if (schema->columns[i].type == COL_TYPE_INT) {
-            parsed = parse_uint32(&parser, &values[i].int_value);
-        } else {
-            parsed = parse_string(&parser, values[i].text, sizeof(values[i].text));
-        }
-        if (!parsed) {
+        if (!parse_value_for_column(&parser, &schema->columns[i], &values[i])) {
             return generic_syntax_error(result,
                                         STATEMENT_INSERT,
                                         "generic INSERT value does not match the target column type");
@@ -372,20 +388,12 @@ static TinyDBGenericSqlStatus execute_update(Table* table,
 
         GenericAssignment* assignment = &assignments[assignment_count++];
         assignment->column_index = (uint32_t)column_index;
-        memset(&assignment->value, 0, sizeof(assignment->value));
-        assignment->value.type = schema->columns[column_index].type;
-        if (assignment->value.type == COL_TYPE_INT) {
-            if (!parse_uint32(&parser, &assignment->value.int_value)) {
-                return generic_syntax_error(result,
-                                            STATEMENT_UPDATE,
-                                            "generic UPDATE integer column requires an integer value");
-            }
-        } else if (!parse_string(&parser,
-                                 assignment->value.text,
-                                 sizeof(assignment->value.text))) {
+        if (!parse_value_for_column(&parser,
+                                    &schema->columns[column_index],
+                                    &assignment->value)) {
             return generic_syntax_error(result,
                                         STATEMENT_UPDATE,
-                                        "generic UPDATE VARCHAR column requires a quoted string");
+                                        "generic UPDATE value does not match the target column type");
         }
 
         if (consume_word(&parser, "where")) break;
@@ -503,20 +511,103 @@ static TinyDBGenericSqlStatus execute_delete(Table* table,
     return generic_success(result, STATEMENT_DELETE);
 }
 
-static bool print_scan_record(const TableSchema* schema,
-                              const TinyDBRecord* record,
-                              void* raw_context) {
+static bool values_equal(const TinyDBValue* left, const TinyDBValue* right) {
+    if (left->type != right->type) return false;
+    if (left->type == COL_TYPE_INT) {
+        return left->int_value == right->int_value;
+    }
+    return strcmp(left->text, right->text) == 0;
+}
+
+static void print_value(const TinyDBValue* value) {
+    if (value->type == COL_TYPE_INT) {
+        printf("%u\n", value->int_value);
+    } else {
+        printf("%s\n", value->text);
+    }
+}
+
+static bool decode_record_values(const TableSchema* schema,
+                                 const TinyDBRecord* record,
+                                 TinyDBValue* values) {
+    uint32_t value_count = 0;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    return tinydb_record_decode(schema,
+                                record,
+                                values,
+                                MAX_COLUMNS_PER_TABLE,
+                                &value_count,
+                                message,
+                                sizeof(message)) &&
+           value_count == schema->num_columns;
+}
+
+static bool record_matches_filter(const GenericSelectContext* context,
+                                  const TinyDBValue* values) {
+    if (!context->has_filter) return true;
+    return values_equal(&values[context->filter_column_index],
+                        &context->filter_value);
+}
+
+static void print_selected_record(const GenericSelectContext* context,
+                                  const TinyDBRecord* record,
+                                  const TinyDBValue* values) {
+    if (context->project_column) {
+        print_value(&values[context->projection_column_index]);
+    } else {
+        tinydb_record_print(context->schema, record);
+    }
+}
+
+static bool scan_select_record(const TableSchema* schema,
+                               const TinyDBRecord* record,
+                               void* raw_context) {
     GenericSelectContext* context = (GenericSelectContext*)raw_context;
-    if (context->seen < context->offset) {
-        context->seen++;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    if (!decode_record_values(schema, record, values)) return false;
+    if (!record_matches_filter(context, values)) return true;
+
+    context->matched++;
+    if (context->count_only) return true;
+    if (context->matched <= context->offset) return true;
+    if (context->has_limit && context->emitted >= context->limit) return false;
+
+    print_selected_record(context, record, values);
+    context->emitted++;
+    return true;
+}
+
+static bool parse_select_projection(GenericParser* parser,
+                                    const TableSchema* schema,
+                                    bool* count_only,
+                                    bool* project_column,
+                                    uint32_t* projection_column_index) {
+    if (consume_char(parser, '*')) {
+        *count_only = false;
+        *project_column = false;
+        *projection_column_index = 0;
         return true;
     }
-    if (context->has_limit &&
-        context->seen - context->offset >= context->limit) {
-        return false;
+
+    GenericParser backup = *parser;
+    if (consume_word(parser, "count") &&
+        consume_char(parser, '(') &&
+        consume_char(parser, '*') &&
+        consume_char(parser, ')')) {
+        *count_only = true;
+        *project_column = false;
+        *projection_column_index = 0;
+        return true;
     }
-    tinydb_record_print(schema, record);
-    context->seen++;
+    *parser = backup;
+
+    char column[MAX_NAME_SIZE];
+    if (!parse_identifier(parser, column, sizeof(column))) return false;
+    int column_index = find_column_index(schema, column);
+    if (column_index < 0) return false;
+    *count_only = false;
+    *project_column = true;
+    *projection_column_index = (uint32_t)column_index;
     return true;
 }
 
@@ -528,8 +619,12 @@ static TinyDBGenericSqlStatus execute_select(Table* table,
     parser.current = sql;
     char table_name[MAX_NAME_SIZE];
     bool count_only = false;
-    bool has_id = false;
-    uint32_t id = 0;
+    bool project_column = false;
+    uint32_t projection_column_index = 0;
+    bool has_filter = false;
+    uint32_t filter_column_index = 0;
+    TinyDBValue filter_value;
+    memset(&filter_value, 0, sizeof(filter_value));
     bool has_limit = false;
     uint32_t limit = 0;
     uint32_t offset = 0;
@@ -537,21 +632,14 @@ static TinyDBGenericSqlStatus execute_select(Table* table,
     if (!consume_word(&parser, "select")) {
         return generic_syntax_error(result, STATEMENT_SELECT, "invalid generic SELECT");
     }
-    if (consume_char(&parser, '*')) {
-        count_only = false;
-    } else if (consume_word(&parser, "count")) {
-        if (!consume_char(&parser, '(') ||
-            !consume_char(&parser, '*') ||
-            !consume_char(&parser, ')')) {
-            return generic_syntax_error(result,
-                                        STATEMENT_SELECT,
-                                        "generic SELECT currently supports only * or COUNT(*)");
-        }
-        count_only = true;
-    } else {
+    if (!parse_select_projection(&parser,
+                                 schema,
+                                 &count_only,
+                                 &project_column,
+                                 &projection_column_index)) {
         return generic_syntax_error(result,
                                     STATEMENT_SELECT,
-                                    "generic SELECT currently supports only * or COUNT(*)");
+                                    "generic SELECT projection references an unknown or unsupported column");
     }
 
     if (!consume_word(&parser, "from") ||
@@ -564,15 +652,26 @@ static TinyDBGenericSqlStatus execute_select(Table* table,
 
     if (consume_word(&parser, "where")) {
         char column[MAX_NAME_SIZE];
-        if (!parse_identifier(&parser, column, sizeof(column)) ||
-            !ci_equal(column, "id") ||
-            !consume_char(&parser, '=') ||
-            !parse_uint32(&parser, &id)) {
+        if (!parse_identifier(&parser, column, sizeof(column))) {
             return generic_syntax_error(result,
                                         STATEMENT_SELECT,
-                                        "generic SELECT currently supports only WHERE id = N");
+                                        "generic SELECT WHERE requires a column name");
         }
-        has_id = true;
+        int column_index = find_column_index(schema, column);
+        if (column_index < 0 || !consume_char(&parser, '=')) {
+            return generic_syntax_error(result,
+                                        STATEMENT_SELECT,
+                                        "generic SELECT WHERE references an unknown column or operator");
+        }
+        filter_column_index = (uint32_t)column_index;
+        if (!parse_value_for_column(&parser,
+                                    &schema->columns[filter_column_index],
+                                    &filter_value)) {
+            return generic_syntax_error(result,
+                                        STATEMENT_SELECT,
+                                        "generic SELECT filter value does not match the target column type");
+        }
+        has_filter = true;
     }
 
     if (consume_word(&parser, "limit")) {
@@ -597,32 +696,50 @@ static TinyDBGenericSqlStatus execute_select(Table* table,
                                     "generic SELECT contains an unsupported clause");
     }
 
-    if (count_only) {
-        uint32_t count = 0;
-        if (has_id) {
-            TinyDBRecord record;
-            count = tinydb_record_find(table, schema, id, &record) ? 1u : 0u;
-        } else {
-            count = tinydb_record_scan(table, schema, NULL, NULL);
-        }
-        if (offset > 0) count = 0;
-        if (has_limit && limit == 0) count = 0;
-        printf("%u\n", count);
-    } else if (has_id) {
-        if (offset == 0 && (!has_limit || limit > 0)) {
-            TinyDBRecord record;
-            if (tinydb_record_find(table, schema, id, &record)) {
-                tinydb_record_print(schema, &record);
+    GenericSelectContext context;
+    memset(&context, 0, sizeof(context));
+    context.schema = schema;
+    context.has_filter = has_filter;
+    context.filter_column_index = filter_column_index;
+    context.filter_value = filter_value;
+    context.project_column = project_column;
+    context.projection_column_index = projection_column_index;
+    context.offset = offset;
+    context.limit = limit;
+    context.has_limit = has_limit;
+    context.count_only = count_only;
+
+    /* Preserve the direct B+ tree primary-key path whenever WHERE targets id.
+     * All other schema-aware equality predicates use a decoded record scan. */
+    if (has_filter && filter_column_index == 0) {
+        TinyDBRecord record;
+        bool found = tinydb_record_find(table,
+                                        schema,
+                                        filter_value.int_value,
+                                        &record);
+        if (found) {
+            TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+            if (!decode_record_values(schema, &record, values)) {
+                return generic_execute_error(result,
+                                             STATEMENT_SELECT,
+                                             EXECUTE_KEY_NOT_FOUND,
+                                             "unable to decode generic record");
+            }
+            context.matched = 1;
+            if (!count_only && offset == 0 && (!has_limit || limit > 0)) {
+                print_selected_record(&context, &record, values);
+                context.emitted = 1;
             }
         }
     } else {
-        GenericSelectContext context;
-        context.schema = schema;
-        context.seen = 0;
-        context.offset = offset;
-        context.limit = limit;
-        context.has_limit = has_limit;
-        (void)tinydb_record_scan(table, schema, print_scan_record, &context);
+        (void)tinydb_record_scan(table, schema, scan_select_record, &context);
+    }
+
+    if (count_only) {
+        uint32_t count = context.matched;
+        if (offset > 0) count = 0;
+        if (has_limit && limit == 0) count = 0;
+        printf("%u\n", count);
     }
 
     return generic_success(result, STATEMENT_SELECT);
