@@ -242,20 +242,18 @@ bool tinydb_generic_predicate_matches(const TinyDBGenericPredicate* predicate,
             return compared < 0;
         case TINYDB_GENERIC_COMPARE_LTE:
             return compared <= 0;
-        case TINYDB_GENERIC_COMPARE_LIKE:
-            return false;
     }
     return false;
 }
 
 const char* tinydb_generic_compare_op_text(TinyDBGenericCompareOp op) {
+    if (op == TINYDB_GENERIC_COMPARE_LIKE) return "LIKE";
     switch (op) {
         case TINYDB_GENERIC_COMPARE_EQ: return "=";
         case TINYDB_GENERIC_COMPARE_GT: return ">";
         case TINYDB_GENERIC_COMPARE_GTE: return ">=";
         case TINYDB_GENERIC_COMPARE_LT: return "<";
         case TINYDB_GENERIC_COMPARE_LTE: return "<=";
-        case TINYDB_GENERIC_COMPARE_LIKE: return "LIKE";
     }
     return "?";
 }
