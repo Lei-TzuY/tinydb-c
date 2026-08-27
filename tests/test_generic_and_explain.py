@@ -80,19 +80,23 @@ def main():
         if "Error:" in setup or "Syntax error" in setup:
             raise AssertionError(setup)
 
-        scan = run_session(
+        anchored_range = run_session(
             executable,
             db_file,
             [
                 "EXPLAIN SELECT name FROM products WHERE price >= 1000 AND price <= 3000;",
+                "SELECT name FROM products WHERE price >= 1000 AND price <= 3000;",
                 ".exit",
             ],
         )
-        require(scan, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
-        require(scan, "PROJECTION: name")
-        require(scan, "FILTER: price >= 1000 AND price <= 3000")
-        if "ACTUAL RESULT" in scan:
-            raise AssertionError("plain compound EXPLAIN executed the query\n" + scan)
+        require(anchored_range, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(anchored_range, "INDEX: idx_products_price")
+        require(anchored_range, "ANCHOR: price >= 1000")
+        require(anchored_range, "FILTER: price >= 1000 AND price <= 3000")
+        require(anchored_range, "keyboard")
+        require(anchored_range, "mouse")
+        if "ACTUAL RESULT" in anchored_range:
+            raise AssertionError("plain compound EXPLAIN executed the query\n" + anchored_range)
 
         pk = run_session(
             executable,
@@ -104,6 +108,8 @@ def main():
         )
         require(pk, "PLAN: GENERIC PRIMARY KEY LOOKUP")
         require(pk, "FILTER: id = 2 AND price >= 1000")
+        if "SECONDARY INDEX + RESIDUAL" in pk:
+            raise AssertionError("secondary index incorrectly displaced PK equality\n" + pk)
 
         indexed_residual = run_session(
             executable,
@@ -114,14 +120,11 @@ def main():
                 ".exit",
             ],
         )
-        require(indexed_residual, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(indexed_residual, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
+        require(indexed_residual, "INDEX: idx_products_price")
+        require(indexed_residual, "ANCHOR: price = 1299")
         require(indexed_residual, "FILTER: price = 1299 AND id > 1")
         require(indexed_residual, "mouse")
-        if "PLAN: GENERIC SECONDARY INDEX LOOKUP" in indexed_residual:
-            raise AssertionError(
-                "compound predicate was incorrectly promoted to single-term index plan\n"
-                + indexed_residual
-            )
 
         disjunction = run_session(
             executable,
@@ -136,9 +139,9 @@ def main():
         require(disjunction, "FILTER: price >= 4000 OR price <= 500")
         require(disjunction, "monitor")
         require(disjunction, "cable")
-        if "PLAN: GENERIC SECONDARY INDEX LOOKUP" in disjunction:
+        if "SECONDARY INDEX + RESIDUAL" in disjunction:
             raise AssertionError(
-                "OR predicate was incorrectly promoted to a single-term index plan\n"
+                "OR predicate was incorrectly promoted to a single-anchor plan\n"
                 + disjunction
             )
 
@@ -152,6 +155,7 @@ def main():
             ],
         )
         require(analyzed, "QUERY PLAN")
+        require(analyzed, "PLAN: GENERIC SECONDARY INDEX + RESIDUAL FILTER")
         require(analyzed, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(analyzed, "FILTER: price >= 1000 AND price <= 3000")
         require(analyzed, "FILTER: id = 1 OR price >= 4000")
@@ -173,9 +177,9 @@ def main():
             raise AssertionError("invalid typed EXPLAIN predicate was accepted\n" + invalid)
 
         print(
-            "PASS: generic EXPLAIN/ANALYZE renders AND and OR predicates, preserves "
-            "PK equality lookup for conjunctive filters, keeps residual/disjunctive "
-            "predicates on the scan path, and rejects invalid typed filters."
+            "PASS: generic EXPLAIN/ANALYZE uses a persistent secondary-index anchor "
+            "plus residual filtering for flat AND predicates, preserves PK equality "
+            "priority, keeps OR on the scan path, and rejects invalid typed filters."
         )
     finally:
         cleanup(db_file)
