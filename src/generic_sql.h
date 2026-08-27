@@ -5,6 +5,7 @@
 #include "vm.h"
 
 #define TINYDB_GENERIC_SQL_MESSAGE_MAX 256
+#define TINYDB_GENERIC_PLAN_TEXT_MAX 256
 
 typedef enum {
     TINYDB_GENERIC_SQL_NOT_APPLICABLE = 0,
@@ -12,6 +13,22 @@ typedef enum {
     TINYDB_GENERIC_SQL_SYNTAX_ERROR,
     TINYDB_GENERIC_SQL_EXECUTE_ERROR
 } TinyDBGenericSqlStatus;
+
+typedef enum {
+    TINYDB_GENERIC_PLAN_FULL_SCAN = 0,
+    TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP
+} TinyDBGenericPlanKind;
+
+typedef struct {
+    bool applicable;
+    TinyDBGenericPlanKind kind;
+    uint32_t root_page_num;
+    char table_name[MAX_NAME_SIZE];
+    char projection[TINYDB_GENERIC_PLAN_TEXT_MAX];
+    bool has_filter;
+    char filter_column[MAX_NAME_SIZE];
+    char filter_value[TINYDB_GENERIC_PLAN_TEXT_MAX];
+} TinyDBGenericSelectPlan;
 
 typedef struct {
     TinyDBGenericSqlStatus status;
@@ -25,5 +42,13 @@ typedef struct {
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(Table* table,
                                                        const char* sql,
                                                        TinyDBGenericSqlResult* result);
+
+TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSelectPlan* plan,
+    TinyDBGenericSqlResult* result);
+
+void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan);
 
 #endif /* GENERIC_SQL_H */
