@@ -39,3 +39,6 @@ target_link_libraries(tinydb_pager_growth_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_engine_api_probe tests/engine_api_probe.c)
 target_link_libraries(tinydb_engine_api_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_page_ownership_probe tests/page_ownership_probe.c)
+target_link_libraries(tinydb_page_ownership_probe PRIVATE tinydb_core)
