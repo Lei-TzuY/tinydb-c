@@ -123,20 +123,42 @@ def main():
                 + indexed_residual
             )
 
+        disjunction = run_session(
+            executable,
+            db_file,
+            [
+                "EXPLAIN SELECT name FROM products WHERE price >= 4000 OR price <= 500;",
+                "SELECT name FROM products WHERE price >= 4000 OR price <= 500;",
+                ".exit",
+            ],
+        )
+        require(disjunction, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(disjunction, "FILTER: price >= 4000 OR price <= 500")
+        require(disjunction, "monitor")
+        require(disjunction, "cable")
+        if "PLAN: GENERIC SECONDARY INDEX LOOKUP" in disjunction:
+            raise AssertionError(
+                "OR predicate was incorrectly promoted to a single-term index plan\n"
+                + disjunction
+            )
+
         analyzed = run_session(
             executable,
             db_file,
             [
                 "EXPLAIN ANALYZE SELECT name FROM products WHERE price >= 1000 AND price <= 3000;",
+                "EXPLAIN ANALYZE SELECT name FROM products WHERE id = 1 OR price >= 4000;",
                 ".exit",
             ],
         )
         require(analyzed, "QUERY PLAN")
         require(analyzed, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(analyzed, "FILTER: price >= 1000 AND price <= 3000")
+        require(analyzed, "FILTER: id = 1 OR price >= 4000")
         require(analyzed, "ACTUAL RESULT")
         require(analyzed, "keyboard")
         require(analyzed, "mouse")
+        require(analyzed, "monitor")
         require_metrics(analyzed)
 
         invalid = run_session(
@@ -144,17 +166,16 @@ def main():
             db_file,
             [
                 "EXPLAIN SELECT * FROM products WHERE price >= 1000 AND price <= '3000';",
-                "EXPLAIN SELECT * FROM products WHERE price >= 1000 OR price <= 3000;",
                 ".exit",
             ],
         )
-        if invalid.count("Syntax error. Could not parse statement.") < 2:
-            raise AssertionError("invalid compound EXPLAIN predicates were accepted\n" + invalid)
+        if invalid.count("Syntax error. Could not parse statement.") < 1:
+            raise AssertionError("invalid typed EXPLAIN predicate was accepted\n" + invalid)
 
         print(
-            "PASS: compound generic EXPLAIN/ANALYZE renders AND predicates, "
-            "preserves PK equality lookup, keeps indexed residual predicates on the "
-            "scan path, executes the same semantics, and rejects invalid filters."
+            "PASS: generic EXPLAIN/ANALYZE renders AND and OR predicates, preserves "
+            "PK equality lookup for conjunctive filters, keeps residual/disjunctive "
+            "predicates on the scan path, and rejects invalid typed filters."
         )
     finally:
         cleanup(db_file)
