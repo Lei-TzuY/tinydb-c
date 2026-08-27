@@ -22,6 +22,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_compound_plan_guard.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
+    src/generic_index_conjunctive.c
     src/generic_index_ddl.c
     src/generic_index_drop.c
     src/generic_index_epoch.c
