@@ -50,6 +50,7 @@ set(TINYDB_CORE_SOURCES
     src/join_plan.c
     src/multi_vacuum_into.c
     src/multitable.c
+    src/schema_catalog_v2.c
     src/pager.c
     src/prepared_route.c
     src/profile.c
@@ -198,12 +199,13 @@ set_source_files_properties(
     "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base"
 )
 
-# Preserve historical root-0-only index policy behind a private delegate; the
-# generic policy adapter opens only proven schema-aware fixed-slot targets.
+# Preserve historical schema-catalog I/O as a V1 read fallback while the public
+# facade writes a fixed little-endian V2 envelope with a payload checksum. Keep
+# the historical root-0-only index policy private as before.
 set_source_files_properties(
     src/multitable.c
     PROPERTIES COMPILE_DEFINITIONS
-    "multitable_index_target_supported=multitable_index_target_supported_legacy"
+    "multitable_catalog_load=multitable_catalog_load_v1_base;multitable_catalog_save=multitable_catalog_save_v1_base;multitable_index_target_supported=multitable_index_target_supported_legacy"
 )
 
 # Keep historical index catalog/drop implementations as delegates. Generic DDL
