@@ -15,6 +15,7 @@ endif()
 set(TINYDB_CORE_SOURCES
     src/catalog_pragmas.c
     src/compiler.c
+    src/create_table_policy.c
     src/diagnostics.c
     src/engine.c
     src/generic_boolean.c
@@ -48,6 +49,15 @@ set(TINYDB_CORE_SOURCES
     src/record.c
     src/table.c
     src/vm.c
+)
+
+# Keep CREATE TABLE catalog state executable: the public engine entry point
+# validates generic fixed-slot layouts before the historical engine is allowed
+# to allocate/persist a table root. All non-CREATE SQL delegates unchanged.
+set_source_files_properties(
+    src/engine.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_execute_sql=tinydb_execute_sql_base"
 )
 
 # Keep historical generic layers as fallbacks while sharing ordered-index
