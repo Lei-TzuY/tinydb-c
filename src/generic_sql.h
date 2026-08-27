@@ -46,6 +46,8 @@ typedef struct {
     uint32_t estimated_table_rows;
     uint64_t estimated_cost;
     uint64_t estimated_scan_cost;
+    bool has_correlation_estimate;
+    uint32_t correlation_estimated_rows;
 } TinyDBGenericSelectPlan;
 
 typedef struct {
