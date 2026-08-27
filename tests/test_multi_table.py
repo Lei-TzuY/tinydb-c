@@ -107,17 +107,21 @@ def main():
         assert "archive" in third and "posts" in third, third
         assert "0" in third, third
 
-        incompatible = run_session(
+        # `posts` is now a real schema-aware generic-record table. The third
+        # value intentionally has the wrong type (VARCHAR for user_id INT),
+        # so the generic path must reject it without leaking bytes into users.
+        typed_generic_guard = run_session(
             executable,
             db_file,
             [
                 "INSERT INTO posts VALUES (9, 'not-a-row-layout', 'ignored');",
+                "SELECT * FROM posts WHERE id = 9;",
                 "SELECT * FROM users WHERE id = 9;",
                 ".exit",
             ],
         )
-        assert "not compatible with the current fixed Row storage layout" in incompatible, incompatible
-        assert "(9," not in incompatible, incompatible
+        assert "Syntax error. Could not parse statement." in typed_generic_guard, typed_generic_guard
+        assert "(9," not in typed_generic_guard, typed_generic_guard
 
         safety = run_session(
             executable,
