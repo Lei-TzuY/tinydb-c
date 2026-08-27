@@ -560,6 +560,105 @@ bool tinydb_generic_index_collect_candidates(
     return true;
 }
 
+bool tinydb_generic_index_collect_conjunctive_candidates(
+    Table* table,
+    const TableSchema* schema,
+    GenericSecondaryIndex* index,
+    const TinyDBGenericPredicate* predicates,
+    uint32_t predicate_count,
+    TinyDBGenericIndexCandidates* candidates,
+    char* message,
+    size_t message_size) {
+    if (candidates != NULL) memset(candidates, 0, sizeof(*candidates));
+    if (table == NULL || schema == NULL || index == NULL ||
+        predicates == NULL || predicate_count == 0 || candidates == NULL) {
+        set_message(message,
+                    message_size,
+                    "invalid conjunctive generic index candidate request");
+        return false;
+    }
+
+    uint32_t column_index = predicates[0].column_index;
+    if (column_index == 0 || column_index >= schema->num_columns ||
+        !index->enabled || index->num_columns != 1 ||
+        !ci_equal(index->table_name, schema->name) ||
+        !ci_equal(index->column_name, schema->columns[column_index].name)) {
+        set_message(message,
+                    message_size,
+                    "invalid conjunctive generic index candidate request");
+        return false;
+    }
+
+    for (uint32_t i = 0; i < predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &predicates[i];
+        if (predicate->column_index != column_index ||
+            predicate->op > TINYDB_GENERIC_COMPARE_LTE ||
+            predicate->value.type != schema->columns[column_index].type) {
+            set_message(message,
+                        message_size,
+                        "conjunctive index bounds must target one ordered indexed column");
+            return false;
+        }
+    }
+
+    CandidateSnapshot snapshot;
+    if (!ensure_snapshot(table,
+                         schema,
+                         index,
+                         column_index,
+                         &snapshot)) {
+        set_message(message,
+                    message_size,
+                    "unable to load or rebuild typed generic index snapshot");
+        return false;
+    }
+
+    size_t start = 0;
+    size_t end = snapshot.count;
+    for (uint32_t i = 0; i < predicate_count; i++) {
+        size_t predicate_start = 0;
+        size_t predicate_end = snapshot.count;
+        predicate_bounds(&snapshot,
+                         &predicates[i],
+                         &predicate_start,
+                         &predicate_end);
+        if (predicate_start > start) start = predicate_start;
+        if (predicate_end < end) end = predicate_end;
+        if (start >= end) {
+            start = end;
+            break;
+        }
+    }
+
+    size_t count = end >= start ? end - start : 0;
+    if (count > UINT32_MAX) {
+        free(snapshot.entries);
+        set_message(message,
+                    message_size,
+                    "generic conjunctive candidate set is too large");
+        return false;
+    }
+
+    if (count > 0) {
+        candidates->ids = (uint32_t*)malloc(count * sizeof(uint32_t));
+        if (candidates->ids == NULL) {
+            free(snapshot.entries);
+            set_message(message,
+                        message_size,
+                        "out of memory collecting conjunctive index candidates");
+            return false;
+        }
+        for (size_t i = 0; i < count; i++) {
+            candidates->ids[i] = snapshot.entries[start + i].primary_key;
+        }
+        candidates->count = (uint32_t)count;
+    }
+
+    free(snapshot.entries);
+    set_message(message, message_size, "ok");
+    return true;
+}
+
 void tinydb_generic_index_candidates_free(
     TinyDBGenericIndexCandidates* candidates) {
     if (candidates == NULL) return;
