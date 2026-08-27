@@ -70,6 +70,26 @@ def parse_v2(data):
     return payload
 
 
+def table_root_offsets(payload):
+    if len(payload) < 8:
+        raise AssertionError("schema payload is too short")
+    num_tables, _ = struct.unpack_from("<II", payload, 0)
+    position = 8
+    offsets = []
+    for _ in range(num_tables):
+        if position + 40 > len(payload):
+            raise AssertionError("schema table header is truncated")
+        root_offset = position + 32
+        num_columns = struct.unpack_from("<I", payload, position + 36)[0]
+        offsets.append(root_offset)
+        position += 40
+        column_bytes = num_columns * 44
+        if position + column_bytes + 102 > len(payload):
+            raise AssertionError("schema table payload is truncated")
+        position += column_bytes + 102
+    return offsets
+
+
 def require(output, marker):
     if marker not in output:
         raise AssertionError(f"missing marker {marker!r}\n{output}")
@@ -220,6 +240,36 @@ def main():
                 + corrupt_output
             )
 
+        semantic_main = bytearray(upgraded_bytes)
+        semantic_payload = bytearray(parse_v2(semantic_main))
+        root_offsets = table_root_offsets(semantic_payload)
+        if len(root_offsets) < 2:
+            raise AssertionError("semantic corruption test requires two catalog tables")
+        first_root = struct.unpack_from("<I", semantic_payload, root_offsets[0])[0]
+        struct.pack_into("<I", semantic_payload, root_offsets[1], first_root)
+        semantic_main[20:] = semantic_payload
+        struct.pack_into("<Q", semantic_main, 12, fnv64(semantic_payload))
+        parse_v2(semantic_main)
+        with open(schema_file, "wb") as handle:
+            handle.write(semantic_main)
+
+        semantic_code, semantic_output = run_session(
+            tinydb, db_file, ["SELECT COUNT(*) FROM archive;"], check=False
+        )
+        if semantic_code == 0:
+            raise AssertionError(
+                "checksum-valid duplicate-root catalog did not fail closed\n"
+                + semantic_output
+            )
+        require(semantic_output, "Ignoring schema catalog with duplicate root page")
+        require(semantic_output, "Error: schema catalog could not be loaded safely.")
+        require(semantic_output, "Unable to open database.")
+        if "db >" in semantic_output:
+            raise AssertionError(
+                "REPL became available after semantic catalog rejection\n"
+                + semantic_output
+            )
+
         with open(schema_file, "wb") as handle:
             handle.write(upgraded_bytes)
         _, final = run_session(
@@ -237,8 +287,8 @@ def main():
         print(
             "PASS: schema catalog V2 uses a fixed little-endian checksummed envelope, "
             "reads legacy V1 catalogs, upgrades them on DDL, recovers committed V2 WAL, "
-            "rejects corrupted WAL, fails closed on a corrupted main catalog, and "
-            "preserves multi-root catalog state."
+            "rejects corrupted WAL, fails closed on corrupt main data or checksum-valid "
+            "duplicate-root semantics, and preserves multi-root catalog state."
         )
     finally:
         cleanup(db_file)
