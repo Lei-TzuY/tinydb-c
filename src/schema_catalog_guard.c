@@ -65,10 +65,29 @@ static bool build_catalog_path(char* output,
     return written >= 0 && (size_t)written < output_size;
 }
 
-static bool payload_has_impossible_root(const Table* table,
-                                        const unsigned char* payload,
-                                        size_t payload_size,
-                                        uint32_t* bad_root) {
+static bool page_is_structural_root(const Table* table, uint32_t root_page_num) {
+    if (table == NULL || table->pager == NULL ||
+        root_page_num >= table->pager->num_pages) {
+        return false;
+    }
+
+    void* page = get_page(table->pager, root_page_num);
+    if (page == NULL) return false;
+
+    const unsigned char* bytes = (const unsigned char*)page;
+    uint8_t node_type = bytes[NODE_TYPE_OFFSET];
+    uint8_t root_flag = bytes[IS_ROOT_OFFSET];
+    bool valid = (node_type == (uint8_t)NODE_INTERNAL ||
+                  node_type == (uint8_t)NODE_LEAF) &&
+                 root_flag == 1u;
+    pager_unpin_page(table->pager, root_page_num);
+    return valid;
+}
+
+static bool payload_has_invalid_root(const Table* table,
+                                     const unsigned char* payload,
+                                     size_t payload_size,
+                                     uint32_t* bad_root) {
     if (table == NULL || table->pager == NULL || payload == NULL ||
         payload_size < 8u) {
         return false;
@@ -103,7 +122,7 @@ static bool payload_has_impossible_root(const Table* table,
             return false;
         }
 
-        if (root_page_num >= table->pager->num_pages) {
+        if (!page_is_structural_root(table, root_page_num)) {
             if (bad_root != NULL) *bad_root = root_page_num;
             return true;
         }
@@ -114,7 +133,7 @@ static bool payload_has_impossible_root(const Table* table,
     return false;
 }
 
-static bool discard_committed_v2_wal_with_impossible_root(
+static bool discard_committed_v2_wal_with_invalid_root(
     const Table* table,
     const char* database_filename
 ) {
@@ -163,7 +182,7 @@ static bool discard_committed_v2_wal_with_impossible_root(
     }
 
     uint32_t bad_root = 0;
-    if (!payload_has_impossible_root(table, payload, payload_size, &bad_root)) {
+    if (!payload_has_invalid_root(table, payload, payload_size, &bad_root)) {
         return true;
     }
 
@@ -195,6 +214,12 @@ static bool catalog_identity_valid(const Table* table) {
         const TableSchema* current = &table->catalog.schemas[i];
         if (!name_present(current->name, sizeof(current->name))) {
             printf("Ignoring schema catalog with an empty or unterminated table name.\n");
+            return false;
+        }
+        if (!page_is_structural_root(table, current->root_page_num)) {
+            printf("Ignoring schema catalog with invalid structural root page %u for table '%s'.\n",
+                   current->root_page_num,
+                   current->name);
             return false;
         }
 
@@ -242,8 +267,8 @@ static bool catalog_identity_valid(const Table* table) {
 }
 
 bool multitable_catalog_load(Table* table, const char* database_filename) {
-    if (!discard_committed_v2_wal_with_impossible_root(table,
-                                                       database_filename)) {
+    if (!discard_committed_v2_wal_with_invalid_root(table,
+                                                    database_filename)) {
         return false;
     }
     if (!multitable_catalog_load_checksums_base(table, database_filename)) {
