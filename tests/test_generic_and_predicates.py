@@ -123,6 +123,7 @@ def run_test():
             "SELECT COUNT(*) FROM items;",
             "SELECT COUNT(*) FROM items WHERE stock = 3;",
             "SELECT COUNT(*) FROM items WHERE price >= 120 OR price <= 130;",
+            "SELECT id FROM items WHERE bucket = 'window' AND price < 125 OR id = 5 LIMIT 4;",
             "UPDATE items SET bucket = 'bad' WHERE bucket = 7 AND price > 0;",
             "DELETE FROM items WHERE missing = 1 AND price > 0;",
             "PRAGMA integrity_check;",
@@ -135,9 +136,10 @@ def run_test():
     require(second, "Column 'stock' added to table 'items'.")
     require(second, "db > 18\nExecuted.")
     require(second, "db > 3\nExecuted.")
-    require(second, "db > 50\nExecuted.")
+    require_count(second, "db > 50\nExecuted.", 2)
     require(second, "db > 2\nExecuted.")
-    require_count(second, "Syntax error. Could not parse statement.", 3)
+    require(second, "db > 20\n21\n22\n23\nExecuted.")
+    require_count(second, "Syntax error. Could not parse statement.", 2)
     require(second, "ok")
 
     third = run_session(
@@ -148,6 +150,7 @@ def run_test():
             "SELECT COUNT(*) FROM items;",
             "SELECT COUNT(*) FROM items WHERE stock = 3;",
             "SELECT COUNT(*) FROM items WHERE stock = 0 AND price < 120;",
+            "SELECT COUNT(*) FROM items WHERE id = 5 OR bucket = 'window';",
             "PRAGMA integrity_check;",
             ".exit",
         ],
@@ -157,13 +160,14 @@ def run_test():
     require(third, "db > 50\nExecuted.")
     require(third, "db > 2\nExecuted.")
     require(third, "db > 13\nExecuted.")
+    require(third, "db > 10\nExecuted.")
     require(third, "ok")
 
     cleanup(db_file)
     print(
-        "PASS: shared typed generic predicates execute equality/range AND filters "
-        "across SELECT/UPDATE/DELETE with PK fast-path routing, two-phase mutation, "
-        "rollback, appended columns, reopen durability, and integrity checks."
+        "PASS: shared typed generic predicates execute equality/range AND filters and "
+        "AND-before-OR SELECT semantics across appended columns and reopen durability, "
+        "while UPDATE/DELETE retain two-phase mutation and rollback behavior."
     )
 
 
