@@ -16,7 +16,7 @@ typedef struct {
 static TinyDBPreparedRouteEntry prepared_routes[TINYDB_PREPARED_ROUTE_CAPACITY];
 static uint32_t prepared_route_count = 0;
 
-TinyDBSqlStatus tinydb_execute_sql_create_policy_base(
+TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     TinyDB* database,
     const char* sql,
     TinyDBSqlResult* result);
@@ -104,14 +104,14 @@ static TinyDBSqlStatus execute_with_prepared_routing(
     TinyDBSqlResult* result,
     uint32_t depth) {
     if (database == NULL || sql == NULL) {
-        return tinydb_execute_sql_create_policy_base(database, sql, result);
+        return tinydb_execute_sql_prepared_delegate_base(database, sql, result);
     }
 
     Statement statement;
     memset(&statement, 0, sizeof(statement));
     PrepareResult prepare_result = prepare_statement(sql, &statement);
     if (prepare_result != PREPARE_SUCCESS) {
-        return tinydb_execute_sql_create_policy_base(database, sql, result);
+        return tinydb_execute_sql_prepared_delegate_base(database, sql, result);
     }
 
     if (statement.type == STATEMENT_PREPARE) {
@@ -121,11 +121,11 @@ static TinyDBSqlStatus execute_with_prepared_routing(
                                     "prepared statement route registry is full or invalid");
             return TINYDB_SQL_EXECUTE_ERROR;
         }
-        return tinydb_execute_sql_create_policy_base(database, sql, result);
+        return tinydb_execute_sql_prepared_delegate_base(database, sql, result);
     }
 
     if (statement.type != STATEMENT_EXECUTE_PREPARED) {
-        return tinydb_execute_sql_create_policy_base(database, sql, result);
+        return tinydb_execute_sql_prepared_delegate_base(database, sql, result);
     }
 
     TinyDBPreparedRouteEntry* entry = find_prepared_route(
