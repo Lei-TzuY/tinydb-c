@@ -5,10 +5,12 @@
 #define TINYDB_RECORD_TRAILER_MAGIC 0x32575254u /* TRW2 */
 #define TINYDB_RECORD_TRAILER_VERSION 1u
 #define TINYDB_RECORD_TRAILER_SIZE 16u
+#define TINYDB_RECORD_TRAILER_VERSION_SHIFT 16u
+#define TINYDB_RECORD_TRAILER_PAYLOAD_MASK 0xffffu
 
 typedef struct {
     uint32_t magic;
-    uint32_t version;
+    uint32_t version_and_payload_size;
     uint32_t schema_fingerprint;
     uint32_t payload_checksum;
 } TinyDBRecordTrailer;
@@ -46,12 +48,16 @@ static uint32_t fnv1a_update(uint32_t hash, const void* data, size_t size) {
     return hash;
 }
 
-static uint32_t schema_fingerprint(const TableSchema* schema) {
+static uint32_t schema_fingerprint_for_payload(const TableSchema* schema,
+                                               uint32_t payload_size) {
     uint32_t hash = 2166136261u;
-    hash = fnv1a_update(hash, &schema->num_columns, sizeof(schema->num_columns));
-    hash = fnv1a_update(hash, &schema->row_size, sizeof(schema->row_size));
+    hash = fnv1a_update(hash, &payload_size, sizeof(payload_size));
     for (uint32_t i = 0; i < schema->num_columns; i++) {
         const TableColumn* column = &schema->columns[i];
+        if (column->offset > payload_size ||
+            column->size > payload_size - column->offset) {
+            continue;
+        }
         size_t name_length = strlen(column->name) + 1u;
         hash = fnv1a_update(hash, column->name, name_length);
         hash = fnv1a_update(hash, &column->type, sizeof(column->type));
@@ -73,13 +79,18 @@ static const unsigned char* const_trailer_bytes(const TinyDBRecord* record) {
     return record->bytes + ROW_SIZE - TINYDB_RECORD_TRAILER_SIZE;
 }
 
+static uint32_t pack_trailer_version(uint32_t payload_size) {
+    return (TINYDB_RECORD_TRAILER_VERSION << TINYDB_RECORD_TRAILER_VERSION_SHIFT) |
+           payload_size;
+}
+
 static void write_integrity_trailer(const TableSchema* schema,
                                     TinyDBRecord* record) {
     if (!schema_has_integrity_trailer(schema)) return;
     TinyDBRecordTrailer trailer;
     trailer.magic = TINYDB_RECORD_TRAILER_MAGIC;
-    trailer.version = TINYDB_RECORD_TRAILER_VERSION;
-    trailer.schema_fingerprint = schema_fingerprint(schema);
+    trailer.version_and_payload_size = pack_trailer_version(schema->row_size);
+    trailer.schema_fingerprint = schema_fingerprint_for_payload(schema, schema->row_size);
     trailer.payload_checksum = fnv1a_update(2166136261u,
                                             record->bytes,
                                             schema->row_size);
@@ -98,17 +109,26 @@ static bool validate_integrity_trailer(const TableSchema* schema,
         /* Legacy fixed-slot records predate trailers and remain readable. */
         return true;
     }
-    if (trailer.version != TINYDB_RECORD_TRAILER_VERSION) {
+
+    uint32_t version = trailer.version_and_payload_size >>
+                       TINYDB_RECORD_TRAILER_VERSION_SHIFT;
+    uint32_t payload_size = trailer.version_and_payload_size &
+                            TINYDB_RECORD_TRAILER_PAYLOAD_MASK;
+    if (version != TINYDB_RECORD_TRAILER_VERSION ||
+        payload_size == 0 ||
+        payload_size > schema->row_size ||
+        payload_size > ROW_SIZE - TINYDB_RECORD_TRAILER_SIZE) {
         set_message(message, message_size, "generic record uses an unsupported row trailer version", NULL);
         return false;
     }
-    if (trailer.schema_fingerprint != schema_fingerprint(schema)) {
+    if (trailer.schema_fingerprint !=
+        schema_fingerprint_for_payload(schema, payload_size)) {
         set_message(message, message_size, "generic record schema fingerprint mismatch", NULL);
         return false;
     }
     uint32_t checksum = fnv1a_update(2166136261u,
                                      record->bytes,
-                                     schema->row_size);
+                                     payload_size);
     if (trailer.payload_checksum != checksum) {
         set_message(message, message_size, "generic record payload checksum mismatch", NULL);
         return false;
