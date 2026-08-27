@@ -13,8 +13,9 @@
 #endif
 
 #define GENERIC_STATS_MAGIC 0x47495331u /* GIS1 */
-#define GENERIC_STATS_VERSION 1u
+#define GENERIC_STATS_VERSION 2u
 #define GENERIC_STATS_SAMPLE_MAX 33u
+#define GENERIC_STATS_MCV_MAX 16u
 #define GENERIC_STATS_FNV_OFFSET 1469598103934665603ULL
 #define GENERIC_STATS_FNV_PRIME 1099511628211ULL
 
@@ -24,12 +25,19 @@ typedef struct {
 } GenericStatsSample;
 
 typedef struct {
+    TinyDBValue value;
+    uint32_t frequency;
+} GenericStatsMcv;
+
+typedef struct {
     uint64_t epoch;
     uint32_t total_count;
     uint32_t distinct_count;
     uint32_t sample_count;
+    uint32_t mcv_count;
     ColumnType column_type;
     GenericStatsSample samples[GENERIC_STATS_SAMPLE_MAX];
+    GenericStatsMcv mcvs[GENERIC_STATS_MCV_MAX];
 } GenericIndexStats;
 
 typedef struct {
@@ -207,6 +215,30 @@ static int compare_text_values(const void* left, const void* right) {
     return strcmp(a->text, b->text);
 }
 
+static bool write_typed_value(FILE* file,
+                              uint64_t* hash,
+                              ColumnType type,
+                              const TinyDBValue* value) {
+    if (type == COL_TYPE_INT) {
+        return write_u32(file, hash, value->int_value);
+    }
+    return write_bytes(file, hash, value->text, sizeof(value->text));
+}
+
+static bool read_typed_value(FILE* file,
+                             uint64_t* hash,
+                             ColumnType type,
+                             TinyDBValue* value) {
+    memset(value, 0, sizeof(*value));
+    value->type = type;
+    if (type == COL_TYPE_INT) {
+        return read_u32(file, hash, &value->int_value);
+    }
+    if (!read_bytes(file, hash, value->text, sizeof(value->text))) return false;
+    value->text[sizeof(value->text) - 1] = '\0';
+    return true;
+}
+
 static bool reserve_values(GenericStatsBuildContext* context,
                            uint32_t needed) {
     if (needed <= context->capacity) return true;
@@ -250,6 +282,44 @@ static bool collect_value(const TableSchema* schema,
     return true;
 }
 
+static bool mcv_better(ColumnType type,
+                       const TinyDBValue* value,
+                       uint32_t frequency,
+                       const GenericStatsMcv* current) {
+    if (frequency != current->frequency) return frequency > current->frequency;
+    return compare_values(type, value, &current->value) < 0;
+}
+
+static void consider_mcv(GenericIndexStats* stats,
+                         const TinyDBValue* value,
+                         uint32_t frequency) {
+    uint32_t position = stats->mcv_count;
+    if (stats->mcv_count < GENERIC_STATS_MCV_MAX) {
+        stats->mcv_count++;
+    } else {
+        position = GENERIC_STATS_MCV_MAX - 1u;
+        if (!mcv_better(stats->column_type,
+                        value,
+                        frequency,
+                        &stats->mcvs[position])) {
+            return;
+        }
+    }
+
+    stats->mcvs[position].value = *value;
+    stats->mcvs[position].frequency = frequency;
+    while (position > 0 &&
+           mcv_better(stats->column_type,
+                      &stats->mcvs[position].value,
+                      stats->mcvs[position].frequency,
+                      &stats->mcvs[position - 1u])) {
+        GenericStatsMcv swap = stats->mcvs[position - 1u];
+        stats->mcvs[position - 1u] = stats->mcvs[position];
+        stats->mcvs[position] = swap;
+        position--;
+    }
+}
+
 static bool write_stats(const TableSchema* schema,
                         const GenericSecondaryIndex* index,
                         uint32_t column_index,
@@ -281,23 +351,26 @@ static bool write_stats(const TableSchema* schema,
               write_u32(file, &hash, stats->total_count) &&
               write_u32(file, &hash, stats->distinct_count) &&
               write_u32(file, &hash, stats->sample_count) &&
+              write_u32(file, &hash, stats->mcv_count) &&
               write_bytes(file, &hash, table_name, sizeof(table_name)) &&
               write_bytes(file, &hash, index_name, sizeof(index_name)) &&
               write_bytes(file, &hash, column_name, sizeof(column_name));
 
     for (uint32_t i = 0; ok && i < stats->sample_count; i++) {
-        ok = write_u32(file, &hash, stats->samples[i].rank);
-        if (stats->column_type == COL_TYPE_INT) {
-            ok = ok && write_u32(file,
-                                 &hash,
-                                 stats->samples[i].value.int_value);
-        } else {
-            ok = ok && write_bytes(file,
-                                   &hash,
-                                   stats->samples[i].value.text,
-                                   sizeof(stats->samples[i].value.text));
-        }
+        ok = write_u32(file, &hash, stats->samples[i].rank) &&
+             write_typed_value(file,
+                               &hash,
+                               stats->column_type,
+                               &stats->samples[i].value);
     }
+    for (uint32_t i = 0; ok && i < stats->mcv_count; i++) {
+        ok = write_typed_value(file,
+                               &hash,
+                               stats->column_type,
+                               &stats->mcvs[i].value) &&
+             write_u32(file, &hash, stats->mcvs[i].frequency);
+    }
+
     ok = ok && write_u64(file, NULL, hash);
     if (ok) ok = sync_file(file);
     if (fclose(file) != 0) ok = false;
@@ -335,6 +408,7 @@ static bool load_stats(Table* table,
               read_u32(file, &hash, &stats->total_count) &&
               read_u32(file, &hash, &stats->distinct_count) &&
               read_u32(file, &hash, &stats->sample_count) &&
+              read_u32(file, &hash, &stats->mcv_count) &&
               read_bytes(file, &hash, table_name, sizeof(table_name)) &&
               read_bytes(file, &hash, index_name, sizeof(index_name)) &&
               read_bytes(file, &hash, column_name, sizeof(column_name));
@@ -353,8 +427,12 @@ static bool load_stats(Table* table,
         (uint64_t)stats->total_count > max_entries ||
         stats->distinct_count > stats->total_count ||
         stats->sample_count > GENERIC_STATS_SAMPLE_MAX ||
-        (stats->total_count == 0 && stats->sample_count != 0) ||
-        (stats->total_count > 0 && stats->sample_count == 0) ||
+        stats->mcv_count > GENERIC_STATS_MCV_MAX ||
+        stats->mcv_count > stats->distinct_count ||
+        (stats->total_count == 0 &&
+         (stats->sample_count != 0 || stats->mcv_count != 0)) ||
+        (stats->total_count > 0 &&
+         (stats->sample_count == 0 || stats->mcv_count == 0)) ||
         !ci_equal(table_name, schema->name) ||
         !ci_equal(index_name, index->name) ||
         !ci_equal(column_name, schema->columns[column_index].name)) {
@@ -365,18 +443,11 @@ static bool load_stats(Table* table,
     stats->column_type = (ColumnType)stored_column_type;
     for (uint32_t i = 0; ok && i < stats->sample_count; i++) {
         GenericStatsSample* sample = &stats->samples[i];
-        memset(sample, 0, sizeof(*sample));
-        sample->value.type = stats->column_type;
-        ok = read_u32(file, &hash, &sample->rank);
-        if (stats->column_type == COL_TYPE_INT) {
-            ok = ok && read_u32(file, &hash, &sample->value.int_value);
-        } else {
-            ok = ok && read_bytes(file,
-                                  &hash,
-                                  sample->value.text,
-                                  sizeof(sample->value.text));
-            sample->value.text[sizeof(sample->value.text) - 1] = '\0';
-        }
+        ok = read_u32(file, &hash, &sample->rank) &&
+             read_typed_value(file,
+                              &hash,
+                              stats->column_type,
+                              &sample->value);
         if (ok && sample->rank >= stats->total_count) ok = false;
         if (ok && i > 0) {
             if (sample->rank <= stats->samples[i - 1u].rank ||
@@ -384,6 +455,44 @@ static bool load_stats(Table* table,
                                &stats->samples[i - 1u].value,
                                &sample->value) > 0) {
                 ok = false;
+            }
+        }
+    }
+
+    uint64_t mcv_rows = 0;
+    for (uint32_t i = 0; ok && i < stats->mcv_count; i++) {
+        GenericStatsMcv* mcv = &stats->mcvs[i];
+        ok = read_typed_value(file,
+                              &hash,
+                              stats->column_type,
+                              &mcv->value) &&
+             read_u32(file, &hash, &mcv->frequency);
+        if (!ok || mcv->frequency == 0 || mcv->frequency > stats->total_count) {
+            ok = false;
+            break;
+        }
+        mcv_rows += mcv->frequency;
+        if (mcv_rows > stats->total_count) {
+            ok = false;
+            break;
+        }
+        if (i > 0) {
+            GenericStatsMcv* previous = &stats->mcvs[i - 1u];
+            if (mcv->frequency > previous->frequency ||
+                (mcv->frequency == previous->frequency &&
+                 compare_values(stats->column_type,
+                                &previous->value,
+                                &mcv->value) >= 0)) {
+                ok = false;
+                break;
+            }
+        }
+        for (uint32_t j = 0; j < i; j++) {
+            if (compare_values(stats->column_type,
+                               &stats->mcvs[j].value,
+                               &mcv->value) == 0) {
+                ok = false;
+                break;
             }
         }
     }
@@ -424,13 +533,20 @@ static bool build_stats(Table* table,
     stats->column_type = type;
     stats->total_count = context.count;
     if (context.count > 0) {
-        stats->distinct_count = 1;
-        for (uint32_t i = 1; i < context.count; i++) {
-            if (compare_values(type,
-                               &context.values[i - 1u],
-                               &context.values[i]) != 0) {
-                stats->distinct_count++;
+        uint32_t run_start = 0;
+        while (run_start < context.count) {
+            uint32_t run_end = run_start + 1u;
+            while (run_end < context.count &&
+                   compare_values(type,
+                                  &context.values[run_start],
+                                  &context.values[run_end]) == 0) {
+                run_end++;
             }
+            stats->distinct_count++;
+            consider_mcv(stats,
+                         &context.values[run_start],
+                         run_end - run_start);
+            run_start = run_end;
         }
 
         stats->sample_count = context.count < GENERIC_STATS_SAMPLE_MAX
@@ -494,9 +610,22 @@ static uint32_t estimate_equal(const GenericIndexStats* stats,
                        &stats->samples[stats->sample_count - 1u].value) > 0) {
         return 0;
     }
+
+    uint32_t mcv_rows = 0;
+    for (uint32_t i = 0; i < stats->mcv_count; i++) {
+        if (compare_values(stats->column_type,
+                           value,
+                           &stats->mcvs[i].value) == 0) {
+            return stats->mcvs[i].frequency;
+        }
+        mcv_rows += stats->mcvs[i].frequency;
+    }
+
+    uint32_t remaining_distinct = stats->distinct_count - stats->mcv_count;
+    uint32_t remaining_rows = stats->total_count - mcv_rows;
+    if (remaining_distinct == 0 || remaining_rows == 0) return 0;
     uint32_t average =
-        (stats->total_count + stats->distinct_count - 1u) /
-        stats->distinct_count;
+        (remaining_rows + remaining_distinct - 1u) / remaining_distinct;
     return average == 0 ? 1u : average;
 }
 
@@ -700,7 +829,9 @@ bool tinydb_generic_index_estimate_candidates(
                          &stats)) {
             estimate->candidate_count = estimate_predicate(&stats, predicate);
             estimate->total_count = stats.total_count;
-            set_message(message, message_size, "ok (persisted generic index statistics)");
+            set_message(message,
+                        message_size,
+                        "ok (persisted generic index statistics with MCV)");
             return true;
         }
     }
@@ -752,7 +883,9 @@ bool tinydb_generic_index_estimate_conjunctive_candidates(
                                  &candidate_count)) {
             estimate->candidate_count = candidate_count;
             estimate->total_count = stats.total_count;
-            set_message(message, message_size, "ok (persisted generic index statistics)");
+            set_message(message,
+                        message_size,
+                        "ok (persisted generic index statistics with MCV)");
             return true;
         }
     }
