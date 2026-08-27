@@ -73,15 +73,36 @@ static bool consume_ci_word(const char** input, const char* word) {
     return true;
 }
 
-static bool extract_explain_analyze_query(const char* sql, const char** query) {
+static bool extract_explain_query(const char* sql,
+                                  bool* analyze,
+                                  const char** query) {
     const char* current = sql;
-    if (!consume_ci_word(&current, "explain") ||
-        !consume_ci_word(&current, "analyze")) {
-        return false;
-    }
+    if (!consume_ci_word(&current, "explain")) return false;
+
+    *analyze = consume_ci_word(&current, "analyze");
     while (isspace((unsigned char)*current)) current++;
     *query = current;
     return true;
+}
+
+static TinyDBSqlStatus map_generic_result(TinyDBSqlResult* output,
+                                          TinyDBGenericSqlStatus generic_status,
+                                          const TinyDBGenericSqlResult* generic_result) {
+    output->statement_type = generic_result->statement_type;
+    output->statement_type_valid = generic_result->statement_type_valid;
+    output->execute_result = generic_result->execute_result;
+    output->executed = generic_result->executed;
+    set_result_message(output, generic_result->message);
+
+    if (generic_status == TINYDB_GENERIC_SQL_SUCCESS) {
+        output->status = TINYDB_SQL_SUCCESS;
+    } else if (generic_status == TINYDB_GENERIC_SQL_SYNTAX_ERROR) {
+        output->prepare_result = PREPARE_SYNTAX_ERROR;
+        output->status = TINYDB_SQL_SYNTAX_ERROR;
+    } else if (generic_status == TINYDB_GENERIC_SQL_EXECUTE_ERROR) {
+        output->status = TINYDB_SQL_EXECUTE_ERROR;
+    }
+    return output->status;
 }
 
 static TinyDBSqlStatus profile_cross_root_join(TinyDB* database,
@@ -135,6 +156,59 @@ static TinyDBSqlStatus profile_cross_root_join(TinyDB* database,
 
     result->status = TINYDB_SQL_SUCCESS;
     return result->status;
+}
+
+static TinyDBSqlStatus execute_generic_explain(TinyDB* database,
+                                                const char* query,
+                                                bool analyze,
+                                                const TinyDBGenericSelectPlan* plan,
+                                                TinyDBSqlResult* result) {
+    result->statement_type = STATEMENT_SELECT;
+    result->statement_type_valid = true;
+    result->execute_result = EXECUTE_SUCCESS;
+
+    if (!analyze) {
+        tinydb_generic_sql_print_plan(plan);
+        result->executed = true;
+        result->status = TINYDB_SQL_SUCCESS;
+        return result->status;
+    }
+
+    Table* table = database->table;
+    uint32_t hits_before = table->pager->cache_hits;
+    uint32_t misses_before = table->pager->cache_misses;
+    uint32_t evictions_before = table->pager->evictions;
+
+    memset(&result->profile, 0, sizeof(result->profile));
+    result->has_profile = true;
+    result->profile.plan_result = EXECUTE_SUCCESS;
+
+    printf("QUERY PLAN\n");
+    tinydb_generic_sql_print_plan(plan);
+    printf("ACTUAL RESULT\n");
+
+    TinyDBGenericSqlResult generic_result;
+    clock_t started = clock();
+    TinyDBGenericSqlStatus generic_status = tinydb_generic_sql_try_execute(
+        table, query, &generic_result);
+    clock_t finished = clock();
+
+    result->profile.execution_time_ms =
+        1000.0 * (double)(finished - started) / (double)CLOCKS_PER_SEC;
+    result->profile.cache_hits = table->pager->cache_hits - hits_before;
+    result->profile.cache_misses = table->pager->cache_misses - misses_before;
+    result->profile.evictions = table->pager->evictions - evictions_before;
+    result->profile.page_accesses =
+        result->profile.cache_hits + result->profile.cache_misses;
+    result->profile.execute_result = generic_result.execute_result;
+
+    TinyDBSqlStatus mapped = map_generic_result(result,
+                                                generic_status,
+                                                &generic_result);
+    if (mapped == TINYDB_SQL_SUCCESS) {
+        result->executed = true;
+    }
+    return mapped;
 }
 
 static TinyDBSqlStatus execute_explain_analyze(TinyDB* database,
@@ -292,30 +366,39 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
         return output->status;
     }
 
+    bool explain_analyze = false;
     const char* explain_query = NULL;
-    if (extract_explain_analyze_query(sql, &explain_query)) {
-        return execute_explain_analyze(database, explain_query, output);
+    if (extract_explain_query(sql, &explain_analyze, &explain_query)) {
+        TinyDBGenericSelectPlan generic_plan;
+        TinyDBGenericSqlResult generic_plan_result;
+        TinyDBGenericSqlStatus generic_plan_status =
+            tinydb_generic_sql_build_select_plan(database->table,
+                                                 explain_query,
+                                                 &generic_plan,
+                                                 &generic_plan_result);
+        if (generic_plan_status != TINYDB_GENERIC_SQL_NOT_APPLICABLE) {
+            if (generic_plan_status != TINYDB_GENERIC_SQL_SUCCESS) {
+                return map_generic_result(output,
+                                          generic_plan_status,
+                                          &generic_plan_result);
+            }
+            return execute_generic_explain(database,
+                                           explain_query,
+                                           explain_analyze,
+                                           &generic_plan,
+                                           output);
+        }
+
+        if (explain_analyze) {
+            return execute_explain_analyze(database, explain_query, output);
+        }
     }
 
     TinyDBGenericSqlResult generic_result;
     TinyDBGenericSqlStatus generic_status = tinydb_generic_sql_try_execute(
         database->table, sql, &generic_result);
     if (generic_status != TINYDB_GENERIC_SQL_NOT_APPLICABLE) {
-        output->statement_type = generic_result.statement_type;
-        output->statement_type_valid = generic_result.statement_type_valid;
-        output->execute_result = generic_result.execute_result;
-        output->executed = generic_result.executed;
-        set_result_message(output, generic_result.message);
-
-        if (generic_status == TINYDB_GENERIC_SQL_SUCCESS) {
-            output->status = TINYDB_SQL_SUCCESS;
-        } else if (generic_status == TINYDB_GENERIC_SQL_SYNTAX_ERROR) {
-            output->prepare_result = PREPARE_SYNTAX_ERROR;
-            output->status = TINYDB_SQL_SYNTAX_ERROR;
-        } else {
-            output->status = TINYDB_SQL_EXECUTE_ERROR;
-        }
-        return output->status;
+        return map_generic_result(output, generic_status, &generic_result);
     }
 
     Statement statement;
