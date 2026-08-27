@@ -18,6 +18,7 @@ set(TINYDB_CORE_SOURCES
     src/diagnostics.c
     src/engine.c
     src/generic_range_mutation_sql.c
+    src/generic_range_select_sql.c
     src/generic_sql.c
     src/join_plan.c
     src/multitable.c
@@ -28,13 +29,19 @@ set(TINYDB_CORE_SOURCES
     src/vm.c
 )
 
-# Keep the existing generic executor intact as the fallback implementation.
-# The range-mutation front-end exports the public symbol and delegates every
-# non-range statement to this renamed base entry point.
+# Keep the existing generic executor intact as the base implementation. The
+# range-mutation layer delegates all non-range mutation statements to it, and
+# the range-SELECT layer sits in front of both so equality SELECTs still reach
+# the original primary-key fast path.
 set_source_files_properties(
     src/generic_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_base"
+)
+set_source_files_properties(
+    src/generic_range_mutation_sql.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_mutations"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
