@@ -7,6 +7,7 @@
 #define TINYDB_GENERIC_SQL_MESSAGE_MAX 256
 #define TINYDB_GENERIC_PLAN_TEXT_MAX 256
 #define TINYDB_GENERIC_PLAN_OPERATOR_MAX 3
+#define TINYDB_GENERIC_PLAN_FILTER_EXPRESSION_MAX 1024
 
 typedef enum {
     TINYDB_GENERIC_SQL_NOT_APPLICABLE = 0,
@@ -31,6 +32,7 @@ typedef struct {
     char filter_column[MAX_NAME_SIZE];
     char filter_operator[TINYDB_GENERIC_PLAN_OPERATOR_MAX];
     char filter_value[TINYDB_GENERIC_PLAN_TEXT_MAX];
+    char filter_expression[TINYDB_GENERIC_PLAN_FILTER_EXPRESSION_MAX];
     char index_name[MAX_NAME_SIZE];
 } TinyDBGenericSelectPlan;
 
