@@ -70,6 +70,7 @@ set(TINYDB_CORE_SOURCES
     src/profile.c
     src/record.c
     src/record_payload.c
+    src/slotted_leaf_v2.c
     src/table.c
     src/varchar_width_parser.c
     src/vm.c
@@ -266,3 +267,6 @@ target_link_libraries(tinydb_record_payload_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_leaf_value_probe tests/leaf_value_probe.c)
 target_link_libraries(tinydb_leaf_value_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_slotted_leaf_v2_probe tests/slotted_leaf_v2_probe.c)
+target_link_libraries(tinydb_slotted_leaf_v2_probe PRIVATE tinydb_core)
