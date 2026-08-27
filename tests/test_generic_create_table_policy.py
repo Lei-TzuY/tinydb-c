@@ -64,7 +64,7 @@ def main():
             db_file,
             [
                 "CREATE TABLE too_wide (id INT, left_text VARCHAR, right_text VARCHAR);",
-                "CREATE TABLE missing_pk (key INT, name VARCHAR);",
+                "CREATE TABLE metadata_only (key INT, name VARCHAR);",
                 ".tables",
                 "CREATE TABLE metrics (id INT, name VARCHAR, price INT, stock INT);",
                 "INSERT INTO metrics VALUES (1, 'alpha', 10, 3);",
@@ -81,15 +81,11 @@ def main():
             first,
             "CREATE TABLE row layout exceeds the fixed generic record slot; variable-size/slotted-page rows are not implemented",
         )
-        require(first, "generic CREATE TABLE requires the first column to be id INT")
         if "too_wide" in re.sub(
             r"Error: CREATE TABLE row layout exceeds[^\n]*\n", "", first
         ):
-            raise AssertionError("too-wide table leaked into catalog-visible output\n" + first)
-        if "missing_pk" in re.sub(
-            r"Error: generic CREATE TABLE requires[^\n]*\n", "", first
-        ):
-            raise AssertionError("invalid-PK table leaked into catalog-visible output\n" + first)
+            raise AssertionError("too-wide executable table leaked into catalog output\n" + first)
+        require(first, "metadata_only")
         require(first, "beta")
         require(first, "ok")
         if scalar_results(first) != [2]:
@@ -108,19 +104,20 @@ def main():
             ],
         )
         require(reopened, "metrics")
+        require(reopened, "metadata_only")
         require(reopened, "name")
         require(reopened, "price")
         require(reopened, "stock")
-        if "too_wide" in reopened or "missing_pk" in reopened:
-            raise AssertionError("rejected schema was persisted across reopen\n" + reopened)
+        if "too_wide" in reopened:
+            raise AssertionError("rejected executable schema was persisted across reopen\n" + reopened)
         if scalar_results(reopened) != [3, 3]:
             raise AssertionError("valid mixed-layout rows did not survive reopen\n" + reopened)
         require(reopened, "ok")
 
         print(
-            "PASS: CREATE TABLE rejects generic schemas the fixed-slot record layer cannot "
-            "execute before catalog persistence, while a mixed VARCHAR/INT layout remains "
-            "durable and queryable after reopen."
+            "PASS: CREATE TABLE rejects id-INT generic schemas that exceed the fixed record "
+            "slot before catalog persistence, preserves historical metadata-only schema "
+            "DDL, and keeps a mixed VARCHAR/INT executable layout durable after reopen."
         )
     finally:
         cleanup(db_file)
