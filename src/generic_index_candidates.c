@@ -495,6 +495,10 @@ static void predicate_bounds(const CandidateSnapshot* snapshot,
         case TINYDB_GENERIC_COMPARE_LTE:
             *end = upper_bound(snapshot, &predicate->value);
             break;
+        case TINYDB_GENERIC_COMPARE_LIKE:
+            *start = 0;
+            *end = 0;
+            break;
     }
 }
 
@@ -509,13 +513,14 @@ bool tinydb_generic_index_collect_candidates(
     if (candidates != NULL) memset(candidates, 0, sizeof(*candidates));
     if (table == NULL || schema == NULL || index == NULL ||
         predicate == NULL || candidates == NULL ||
+        predicate->op == TINYDB_GENERIC_COMPARE_LIKE ||
         predicate->column_index == 0 ||
         predicate->column_index >= schema->num_columns ||
         !index->enabled || index->num_columns != 1 ||
         !ci_equal(index->table_name, schema->name) ||
         !ci_equal(index->column_name,
                   schema->columns[predicate->column_index].name)) {
-        set_message(message, message_size, "invalid generic index candidate request");
+        set_message(message, message_size, "invalid ordered generic index candidate request");
         return false;
     }
 
