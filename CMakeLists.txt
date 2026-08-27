@@ -14,6 +14,7 @@ endif()
 
 set(TINYDB_CORE_SOURCES
     src/compiler.c
+    src/diagnostics.c
     src/engine.c
     src/multitable.c
     src/pager.c
