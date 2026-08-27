@@ -17,7 +17,6 @@ set(TINYDB_CORE_SOURCES
     src/compiler.c
     src/diagnostics.c
     src/engine.c
-    src/generic_mutation_sql.c
     src/generic_sql.c
     src/join_plan.c
     src/multitable.c
@@ -26,14 +25,6 @@ set(TINYDB_CORE_SOURCES
     src/record.c
     src/table.c
     src/vm.c
-)
-
-# Keep the established generic executor available as a delegate while a thin
-# wrapper extends UPDATE/DELETE with schema-aware non-primary predicates.
-set_source_files_properties(
-    src/generic_sql.c
-    PROPERTIES COMPILE_DEFINITIONS
-               "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_legacy"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
