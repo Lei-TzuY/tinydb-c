@@ -3,6 +3,7 @@
 #include "leaf_format.h"
 #include "leaf_page_access.h"
 #include "record_payload.h"
+#include "record_payload_nonroot_split.h"
 #include "record_payload_root_split.h"
 #include "row_envelope.h"
 #include "slotted_leaf_v2.h"
@@ -84,19 +85,20 @@ static bool payload_insert_preserves_topology(Table* table,
         /* A root leaf owns the whole key space and has no parent separator. */
         return previous_page_num == 0u && next_page_num == 0u;
     }
-
     if (count == 0u) return false;
 
     uint32_t last_key = 0u;
     if (!tinydb_leaf_page_key_at(page,
                                  PAGE_SIZE,
                                  count - 1u,
-                                 &last_key) ||
-        key >= last_key) {
-        /* A non-root child maximum is routing metadata. Separator propagation
-         * for payload-native non-root inserts is intentionally a later seam. */
+                                 &last_key)) {
         return false;
     }
+
+    /* A global tail leaf is the rightmost child on its ancestor route and has
+     * no separator encoding its maximum, so its maximum may grow in place.
+     * Non-tail children still have to preserve their existing upper bound. */
+    if (next_page_num != 0u && key >= last_key) return false;
 
     if (previous_page_num == 0u) return true;
     if (previous_page_num == page_num ||
@@ -214,7 +216,7 @@ bool tinydb_record_payload_insert(Table* table,
         end_root_scope(table, previous_root);
         set_message(message,
                     message_size,
-                    "payload-native INSERT is limited to a topology-neutral compact V2 leaf and cannot change parent separators or sibling key boundaries");
+                    "payload-native INSERT cannot cross an existing sibling/separator key boundary");
         return false;
     }
 
@@ -224,8 +226,8 @@ bool tinydb_record_payload_insert(Table* table,
         free(cursor);
         end_root_scope(table, previous_root);
 
+        bool applicable = false;
         if (root_leaf) {
-            bool applicable = false;
             if (tinydb_record_payload_try_root_split(table,
                                                      schema,
                                                      key,
@@ -236,12 +238,25 @@ bool tinydb_record_payload_insert(Table* table,
                                                      message_size)) {
                 return true;
             }
-            if (applicable) return false;
+        } else {
+            if (tinydb_record_payload_try_nonroot_split(table,
+                                                        schema,
+                                                        key,
+                                                        envelope,
+                                                        envelope_length,
+                                                        &applicable,
+                                                        message,
+                                                        message_size)) {
+                return true;
+            }
         }
+        if (applicable) return false;
 
         set_message(message,
                     message_size,
-                    "payload-native INSERT requires existing non-root V2 leaf space; non-root split propagation is not implemented yet");
+                    root_leaf
+                        ? "payload-native root overflow was not applicable to the current V2 topology"
+                        : "payload-native non-root overflow was not applicable to the current V2 topology");
         return false;
     }
 
