@@ -2,6 +2,7 @@
 #define RECORD_PAYLOAD_ROOT_INTERNAL_SPLIT_H
 
 #include "record.h"
+#include "slotted_leaf_v2_split.h"
 
 #include <stdbool.h>
 #include <stddef.h>
