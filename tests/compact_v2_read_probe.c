@@ -57,6 +57,14 @@ static bool expect_item(Table* table,
            values[2].int_value == price;
 }
 
+static bool expect_original_item(Table* table,
+                                 TableSchema* schema,
+                                 uint32_t id) {
+    char name[64];
+    snprintf(name, sizeof(name), "item-%u", id);
+    return expect_item(table, schema, id, name, id * 10u);
+}
+
 static bool item_absent(Table* table, TableSchema* schema, uint32_t id) {
     TinyDBRecord record;
     return !tinydb_record_find(table, schema, id, &record);
@@ -173,6 +181,62 @@ static bool compact_row_metadata(Table* table,
     free(cursor);
     table->root_page_num = previous_root;
     return ok;
+}
+
+static bool v2_leaf_delete_keys(Table* table,
+                                TableSchema* schema,
+                                uint32_t probe_key,
+                                uint32_t* max_key,
+                                uint32_t* rollback_key) {
+    if (table == NULL || schema == NULL || max_key == NULL ||
+        rollback_key == NULL) {
+        return false;
+    }
+
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+    Cursor* cursor = tinydb_leaf_read_find(table, probe_key);
+    if (cursor == NULL || cursor->page_num == INVALID_PAGE_NUM ||
+        cursor->page_num >= table->pager->num_pages) {
+        free(cursor);
+        table->root_page_num = previous_root;
+        return false;
+    }
+
+    void* page = get_page(table->pager, cursor->page_num);
+    uint32_t count = 0u;
+    bool ok = tinydb_leaf_format_detect_page(page, PAGE_SIZE) ==
+                  TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
+              tinydb_leaf_page_count(page, PAGE_SIZE, &count) && count >= 3u &&
+              tinydb_leaf_page_key_at(page,
+                                      PAGE_SIZE,
+                                      count - 1u,
+                                      max_key);
+
+    uint32_t candidate = 0u;
+    bool candidate_found = false;
+    if (ok) {
+        for (uint32_t i = 0u; i + 1u < count; i++) {
+            uint32_t key = 0u;
+            if (!tinydb_leaf_page_key_at(page, PAGE_SIZE, i, &key)) {
+                ok = false;
+                break;
+            }
+            /* Keys >=5 are untouched seed rows, so their expected payload can
+             * be reconstructed deterministically after rollback/reopen. */
+            if (key >= 5u && key != *max_key) {
+                candidate = key;
+                candidate_found = true;
+                break;
+            }
+        }
+    }
+
+    free(cursor);
+    table->root_page_num = previous_root;
+    if (!ok || !candidate_found || *max_key < 5u) return false;
+    *rollback_key = candidate;
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -294,27 +358,56 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Structural cases that require another leaf format or topology change
-     * stay fail-closed. id=25 targets the untouched fixed right edge and would
-     * need the legacy structural path; mixed-tree DELETE is still disabled. */
-    if (!exec_fails(db, "INSERT INTO items VALUES (25, 'blocked', 250);") ||
-        !exec_fails(db, "DELETE FROM items WHERE id = 3;") ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 24u ||
-        !expect_item(table, schema, 3u, "item-3", 30u)) {
-        fprintf(stderr, "mixed tree unexpectedly allowed unsafe structural mutation\n");
+    uint32_t v2_max_key = 0u;
+    uint32_t rollback_delete_key = 0u;
+    if (!v2_leaf_delete_keys(table,
+                             schema,
+                             1u,
+                             &v2_max_key,
+                             &rollback_delete_key)) {
+        fprintf(stderr, "unable to derive safe/unsafe V2 delete keys\n");
         tinydb_close(db);
         return 1;
     }
 
-    /* Both V2 payload UPDATE and V2 non-split INSERT participate in the pager
-     * transaction rollback path. id=4 is an existing interior gap in the V2
-     * leaf and must disappear again after rollback. */
+    /* Structural growth at the untouched fixed right edge remains blocked.
+     * In contrast, deleting a non-maximum key from a V2 leaf is topology
+     * neutral and can be committed safely. Removing that V2 leaf's maximum
+     * would change the parent separator, so that case must still fail closed. */
+    char max_delete_sql[96];
+    snprintf(max_delete_sql,
+             sizeof(max_delete_sql),
+             "DELETE FROM items WHERE id = %u;",
+             v2_max_key);
+    if (!exec_fails(db, "INSERT INTO items VALUES (25, 'blocked', 250);") ||
+        !exec_ok(db, "DELETE FROM items WHERE id = 3;") ||
+        !item_absent(table, schema, 3u) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
+        !exec_fails(db, max_delete_sql) ||
+        !expect_original_item(table, schema, v2_max_key) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
+        fprintf(stderr, "slotted V2 topology-neutral/max-key DELETE policy failed\n");
+        tinydb_close(db);
+        return 1;
+    }
+
+    /* V2 UPDATE, INSERT, and topology-neutral DELETE all participate in the
+     * Pager transaction rollback path. id=4 is an existing interior gap; the
+     * dynamically chosen delete key is an untouched non-maximum V2 row. */
+    char rollback_delete_sql[96];
+    snprintf(rollback_delete_sql,
+             sizeof(rollback_delete_sql),
+             "DELETE FROM items WHERE id = %u;",
+             rollback_delete_key);
     if (!exec_ok(db, "BEGIN;") ||
         !exec_ok(db,
                  "UPDATE items SET name = 'rolled-back', price = 999 WHERE id = 1;") ||
         !exec_ok(db, "INSERT INTO items VALUES (4, 'rolled-back-insert', 404);") ||
+        !exec_ok(db, rollback_delete_sql) ||
         !expect_item(table, schema, 1u, "rolled-back", 999u) ||
         !expect_item(table, schema, 4u, "rolled-back-insert", 404u) ||
+        !item_absent(table, schema, rollback_delete_key) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
         !exec_ok(db, "ROLLBACK;") ||
         !expect_item(table,
                      schema,
@@ -322,7 +415,8 @@ int main(int argc, char** argv) {
                      "a-significantly-longer-item-name",
                      222u) ||
         !item_absent(table, schema, 4u) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 24u) {
+        !expect_original_item(table, schema, rollback_delete_key) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
         fprintf(stderr, "compact V2 mutation did not roll back atomically\n");
         tinydb_close(db);
         return 1;
@@ -346,20 +440,23 @@ int main(int argc, char** argv) {
                      "a-significantly-longer-item-name",
                      222u) ||
         !expect_item(table, schema, 2u, "v2-inserted", 202u) ||
+        !item_absent(table, schema, 3u) ||
+        !item_absent(table, schema, 4u) ||
+        !expect_original_item(table, schema, rollback_delete_key) ||
+        !expect_original_item(table, schema, v2_max_key) ||
         !expect_item(table, schema, 12u, "item-12", 120u) ||
         !expect_item(table, schema, 24u, "fixed-updated", 2424u) ||
-        !item_absent(table, schema, 4u) ||
         !compact_row_metadata(table, schema, 0u, NULL) ||
         !compact_row_metadata(table, schema, 1u, NULL) ||
         !compact_row_metadata(table, schema, 2u, NULL) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 24u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "mixed V1/V2 INSERT/UPDATE state did not survive reopen\n");
+        fprintf(stderr, "mixed V1/V2 INSERT/UPDATE/DELETE state did not survive reopen\n");
         tinydb_close(db);
         return 1;
     }
     tinydb_close(db);
     remove(argv[1]);
-    printf("PASS: production compact V2 non-split INSERT supports safe lower-boundary growth, persists and rolls back safely, duplicate/fixed-target/DELETE structural mutations stay fail-closed, existing-row UPDATE still shrinks/grows V2 payloads, mixed V1 updates survive, and integrity/reopen remain valid.\n");
+    printf("PASS: production compact V2 non-split INSERT supports safe lower-boundary growth; UPDATE and topology-neutral non-max DELETE commit, roll back, and reopen safely; max-key/fixed-target/split-requiring structural mutations stay fail-closed; mixed V1 updates and integrity remain valid.\n");
     return 0;
 }
