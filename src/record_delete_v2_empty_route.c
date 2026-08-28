@@ -5,6 +5,7 @@
 #include "record_delete_v2_empty_leaf.h"
 #include "record_delete_v2_internal_borrow.h"
 #include "record_delete_v2_internal_borrow_left.h"
+#include "record_delete_v2_internal_merge_root.h"
 #include "record_delete_v2_root_leaf_collapse.h"
 #include "slotted_leaf_v2.h"
 
@@ -112,6 +113,17 @@ bool tinydb_record_delete(Table* table,
                                                                 message_size);
         if (borrow == TINYDB_INTERNAL_BORROW_SUCCESS) return true;
         if (borrow == TINYDB_INTERNAL_BORROW_FAILURE) return false;
+
+        TinyDBInternalMergeRootResult merge =
+            tinydb_try_delete_v2_internal_merge_root(table,
+                                                     schema,
+                                                     leaf_page_num,
+                                                     leaf_before,
+                                                     id,
+                                                     message,
+                                                     message_size);
+        if (merge == TINYDB_INTERNAL_MERGE_ROOT_SUCCESS) return true;
+        if (merge == TINYDB_INTERNAL_MERGE_ROOT_FAILURE) return false;
 
         return tinydb_delete_v2_empty_leaf(table,
                                            schema,
