@@ -130,13 +130,35 @@ static bool update_fixed_v1(Cursor* cursor,
     return true;
 }
 
+static bool existing_row_is_compact_v2(Cursor* cursor) {
+    void* page = get_page(cursor->table->pager, cursor->page_num);
+    const void* value = NULL;
+    uint32_t stored_length = 0u;
+    if (!tinydb_leaf_page_value_at(page,
+                                   PAGE_SIZE,
+                                   cursor->cell_num,
+                                   &value,
+                                   &stored_length) ||
+        value == NULL || stored_length < TINYDB_ROW_ENVELOPE_V2_HEADER_SIZE) {
+        return false;
+    }
+    const unsigned char* bytes = (const unsigned char*)value;
+    return tinydb_row_envelope_read_u32_le(
+               bytes + TINYDB_ROW_ENVELOPE_MAGIC_OFFSET) ==
+               TINYDB_ROW_ENVELOPE_MAGIC &&
+           tinydb_row_envelope_read_u16_le(
+               bytes + TINYDB_ROW_ENVELOPE_VERSION_OFFSET) ==
+               TINYDB_ROW_ENVELOPE_VERSION_COMPACT_V2;
+}
+
 static bool update_slotted_v2(Cursor* cursor,
                               const TableSchema* schema,
                               uint32_t key,
                               const TinyDBRecordPayload* payload) {
     void* page = get_page(cursor->table->pager, cursor->page_num);
     if (tinydb_leaf_format_detect_page(page, PAGE_SIZE) !=
-        TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+        !existing_row_is_compact_v2(cursor)) {
         return false;
     }
 
@@ -233,7 +255,7 @@ static bool update_existing_mixed(Table* table,
         set_message(message,
                     message_size,
                     format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2
-                        ? "unable to update compact slotted V2 row without splitting the leaf"
+                        ? "unable to update logical leaf value: slotted V2 rows are read-only unless already stored as compact envelope V2 and the replacement fits without splitting"
                         : "unable to update existing logical leaf value");
         return false;
     }
@@ -269,8 +291,9 @@ bool tinydb_record_update(Table* table,
                           char* message,
                           size_t message_size) {
     /* Existing-row UPDATE does not change the B+ tree key set, separators, or
-     * sibling topology. It can therefore update a fixed V1 or slotted V2 leaf
-     * while INSERT/DELETE stay behind the V1-only structural mutation gate. */
+     * sibling topology. Fixed V1 values may always be rewritten in place.
+     * Slotted V2 writes require an already-explicit compact V2 envelope so a
+     * normal UPDATE cannot silently migrate older raw/envelope formats. */
     if (table == NULL || schema == NULL) {
         set_message(message,
                     message_size,
