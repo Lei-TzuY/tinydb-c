@@ -56,7 +56,7 @@ static inline bool tinydb_internal_borrow_leaf_bounds(
     uint32_t* max_key) {
     uint32_t count = 0u;
     if (page == NULL || min_key == NULL || max_key == NULL ||
-        get_node_type(page) != NODE_LEAF ||
+        page[NODE_TYPE_OFFSET] != (unsigned char)NODE_LEAF ||
         !tinydb_leaf_page_count(page, PAGE_SIZE, &count) || count == 0u ||
         !tinydb_leaf_page_key_at(page, PAGE_SIZE, 0u, min_key) ||
         !tinydb_leaf_page_key_at(page, PAGE_SIZE, count - 1u, max_key)) {
