@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "leaf_cursor_read.h"
 #include "leaf_format.h"
 #include "leaf_migration.h"
 #include "leaf_page_access.h"
