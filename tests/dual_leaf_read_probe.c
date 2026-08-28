@@ -5,6 +5,7 @@
 #include "leaf_mutation_policy.h"
 #include "leaf_page_access.h"
 #include "record.h"
+#include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 
 #include <stdio.h>
@@ -154,6 +155,185 @@ static bool migrate_edge_leaves(Table* table, TableSchema* schema) {
               migrate_leaf(table, last_page, schema->row_size);
     table->root_page_num = previous_root;
     return ok;
+}
+
+static bool locate_v2_key(Table* table,
+                          TableSchema* schema,
+                          uint32_t key,
+                          uint32_t* page_num,
+                          uint32_t* cell_num,
+                          const void** value,
+                          uint32_t* value_length) {
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+    Cursor* cursor = tinydb_leaf_read_find(table, key);
+    if (cursor == NULL) {
+        table->root_page_num = previous_root;
+        return false;
+    }
+    void* page = get_page(table->pager, cursor->page_num);
+    bool ok = tinydb_leaf_format_detect_page(page, PAGE_SIZE) ==
+                  TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
+              tinydb_leaf_page_key_at(page,
+                                      PAGE_SIZE,
+                                      cursor->cell_num,
+                                      page_num) &&
+              *page_num == key &&
+              tinydb_leaf_page_value_at(page,
+                                        PAGE_SIZE,
+                                        cursor->cell_num,
+                                        value,
+                                        value_length);
+    if (ok) {
+        *page_num = cursor->page_num;
+        *cell_num = cursor->cell_num;
+    }
+    free(cursor);
+    table->root_page_num = previous_root;
+    return ok;
+}
+
+static bool install_v2_envelope(Table* table, TableSchema* schema) {
+    uint32_t page_num = 0u;
+    uint32_t cell_num = 0u;
+    const void* value = NULL;
+    uint32_t value_length = 0u;
+    if (!locate_v2_key(table,
+                       schema,
+                       1u,
+                       &page_num,
+                       &cell_num,
+                       &value,
+                       &value_length) ||
+        value_length != schema->row_size) {
+        fprintf(stderr, "unable to locate raw V2 row for envelope installation\n");
+        return false;
+    }
+
+    TinyDBRecordPayload payload;
+    memset(&payload, 0, sizeof(payload));
+    payload.length = schema->row_size;
+    memcpy(payload.bytes, value, payload.length);
+
+    unsigned char envelope[ROW_SIZE + TINYDB_ROW_ENVELOPE_HEADER_SIZE];
+    uint32_t envelope_length = 0u;
+    if (!tinydb_row_envelope_encode(schema,
+                                    &payload,
+                                    envelope,
+                                    sizeof(envelope),
+                                    &envelope_length)) {
+        fprintf(stderr, "unable to encode V2 row envelope\n");
+        return false;
+    }
+
+    void* page = get_page(table->pager, page_num);
+    if (!tinydb_slotted_leaf_v2_update(page,
+                                       PAGE_SIZE,
+                                       1u,
+                                       envelope,
+                                       (uint16_t)envelope_length)) {
+        fprintf(stderr, "unable to install V2 row envelope\n");
+        return false;
+    }
+    mark_page_dirty(table->pager, page_num);
+    pager_commit(table->pager);
+
+    return expect_row(table, schema, 1u, 1u, 10u) &&
+           tinydb_record_scan(table, schema, NULL, NULL) == 40u;
+}
+
+static bool expect_envelope_corruption_rejected(Table* table,
+                                                 TableSchema* schema) {
+    uint32_t page_num = 0u;
+    uint32_t cell_num = 0u;
+    const void* value = NULL;
+    uint32_t value_length = 0u;
+    if (!locate_v2_key(table,
+                       schema,
+                       1u,
+                       &page_num,
+                       &cell_num,
+                       &value,
+                       &value_length) ||
+        value_length <= schema->row_size ||
+        value_length > ROW_SIZE + TINYDB_ROW_ENVELOPE_HEADER_SIZE) {
+        fprintf(stderr, "persisted V2 envelope was not found after reopen\n");
+        return false;
+    }
+
+    unsigned char valid[ROW_SIZE + TINYDB_ROW_ENVELOPE_HEADER_SIZE];
+    memcpy(valid, value, value_length);
+    TinyDBRecordPayload payload;
+    if (!tinydb_row_envelope_decode(schema, valid, value_length, &payload)) {
+        fprintf(stderr, "persisted V2 envelope did not decode\n");
+        return false;
+    }
+
+    void* page = get_page(table->pager, page_num);
+    unsigned char corrupt[ROW_SIZE + TINYDB_ROW_ENVELOPE_HEADER_SIZE];
+    memcpy(corrupt, valid, value_length);
+    corrupt[TINYDB_ROW_ENVELOPE_VERSION_OFFSET] ^= 0x7fu;
+    if (!tinydb_slotted_leaf_v2_update(page,
+                                       PAGE_SIZE,
+                                       1u,
+                                       corrupt,
+                                       (uint16_t)value_length)) {
+        return false;
+    }
+    mark_page_dirty(table->pager, page_num);
+    TinyDBRecord record;
+    if (tinydb_record_find(table, schema, 1u, &record) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 0u) {
+        fprintf(stderr, "bad row-envelope version was not rejected\n");
+        return false;
+    }
+
+    page = get_page(table->pager, page_num);
+    memcpy(corrupt, valid, value_length);
+    corrupt[TINYDB_ROW_ENVELOPE_SCHEMA_FINGERPRINT_OFFSET] ^= 0x55u;
+    if (!tinydb_slotted_leaf_v2_update(page,
+                                       PAGE_SIZE,
+                                       1u,
+                                       corrupt,
+                                       (uint16_t)value_length)) {
+        return false;
+    }
+    mark_page_dirty(table->pager, page_num);
+    if (tinydb_record_find(table, schema, 1u, &record) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 0u) {
+        fprintf(stderr, "row-envelope schema mismatch was not rejected\n");
+        return false;
+    }
+
+    page = get_page(table->pager, page_num);
+    memcpy(corrupt, valid, value_length);
+    corrupt[TINYDB_ROW_ENVELOPE_LOGICAL_LENGTH_OFFSET] ^= 0x01u;
+    if (!tinydb_slotted_leaf_v2_update(page,
+                                       PAGE_SIZE,
+                                       1u,
+                                       corrupt,
+                                       (uint16_t)value_length)) {
+        return false;
+    }
+    mark_page_dirty(table->pager, page_num);
+    if (tinydb_record_find(table, schema, 1u, &record) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 0u) {
+        fprintf(stderr, "row-envelope logical-length mismatch was not rejected\n");
+        return false;
+    }
+
+    page = get_page(table->pager, page_num);
+    if (!tinydb_slotted_leaf_v2_update(page,
+                                       PAGE_SIZE,
+                                       1u,
+                                       payload.bytes,
+                                       (uint16_t)payload.length)) {
+        fprintf(stderr, "unable to restore raw V2 row after envelope corruption tests\n");
+        return false;
+    }
+    mark_page_dirty(table->pager, page_num);
+    return expect_row(table, schema, 1u, 1u, 10u) &&
+           tinydb_record_scan(table, schema, NULL, NULL) == 40u;
 }
 
 static bool expect_v2_length_mismatch_rejected(Table* table,
@@ -380,7 +560,8 @@ int main(int argc, char** argv) {
         !verify_reads(table, schema) ||
         !expect_v2_length_mismatch_rejected(table, schema) ||
         !expect_out_of_range_sibling_rejected(table, schema) ||
-        !expect_mutation_rejected(table, schema)) {
+        !expect_mutation_rejected(table, schema) ||
+        !install_v2_envelope(table, schema)) {
         tinydb_close(db);
         return 7;
     }
@@ -391,6 +572,7 @@ int main(int argc, char** argv) {
     table = tinydb_table(db);
     schema = table_get_schema(table, "metrics");
     if (schema == NULL || !verify_reads(table, schema) ||
+        !expect_envelope_corruption_rejected(table, schema) ||
         !expect_v2_length_mismatch_rejected(table, schema) ||
         !expect_out_of_range_sibling_rejected(table, schema) ||
         !expect_mutation_rejected(table, schema)) {
@@ -399,6 +581,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(db);
-    printf("PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, scan, reopen, reject schema-length-mismatched V2 payloads, and fail closed on out-of-range sibling corruption without extending the pager; legacy mutation remains rejected.\n");
+    printf("PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, scan, reopen, accept a versioned schema-bound V2 row envelope, reject corrupt envelope version/schema/length metadata and raw schema-length mismatches, and fail closed on out-of-range sibling corruption without extending the pager; legacy mutation remains rejected.\n");
     return 0;
 }
