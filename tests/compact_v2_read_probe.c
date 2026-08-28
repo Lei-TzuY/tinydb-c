@@ -237,6 +237,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    /* Internal separators track the maximum key of their left child. The
+     * leftmost V2 leaf therefore may safely accept a new lower boundary key:
+     * its maximum key, parent separator, and sibling topology do not change. */
+    if (!exec_ok(db, "INSERT INTO items VALUES (0, 'lower-boundary', 0);") ||
+        !expect_item(table, schema, 0u, "lower-boundary", 0u) ||
+        !compact_row_metadata(table, schema, 0u, NULL) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 24u) {
+        fprintf(stderr, "safe compact V2 lower-boundary INSERT failed\n");
+        tinydb_close(db);
+        return 1;
+    }
+
     /* Existing-row UPDATE may change the physical V2 payload length because it
      * does not change tree topology. Test both shrink and growth. */
     if (!exec_ok(db, "UPDATE items SET name = 'a', price = 111 WHERE id = 1;") ||
@@ -282,13 +294,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Structural cases that could alter a separator or require another leaf
-     * format/split stay fail-closed. id=0 would become a new left boundary,
-     * while id=25 targets the untouched fixed right edge. DELETE is unchanged. */
-    if (!exec_fails(db, "INSERT INTO items VALUES (0, 'boundary', 0);") ||
-        !exec_fails(db, "INSERT INTO items VALUES (25, 'blocked', 250);") ||
+    /* Structural cases that require another leaf format or topology change
+     * stay fail-closed. id=25 targets the untouched fixed right edge and would
+     * need the legacy structural path; mixed-tree DELETE is still disabled. */
+    if (!exec_fails(db, "INSERT INTO items VALUES (25, 'blocked', 250);") ||
         !exec_fails(db, "DELETE FROM items WHERE id = 3;") ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 24u ||
         !expect_item(table, schema, 3u, "item-3", 30u)) {
         fprintf(stderr, "mixed tree unexpectedly allowed unsafe structural mutation\n");
         tinydb_close(db);
@@ -311,7 +322,7 @@ int main(int argc, char** argv) {
                      "a-significantly-longer-item-name",
                      222u) ||
         !item_absent(table, schema, 4u) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
+        tinydb_record_scan(table, schema, NULL, NULL) != 24u) {
         fprintf(stderr, "compact V2 mutation did not roll back atomically\n");
         tinydb_close(db);
         return 1;
@@ -328,6 +339,7 @@ int main(int argc, char** argv) {
     table = tinydb_table(db);
     schema = find_schema(table, "items");
     if (schema == NULL ||
+        !expect_item(table, schema, 0u, "lower-boundary", 0u) ||
         !expect_item(table,
                      schema,
                      1u,
@@ -337,9 +349,10 @@ int main(int argc, char** argv) {
         !expect_item(table, schema, 12u, "item-12", 120u) ||
         !expect_item(table, schema, 24u, "fixed-updated", 2424u) ||
         !item_absent(table, schema, 4u) ||
+        !compact_row_metadata(table, schema, 0u, NULL) ||
         !compact_row_metadata(table, schema, 1u, NULL) ||
         !compact_row_metadata(table, schema, 2u, NULL) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 24u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
         fprintf(stderr, "mixed V1/V2 INSERT/UPDATE state did not survive reopen\n");
         tinydb_close(db);
@@ -347,6 +360,6 @@ int main(int argc, char** argv) {
     }
     tinydb_close(db);
     remove(argv[1]);
-    printf("PASS: production compact V2 non-split INSERT persists and rolls back safely, duplicate/boundary/fixed-target structural mutations stay fail-closed, existing-row UPDATE still shrinks/grows V2 payloads, mixed V1 updates survive, and integrity/reopen remain valid.\n");
+    printf("PASS: production compact V2 non-split INSERT supports safe lower-boundary growth, persists and rolls back safely, duplicate/fixed-target/DELETE structural mutations stay fail-closed, existing-row UPDATE still shrinks/grows V2 payloads, mixed V1 updates survive, and integrity/reopen remain valid.\n");
     return 0;
 }
