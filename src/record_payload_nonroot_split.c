@@ -47,7 +47,6 @@ static bool previous_boundary_allows(Table* table,
                TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
            tinydb_slotted_leaf_v2_validate(previous_page, PAGE_SIZE) &&
            tinydb_leaf_page_next(previous_page, PAGE_SIZE, &previous_next) &&
-           previous_next == 0u + (previous_next == 0u ? 0u : previous_next) &&
            tinydb_leaf_page_count(previous_page, PAGE_SIZE, &count) &&
            count > 0u &&
            tinydb_leaf_page_key_at(previous_page,
@@ -181,8 +180,14 @@ bool tinydb_record_payload_try_nonroot_split(
         left_before + PARENT_POINTER_OFFSET);
     free(cursor);
     table->root_page_num = previous_root;
-    if (parent_page_num == 0u || parent_page_num >= table->pager->num_pages ||
-        parent_page_num == left_page_num || parent_page_num == next_page_num) {
+    /* Page zero is a valid catalog-stable root and therefore a valid parent
+     * for any non-root child. Zero is only a sentinel for leaf sibling links;
+     * do not reuse that sentinel rule for the parent pointer. In particular,
+     * a tail child under root page zero legitimately has parent == 0 and
+     * next == 0 at the same time. */
+    if (parent_page_num >= table->pager->num_pages ||
+        parent_page_num == left_page_num ||
+        (!is_tail && parent_page_num == next_page_num)) {
         set_message(message,
                     message_size,
                     "payload-native non-root split requires an existing internal parent");
