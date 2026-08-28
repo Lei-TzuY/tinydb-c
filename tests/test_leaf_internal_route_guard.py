@@ -40,10 +40,8 @@ def main():
             "internal route guard must reject self/duplicate-right child identities")
     require(re.search(r"internal_node_child\(node, j\) == child_page", guard) is not None,
             "internal route guard must reject duplicate non-rightmost children")
-    require("child_type != NODE_LEAF && child_type != NODE_INTERNAL" in guard,
-            "internal route guard must validate non-right child node types")
-    require("right_type == NODE_LEAF || right_type == NODE_INTERNAL" in guard,
-            "internal route guard must validate the right child node type")
+    require("get_page(" not in guard,
+            "internal route guard must not fetch children and evict its own node frame")
     require("node_parent(" not in guard,
             "read routing must not reject otherwise valid trees solely on maintenance backlinks")
 
@@ -54,8 +52,12 @@ def main():
     internal_find = source[internal_find_start:internal_find_end]
     guard_pos = internal_find.find("internal_routing_valid(table, page_num, node)")
     route_pos = internal_find.find("internal_node_find_child(node, key)")
-    require(guard_pos >= 0 and route_pos > guard_pos,
-            "mixed-format lookup must validate the internal page before routing")
+    load_pos = internal_find.find("get_page(table->pager, child_page)")
+    require(guard_pos >= 0 and route_pos > guard_pos and load_pos > route_pos,
+            "mixed-format lookup must validate and route before loading only the selected child")
+    require("get_node_type(child) == NODE_LEAF" in internal_find and
+            "get_node_type(child) == NODE_INTERNAL" in internal_find,
+            "the selected child must still be type-checked after it is loaded")
 
     end_start = source.find("Cursor* tinydb_leaf_read_end(")
     end_end = source.find("bool tinydb_leaf_read_retreat_checked", end_start)
@@ -64,13 +66,13 @@ def main():
     end_body = source[end_start:end_end]
     guard_pos = end_body.find("internal_routing_valid(table, page_num, node)")
     right_pos = end_body.find("internal_node_right_child(node)")
-    require(guard_pos >= 0 and right_pos > guard_pos,
-            "rightmost traversal must validate the internal page before following its child")
+    load_pos = end_body.find("get_page(table->pager, page_num)", right_pos)
+    require(guard_pos >= 0 and right_pos > guard_pos and load_pos > right_pos,
+            "rightmost traversal must validate the internal image before loading its selected child")
 
     print(
-        "PASS: mixed-format lookup/rightmost traversal fail closed on corrupt internal "
-        "separators, child identities and node types without treating maintenance backlinks "
-        "as a read-path routing invariant."
+        "PASS: mixed-format lookup/rightmost traversal reject corrupt local internal routing "
+        "metadata without walking every child and invalidating the bounded Pager frame."
     )
 
 
