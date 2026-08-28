@@ -5,15 +5,42 @@
 
 #include <stddef.h>
 
-/* Logical record bytes are schema-sized even though today's B+ tree leaf
- * carrier reserves ROW_SIZE bytes per value. Keeping the logical length
- * explicit is the compatibility seam for a future slotted/variable-size leaf
- * format without changing the schema-aware SQL encoder. */
+/* A logical generic row is no longer sized by the historical users Row slot.
+ * The largest schema currently expressible by TinyDBValue is sixteen VARCHAR
+ * fields (including their terminating NUL); INT fields consume less space.
+ * Physical leaf formats remain free to impose tighter per-value limits. */
+#define TINYDB_RECORD_PAYLOAD_MAX \
+    (MAX_COLUMNS_PER_TABLE * (TINYDB_RECORD_TEXT_MAX + 1u))
+
 typedef struct {
     uint32_t length;
-    unsigned char bytes[ROW_SIZE];
+    unsigned char bytes[TINYDB_RECORD_PAYLOAD_MAX];
 } TinyDBRecordPayload;
 
+/* Schema-aware logical codecs. These operate directly on the sized payload
+ * carrier so generic rows can be wider than the legacy ROW_SIZE value slot.
+ * They do not imply that every physical leaf format can store every payload. */
+bool tinydb_record_payload_schema_supported(const TableSchema* schema,
+                                            char* message,
+                                            size_t message_size);
+
+bool tinydb_record_payload_encode_values(const TableSchema* schema,
+                                         const TinyDBValue* values,
+                                         uint32_t value_count,
+                                         TinyDBRecordPayload* payload,
+                                         char* message,
+                                         size_t message_size);
+
+bool tinydb_record_payload_decode_values(const TableSchema* schema,
+                                         const TinyDBRecordPayload* payload,
+                                         TinyDBValue* values,
+                                         uint32_t value_capacity,
+                                         uint32_t* value_count,
+                                         char* message,
+                                         size_t message_size);
+
+/* Compatibility adapters for callers that still use the historical fixed
+ * TinyDBRecord carrier. They intentionally reject rows wider than ROW_SIZE. */
 bool tinydb_record_payload_from_record(const TableSchema* schema,
                                        const TinyDBRecord* record,
                                        TinyDBRecordPayload* payload,
