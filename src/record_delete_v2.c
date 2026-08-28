@@ -1,10 +1,12 @@
 #include "generic_index_epoch.h"
+#include "internal_child_remove_stage.h"
 #include "internal_max_decrease_cascade_stage.h"
 #include "leaf_cursor_read.h"
 #include "leaf_format.h"
 #include "leaf_page_access.h"
 #include "record.h"
 #include "slotted_leaf_v2.h"
+#include "slotted_leaf_v2_split.h"
 #include "slotted_v2_publish_batch.h"
 
 #include <stdio.h>
@@ -194,6 +196,174 @@ static bool publish_delete_images(Table* table,
     return true;
 }
 
+static bool delete_empty_interior_v2_leaf(
+    Table* table,
+    const TableSchema* schema,
+    uint32_t id,
+    uint32_t leaf_page_num,
+    const unsigned char leaf_before[PAGE_SIZE],
+    char* message,
+    size_t message_size) {
+    TinyDBDeleteAncestorPath ancestors;
+    memset(&ancestors, 0, sizeof(ancestors));
+    if (!collect_ancestor_path(table,
+                               schema,
+                               leaf_page_num,
+                               leaf_before,
+                               &ancestors) ||
+        ancestors.count == 0u) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "slotted V2 delete could not validate the empty-leaf ancestor path");
+        return false;
+    }
+
+    unsigned char* parent_after = ancestors.pages;
+    uint32_t parent_page_num = ancestors.page_nums[0];
+    uint32_t old_key_count = tinydb_parent_stage_read_u32(
+        parent_after + INTERNAL_NODE_NUM_KEYS_OFFSET);
+    uint32_t previous_page_num = 0u;
+    uint32_t next_page_num = 0u;
+    if (!tinydb_leaf_page_prev(leaf_before,
+                               PAGE_SIZE,
+                               &previous_page_num) ||
+        !tinydb_leaf_page_next(leaf_before,
+                               PAGE_SIZE,
+                               &next_page_num) ||
+        previous_page_num == 0u || next_page_num == 0u ||
+        previous_page_num == leaf_page_num ||
+        next_page_num == leaf_page_num ||
+        previous_page_num == next_page_num ||
+        previous_page_num >= table->pager->num_pages ||
+        next_page_num >= table->pager->num_pages) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "slotted V2 delete would empty a non-root leaf outside the supported interior child-removal path and remains fail-closed");
+        return false;
+    }
+
+    uint32_t removed_index = UINT32_MAX;
+    bool parent_max_changed = false;
+    uint32_t new_parent_max = 0u;
+    if (!tinydb_stage_internal_child_remove(parent_after,
+                                             PAGE_SIZE,
+                                             leaf_page_num,
+                                             id,
+                                             &removed_index,
+                                             &parent_max_changed,
+                                             &new_parent_max) ||
+        parent_max_changed || new_parent_max != 0u ||
+        removed_index == 0u || removed_index >= old_key_count ||
+        tinydb_parent_stage_child_at(parent_after, removed_index - 1u) !=
+            previous_page_num ||
+        tinydb_parent_stage_child_at(parent_after, removed_index) !=
+            next_page_num) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "slotted V2 delete would empty a non-root leaf outside the supported interior child-removal path and remains fail-closed");
+        return false;
+    }
+
+    unsigned char previous_after[PAGE_SIZE];
+    unsigned char next_after[PAGE_SIZE];
+    memcpy(previous_after,
+           get_page(table->pager, previous_page_num),
+           PAGE_SIZE);
+    memcpy(next_after,
+           get_page(table->pager, next_page_num),
+           PAGE_SIZE);
+
+    uint32_t previous_next = 0u;
+    uint32_t next_previous = 0u;
+    if (tinydb_leaf_format_detect_page(previous_after, PAGE_SIZE) !=
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+        tinydb_leaf_format_detect_page(next_after, PAGE_SIZE) !=
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+        !tinydb_slotted_leaf_v2_validate(previous_after, PAGE_SIZE) ||
+        !tinydb_slotted_leaf_v2_validate(next_after, PAGE_SIZE) ||
+        read_u32_native(previous_after + PARENT_POINTER_OFFSET) !=
+            parent_page_num ||
+        read_u32_native(next_after + PARENT_POINTER_OFFSET) !=
+            parent_page_num ||
+        !tinydb_leaf_page_next(previous_after,
+                               PAGE_SIZE,
+                               &previous_next) ||
+        !tinydb_leaf_page_prev(next_after,
+                               PAGE_SIZE,
+                               &next_previous) ||
+        previous_next != leaf_page_num || next_previous != leaf_page_num) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "slotted V2 empty-leaf removal found an inconsistent sibling chain");
+        return false;
+    }
+
+    tinydb_slotted_split_write_u32(
+        previous_after + TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET,
+        next_page_num);
+    tinydb_slotted_split_write_u32(
+        next_after + TINYDB_SLOTTED_V2_PREV_LEAF_OFFSET,
+        previous_page_num);
+    if (!tinydb_slotted_leaf_v2_validate(previous_after, PAGE_SIZE) ||
+        !tinydb_slotted_leaf_v2_validate(next_after, PAGE_SIZE) ||
+        !tinydb_parent_stage_validate(parent_after, PAGE_SIZE)) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "slotted V2 empty-leaf removal produced invalid staged topology");
+        return false;
+    }
+
+    if (!tinydb_generic_index_epoch_before_mutation(table, schema)) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "unable to persist generic-index mutation epoch");
+        return false;
+    }
+
+    unsigned char* parent_target =
+        (unsigned char*)get_page(table->pager, parent_page_num);
+    unsigned char* previous_target =
+        (unsigned char*)get_page(table->pager, previous_page_num);
+    unsigned char* next_target =
+        (unsigned char*)get_page(table->pager, next_page_num);
+    TinyDBV2PublishEntry entries[3];
+    entries[0].page_num = parent_page_num;
+    entries[0].target = parent_target;
+    entries[0].staged = parent_after;
+    entries[1].page_num = previous_page_num;
+    entries[1].target = previous_target;
+    entries[1].staged = previous_after;
+    entries[2].page_num = next_page_num;
+    entries[2].target = next_target;
+    entries[2].staged = next_after;
+    if (parent_target == NULL || previous_target == NULL || next_target == NULL ||
+        !tinydb_v2_publish_batch(entries,
+                                 3u,
+                                 TINYDB_V2_PUBLISH_NO_FAIL)) {
+        ancestor_path_free(&ancestors);
+        set_message(message,
+                    message_size,
+                    "unable to atomically publish the slotted V2 empty-leaf removal");
+        return false;
+    }
+
+    mark_page_dirty(table->pager, parent_page_num);
+    mark_page_dirty(table->pager, previous_page_num);
+    mark_page_dirty(table->pager, next_page_num);
+    pager_free_page(table->pager, leaf_page_num);
+    ancestor_path_free(&ancestors);
+
+    if (!table->in_transaction) pager_commit(table->pager);
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    return true;
+}
+
 static bool delete_slotted_v2(Table* table,
                               const TableSchema* schema,
                               uint32_t id,
@@ -252,10 +422,13 @@ static bool delete_slotted_v2(Table* table,
         if (count < 2u) {
             free(cursor);
             end_root_scope(table, previous_root);
-            set_message(message,
-                        message_size,
-                        "slotted V2 delete would empty a non-root leaf and remains fail-closed");
-            return false;
+            return delete_empty_interior_v2_leaf(table,
+                                                 schema,
+                                                 id,
+                                                 leaf_page_num,
+                                                 leaf_before,
+                                                 message,
+                                                 message_size);
         }
 
         uint32_t new_leaf_max = 0u;
