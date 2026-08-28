@@ -1,6 +1,8 @@
 #include "diagnostics.h"
+#include "leaf_page_access.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void set_message(char* message,
@@ -8,6 +10,134 @@ static void set_message(char* message,
                         const char* text) {
     if (message == NULL || message_size == 0) return;
     snprintf(message, message_size, "%s", text != NULL ? text : "");
+}
+
+static bool page_is_free(Pager* pager, uint32_t page_num) {
+    for (uint32_t i = 0u; i < pager->free_page_count; i++) {
+        if (pager->free_pages[i] == page_num) return true;
+    }
+    return false;
+}
+
+typedef struct {
+    Table* table;
+    uint32_t root_page_num;
+    bool* visited;
+} DatabaseTreeWalk;
+
+static bool reciprocal_leaf_link_ok(DatabaseTreeWalk* walk,
+                                    uint32_t page_num,
+                                    uint32_t sibling_page_num,
+                                    bool sibling_is_previous) {
+    if (sibling_page_num == 0u) return true;
+    Pager* pager = walk->table->pager;
+    if (sibling_page_num >= pager->num_pages ||
+        page_is_free(pager, sibling_page_num)) {
+        return false;
+    }
+    void* sibling = get_page(pager, sibling_page_num);
+    if (get_node_type(sibling) != NODE_LEAF) return false;
+    uint32_t reciprocal = 0u;
+    bool readable = sibling_is_previous
+        ? tinydb_leaf_page_next(sibling, PAGE_SIZE, &reciprocal)
+        : tinydb_leaf_page_prev(sibling, PAGE_SIZE, &reciprocal);
+    return readable && reciprocal == page_num;
+}
+
+static bool walk_tree_dual(DatabaseTreeWalk* walk,
+                           uint32_t page_num,
+                           uint32_t expected_parent) {
+    Pager* pager = walk->table->pager;
+    if (page_num >= pager->num_pages || page_is_free(pager, page_num) ||
+        walk->visited[page_num]) {
+        return false;
+    }
+    walk->visited[page_num] = true;
+
+    void* node = get_page(pager, page_num);
+    bool root_page = page_num == walk->root_page_num;
+    if (root_page) {
+        if (!is_node_root(node)) return false;
+    } else {
+        if (is_node_root(node) || *node_parent(node) != expected_parent) {
+            return false;
+        }
+    }
+
+    NodeType type = get_node_type(node);
+    if (type == NODE_LEAF) {
+        uint32_t count = 0u;
+        if (!tinydb_leaf_page_count(node, PAGE_SIZE, &count)) return false;
+        uint32_t prior_key = 0u;
+        for (uint32_t i = 0u; i < count; i++) {
+            uint32_t key = 0u;
+            if (!tinydb_leaf_page_key_at(node, PAGE_SIZE, i, &key) ||
+                (i > 0u && prior_key >= key)) {
+                return false;
+            }
+            prior_key = key;
+        }
+
+        uint32_t previous_leaf = 0u;
+        uint32_t next_leaf = 0u;
+        if (!tinydb_leaf_page_prev(node, PAGE_SIZE, &previous_leaf) ||
+            !tinydb_leaf_page_next(node, PAGE_SIZE, &next_leaf) ||
+            !reciprocal_leaf_link_ok(walk,
+                                     page_num,
+                                     previous_leaf,
+                                     true) ||
+            !reciprocal_leaf_link_ok(walk,
+                                     page_num,
+                                     next_leaf,
+                                     false)) {
+            return false;
+        }
+        return true;
+    }
+
+    if (type != NODE_INTERNAL) return false;
+    uint32_t num_keys = *internal_node_num_keys(node);
+    if (num_keys > INTERNAL_NODE_MAX_KEYS) return false;
+    for (uint32_t i = 1u; i < num_keys; i++) {
+        if (*internal_node_key(node, i - 1u) >= *internal_node_key(node, i)) {
+            return false;
+        }
+    }
+
+    uint32_t child_count = num_keys + 1u;
+    uint32_t* children = (uint32_t*)malloc(sizeof(uint32_t) * child_count);
+    if (children == NULL) return false;
+    for (uint32_t i = 0u; i < child_count; i++) {
+        children[i] = *internal_node_child(node, i);
+    }
+
+    bool ok = true;
+    for (uint32_t i = 0u; i < child_count; i++) {
+        if (!walk_tree_dual(walk, children[i], page_num)) {
+            ok = false;
+            break;
+        }
+    }
+    free(children);
+    return ok;
+}
+
+static bool validate_tree_dual(Table* table, const TableSchema* schema) {
+    if (table == NULL || table->pager == NULL || schema == NULL ||
+        schema->root_page_num >= table->pager->num_pages) {
+        return false;
+    }
+    bool* visited = (bool*)calloc(table->pager->num_pages, sizeof(bool));
+    if (visited == NULL) return false;
+    DatabaseTreeWalk walk;
+    walk.table = table;
+    walk.root_page_num = schema->root_page_num;
+    walk.visited = visited;
+    bool ok = walk_tree_dual(&walk,
+                             schema->root_page_num,
+                             schema->root_page_num);
+    free(visited);
+    return ok;
 }
 
 bool tinydb_check_database(Table* table,
@@ -44,8 +174,7 @@ bool tinydb_check_database(Table* table,
             }
         }
 
-        TinyDBTreeStats tree_stats;
-        if (!tinydb_get_tree_stats(table, schema->name, &tree_stats)) {
+        if (!validate_tree_dual(table, schema)) {
             if (message != NULL && message_size > 0) {
                 snprintf(message,
                          message_size,
