@@ -1,10 +1,10 @@
 #include "leaf_mutation_policy.h"
 
-#include "leaf_cursor_read.h"
 #include "leaf_page_access.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static void set_message(char* message,
                         size_t message_size,
@@ -14,74 +14,149 @@ static void set_message(char* message,
     }
 }
 
+static bool valid_page_num(const Table* table, uint32_t page_num) {
+    return table != NULL && table->pager != NULL &&
+           page_num != INVALID_PAGE_NUM && page_num < table->pager->num_pages;
+}
+
+static bool validate_leaf_for_mutation(Table* table,
+                                       uint32_t page_num,
+                                       char* message,
+                                       size_t message_size) {
+    void* page = get_page(table->pager, page_num);
+    TinyDBLeafPageFormat format = tinydb_leaf_format_detect_page(page, PAGE_SIZE);
+    if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        set_message(message,
+                    message_size,
+                    "slotted leaf V2 pages are read-only until V2 mutation and split recovery are enabled");
+        return false;
+    }
+    if (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        set_message(message,
+                    message_size,
+                    "unknown or corrupt leaf format blocks mutation");
+        return false;
+    }
+
+    uint32_t next_page = 0u;
+    uint32_t prev_page = 0u;
+    if (!tinydb_leaf_page_next(page, PAGE_SIZE, &next_page) ||
+        !tinydb_leaf_page_prev(page, PAGE_SIZE, &prev_page)) {
+        set_message(message,
+                    message_size,
+                    "unable to validate leaf sibling metadata before mutation");
+        return false;
+    }
+    if ((next_page != 0u && !valid_page_num(table, next_page)) ||
+        (prev_page != 0u && !valid_page_num(table, prev_page)) ||
+        next_page == page_num || prev_page == page_num) {
+        set_message(message,
+                    message_size,
+                    "corrupt leaf sibling metadata blocks mutation");
+        return false;
+    }
+    return true;
+}
+
 bool tinydb_leaf_tree_mutation_supported(Table* table,
                                          uint32_t root_page_num,
                                          char* message,
                                          size_t message_size) {
     if (message != NULL && message_size > 0u) message[0] = '\0';
     if (table == NULL || table->pager == NULL ||
-        root_page_num == INVALID_PAGE_NUM) {
+        !valid_page_num(table, root_page_num)) {
         set_message(message,
                     message_size,
                     "table and a valid root are required before leaf mutation");
         return false;
     }
 
-    uint32_t previous_root = table->root_page_num;
-    table->root_page_num = root_page_num;
-    Cursor* cursor = tinydb_leaf_read_start(table);
-    if (cursor == NULL) {
-        table->root_page_num = previous_root;
+    uint32_t page_count = table->pager->num_pages;
+    unsigned char* visited = (unsigned char*)calloc(page_count, 1u);
+    uint32_t* stack = (uint32_t*)malloc(sizeof(uint32_t) * page_count);
+    if (visited == NULL || stack == NULL) {
+        free(visited);
+        free(stack);
         set_message(message,
                     message_size,
-                    "unable to locate the first leaf before mutation");
+                    "unable to allocate mutation-policy traversal state");
         return false;
     }
 
-    uint32_t page_num = cursor->page_num;
-    free(cursor);
+    uint32_t stack_count = 0u;
+    stack[stack_count++] = root_page_num;
+    bool supported = true;
 
-    uint32_t traversed = 0u;
-    const uint32_t traversal_limit = 1000000u;
-    while (true) {
-        if (page_num == INVALID_PAGE_NUM || traversed++ >= traversal_limit) {
-            table->root_page_num = previous_root;
+    while (stack_count > 0u && supported) {
+        uint32_t page_num = stack[--stack_count];
+        if (!valid_page_num(table, page_num) || visited[page_num]) {
             set_message(message,
                         message_size,
-                        "corrupt or cyclic leaf chain blocks mutation");
-            return false;
+                        "corrupt or cyclic B+ tree blocks mutation");
+            supported = false;
+            break;
+        }
+        visited[page_num] = 1u;
+
+        void* node = get_page(table->pager, page_num);
+        NodeType type = get_node_type(node);
+        if (type == NODE_LEAF) {
+            supported = validate_leaf_for_mutation(table,
+                                                   page_num,
+                                                   message,
+                                                   message_size);
+            continue;
+        }
+        if (type != NODE_INTERNAL) {
+            set_message(message,
+                        message_size,
+                        "unknown B+ tree node type blocks mutation");
+            supported = false;
+            break;
         }
 
-        void* page = get_page(table->pager, page_num);
-        TinyDBLeafPageFormat format =
-            tinydb_leaf_format_detect_page(page, PAGE_SIZE);
-        if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
-            table->root_page_num = previous_root;
+        uint32_t key_count = *internal_node_num_keys(node);
+        if (key_count > INTERNAL_NODE_MAX_KEYS) {
             set_message(message,
                         message_size,
-                        "slotted leaf V2 pages are read-only until V2 mutation and split recovery are enabled");
-            return false;
-        }
-        if (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "unknown or corrupt leaf format blocks mutation");
-            return false;
+                        "corrupt internal-node key count blocks mutation");
+            supported = false;
+            break;
         }
 
-        uint32_t next_page = 0u;
-        if (!tinydb_leaf_page_next(page, PAGE_SIZE, &next_page)) {
-            table->root_page_num = previous_root;
+        if (stack_count + key_count + 1u > page_count) {
             set_message(message,
                         message_size,
-                        "unable to validate the leaf chain before mutation");
-            return false;
+                        "B+ tree fanout exceeds mutation-policy traversal capacity");
+            supported = false;
+            break;
         }
-        if (next_page == 0u) break;
-        page_num = next_page;
+
+        for (uint32_t i = 0u; i < key_count; i++) {
+            uint32_t child = *internal_node_child(node, i);
+            if (!valid_page_num(table, child) || child == page_num) {
+                set_message(message,
+                            message_size,
+                            "corrupt internal child pointer blocks mutation");
+                supported = false;
+                break;
+            }
+            stack[stack_count++] = child;
+        }
+        if (!supported) break;
+
+        uint32_t right_child = *internal_node_right_child(node);
+        if (!valid_page_num(table, right_child) || right_child == page_num) {
+            set_message(message,
+                        message_size,
+                        "corrupt internal right-child pointer blocks mutation");
+            supported = false;
+            break;
+        }
+        stack[stack_count++] = right_child;
     }
 
-    table->root_page_num = previous_root;
-    return true;
+    free(stack);
+    free(visited);
+    return supported;
 }
