@@ -16,9 +16,12 @@ static Cursor* make_cursor(Table* table,
     return cursor;
 }
 
+static bool valid_page_number(uint32_t page_num) {
+    return page_num != INVALID_PAGE_NUM;
+}
+
 static Cursor* leaf_find(Table* table, uint32_t page_num, uint32_t key) {
-    if (table == NULL || table->pager == NULL ||
-        page_num >= table->pager->num_pages) {
+    if (table == NULL || table->pager == NULL || !valid_page_number(page_num)) {
         return NULL;
     }
     void* page = get_page(table->pager, page_num);
@@ -36,15 +39,14 @@ static Cursor* leaf_find(Table* table, uint32_t page_num, uint32_t key) {
 }
 
 static Cursor* internal_find(Table* table, uint32_t page_num, uint32_t key) {
-    if (table == NULL || table->pager == NULL ||
-        page_num >= table->pager->num_pages) {
+    if (table == NULL || table->pager == NULL || !valid_page_number(page_num)) {
         return NULL;
     }
     void* node = get_page(table->pager, page_num);
     if (get_node_type(node) != NODE_INTERNAL) return NULL;
 
     uint32_t child_page = *internal_node_find_child(node, key);
-    if (child_page >= table->pager->num_pages) return NULL;
+    if (!valid_page_number(child_page)) return NULL;
     void* child = get_page(table->pager, child_page);
     if (get_node_type(child) == NODE_LEAF) {
         return leaf_find(table, child_page, key);
@@ -57,7 +59,7 @@ static Cursor* internal_find(Table* table, uint32_t page_num, uint32_t key) {
 
 Cursor* table_find(Table* table, uint32_t key) {
     if (table == NULL || table->pager == NULL ||
-        table->root_page_num >= table->pager->num_pages) {
+        !valid_page_number(table->root_page_num)) {
         return NULL;
     }
     void* root = get_page(table->pager, table->root_page_num);
@@ -85,8 +87,7 @@ Cursor* table_start(Table* table) {
 
 void* cursor_value(Cursor* cursor) {
     if (cursor == NULL || cursor->table == NULL ||
-        cursor->table->pager == NULL ||
-        cursor->page_num >= cursor->table->pager->num_pages) {
+        cursor->table->pager == NULL || !valid_page_number(cursor->page_num)) {
         return NULL;
     }
     void* page = get_page(cursor->table->pager, cursor->page_num);
@@ -110,7 +111,7 @@ void cursor_advance(Cursor* cursor) {
     }
 
     while (true) {
-        if (cursor->page_num >= cursor->table->pager->num_pages) {
+        if (!valid_page_number(cursor->page_num)) {
             cursor->end_of_table = true;
             return;
         }
@@ -126,11 +127,7 @@ void cursor_advance(Cursor* cursor) {
 
         uint32_t next_page = 0u;
         if (!tinydb_leaf_page_next(page, PAGE_SIZE, &next_page) ||
-            next_page == 0u) {
-            cursor->end_of_table = true;
-            return;
-        }
-        if (next_page >= cursor->table->pager->num_pages) {
+            next_page == 0u || !valid_page_number(next_page)) {
             cursor->end_of_table = true;
             return;
         }
@@ -141,7 +138,7 @@ void cursor_advance(Cursor* cursor) {
 
 Cursor* table_end(Table* table) {
     if (table == NULL || table->pager == NULL ||
-        table->root_page_num >= table->pager->num_pages) {
+        !valid_page_number(table->root_page_num)) {
         return NULL;
     }
 
@@ -149,7 +146,7 @@ Cursor* table_end(Table* table) {
     void* node = get_page(table->pager, page_num);
     while (get_node_type(node) == NODE_INTERNAL) {
         page_num = *internal_node_right_child(node);
-        if (page_num >= table->pager->num_pages) return NULL;
+        if (!valid_page_number(page_num)) return NULL;
         node = get_page(table->pager, page_num);
     }
     if (get_node_type(node) != NODE_LEAF) return NULL;
@@ -173,18 +170,14 @@ void cursor_retreat(Cursor* cursor) {
     }
 
     while (true) {
-        if (cursor->page_num >= cursor->table->pager->num_pages) {
+        if (!valid_page_number(cursor->page_num)) {
             cursor->end_of_table = true;
             return;
         }
         void* page = get_page(cursor->table->pager, cursor->page_num);
         uint32_t prev_page = 0u;
         if (!tinydb_leaf_page_prev(page, PAGE_SIZE, &prev_page) ||
-            prev_page == 0u) {
-            cursor->end_of_table = true;
-            return;
-        }
-        if (prev_page >= cursor->table->pager->num_pages) {
+            prev_page == 0u || !valid_page_number(prev_page)) {
             cursor->end_of_table = true;
             return;
         }
