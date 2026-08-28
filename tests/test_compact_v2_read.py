@@ -45,12 +45,13 @@ def main():
         output = result.stdout + result.stderr
         if result.returncode != 0:
             raise AssertionError(output)
-        marker = "PASS: production generic lookup/scan reopens a mixed tree containing a compact V2 VARCHAR row"
+        marker = "PASS: production existing-row UPDATE shrinks/grows compact V2 payloads"
         if marker not in output:
-            raise AssertionError(f"missing compact V2 production-read marker\n{output}")
+            raise AssertionError(f"missing compact V2 production-update marker\n{output}")
         print(
-            "PASS: production generic record lookup/scan reads and reopens a mixed "
-            "fixed/slotted tree containing a genuinely variable-length VARCHAR payload"
+            "PASS: production generic UPDATE rewrites variable-length compact V2 "
+            "rows in mixed trees with rollback/reopen durability while keeping "
+            "structural mutation fail-closed"
         )
     finally:
         cleanup(db_path)
