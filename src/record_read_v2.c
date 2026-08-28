@@ -1,10 +1,13 @@
+#include "generic_index_epoch.h"
 #include "leaf_cursor_read.h"
 #include "leaf_format.h"
 #include "leaf_page_access.h"
 #include "record.h"
 #include "record_payload.h"
 #include "row_envelope.h"
+#include "slotted_leaf_v2.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +17,19 @@ static void set_message(char* message,
     if (message != NULL && message_size > 0u) {
         snprintf(message, message_size, "%s", text);
     }
+}
+
+static bool ci_equal(const char* left, const char* right) {
+    if (left == NULL || right == NULL) return false;
+    while (*left != '\0' && *right != '\0') {
+        if (tolower((unsigned char)*left) !=
+            tolower((unsigned char)*right)) {
+            return false;
+        }
+        left++;
+        right++;
+    }
+    return *left == '\0' && *right == '\0';
 }
 
 static void begin_root_scope(Table* table,
@@ -282,6 +298,195 @@ uint32_t tinydb_record_payload_scan_range(Table* table,
     end_root_scope(table, previous_root);
     if (scan_complete != NULL) *scan_complete = complete;
     return complete ? count : 0u;
+}
+
+static bool payload_existing_row_is_compact_v2(Cursor* cursor) {
+    if (cursor == NULL || cursor->table == NULL ||
+        cursor->table->pager == NULL ||
+        cursor->page_num == INVALID_PAGE_NUM ||
+        cursor->page_num >= cursor->table->pager->num_pages) {
+        return false;
+    }
+    void* page = get_page(cursor->table->pager, cursor->page_num);
+    const void* value = NULL;
+    uint32_t stored_length = 0u;
+    if (!tinydb_leaf_page_value_at(page,
+                                   PAGE_SIZE,
+                                   cursor->cell_num,
+                                   &value,
+                                   &stored_length) ||
+        value == NULL || stored_length < TINYDB_ROW_ENVELOPE_V2_HEADER_SIZE) {
+        return false;
+    }
+    const unsigned char* bytes = (const unsigned char*)value;
+    return tinydb_row_envelope_read_u32_le(
+               bytes + TINYDB_ROW_ENVELOPE_MAGIC_OFFSET) ==
+               TINYDB_ROW_ENVELOPE_MAGIC &&
+           tinydb_row_envelope_read_u16_le(
+               bytes + TINYDB_ROW_ENVELOPE_VERSION_OFFSET) ==
+               TINYDB_ROW_ENVELOPE_VERSION_COMPACT_V2;
+}
+
+bool tinydb_record_payload_update(Table* table,
+                                  const TableSchema* schema,
+                                  uint32_t id,
+                                  const TinyDBRecordPayload* payload,
+                                  char* message,
+                                  size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (table == NULL || table->pager == NULL || schema == NULL ||
+        payload == NULL) {
+        set_message(message,
+                    message_size,
+                    "table, schema, and payload are required for payload-native UPDATE");
+        return false;
+    }
+    if (!tinydb_record_payload_schema_supported(schema, message, message_size)) {
+        return false;
+    }
+    if (!ci_equal(schema->columns[0].name, "id")) {
+        set_message(message,
+                    message_size,
+                    "payload-native UPDATE requires the first column to be id INT");
+        return false;
+    }
+    if (ci_equal(schema->name, "users")) {
+        set_message(message,
+                    message_size,
+                    "payload-native UPDATE excludes the legacy users table so its secondary indexes stay synchronized");
+        return false;
+    }
+    if (schema->root_page_num >= table->pager->num_pages ||
+        payload->length != schema->row_size ||
+        payload->length < sizeof(uint32_t)) {
+        set_message(message,
+                    message_size,
+                    "payload length or schema root is invalid for payload-native UPDATE");
+        return false;
+    }
+
+    uint32_t encoded_id = 0u;
+    memcpy(&encoded_id, payload->bytes, sizeof(encoded_id));
+    if (encoded_id != id) {
+        set_message(message,
+                    message_size,
+                    "payload-native UPDATE cannot change the primary-key id");
+        return false;
+    }
+
+    uint32_t previous_root = 0u;
+    begin_root_scope(table, schema, &previous_root);
+    Cursor* cursor = tinydb_leaf_read_find(table, id);
+    if (!cursor_key_equals(cursor, id)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message, message_size, "primary key not found");
+        return false;
+    }
+
+    void* page = get_page(table->pager, cursor->page_num);
+    TinyDBLeafPageFormat format = tinydb_leaf_format_detect_page(page, PAGE_SIZE);
+    bool ready = false;
+    unsigned char envelope[PAGE_SIZE];
+    uint32_t envelope_length = 0u;
+
+    if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        const void* value = NULL;
+        uint32_t stored_length = 0u;
+        ready = payload->length <= ROW_SIZE &&
+                tinydb_leaf_page_is_fixed_v1(page, PAGE_SIZE) &&
+                tinydb_leaf_page_value_at(page,
+                                          PAGE_SIZE,
+                                          cursor->cell_num,
+                                          &value,
+                                          &stored_length) &&
+                value != NULL && stored_length == ROW_SIZE &&
+                payload->length <= stored_length;
+        if (!ready) {
+            set_message(message,
+                        message_size,
+                        "payload-native UPDATE cannot fit this payload in a fixed V1 row slot");
+        }
+    } else if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        TinyDBSlottedLeafV2Slot old_slot;
+        ready = tinydb_slotted_leaf_v2_validate(page, PAGE_SIZE) &&
+                payload_existing_row_is_compact_v2(cursor) &&
+                tinydb_row_envelope_encode_compact_v2(schema,
+                                                       payload,
+                                                       envelope,
+                                                       sizeof(envelope),
+                                                       &envelope_length) &&
+                envelope_length > 0u && envelope_length <= UINT16_MAX &&
+                tinydb_slotted_leaf_v2_find(page,
+                                            PAGE_SIZE,
+                                            id,
+                                            &old_slot,
+                                            NULL) &&
+                envelope_length <=
+                    tinydb_slotted_leaf_v2_free_bytes(page, PAGE_SIZE) +
+                        old_slot.value_length;
+        if (!ready) {
+            set_message(message,
+                        message_size,
+                        "payload-native UPDATE requires an existing compact V2 row whose replacement fits without splitting");
+        }
+    } else {
+        set_message(message,
+                    message_size,
+                    "payload-native UPDATE does not support this leaf format");
+    }
+
+    if (!ready) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        return false;
+    }
+
+    if (!tinydb_generic_index_epoch_before_mutation(table, schema)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "unable to persist generic-index mutation epoch");
+        return false;
+    }
+
+    bool updated = false;
+    if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        const void* value = NULL;
+        uint32_t stored_length = 0u;
+        if (tinydb_leaf_page_value_at(page,
+                                      PAGE_SIZE,
+                                      cursor->cell_num,
+                                      &value,
+                                      &stored_length) &&
+            value != NULL && stored_length == ROW_SIZE) {
+            void* writable = (void*)value;
+            memset(writable, 0, stored_length);
+            memcpy(writable, payload->bytes, payload->length);
+            updated = true;
+        }
+    } else {
+        updated = tinydb_slotted_leaf_v2_update(page,
+                                                PAGE_SIZE,
+                                                id,
+                                                envelope,
+                                                (uint16_t)envelope_length);
+    }
+
+    if (updated) mark_page_dirty(table->pager, cursor->page_num);
+    free(cursor);
+    end_root_scope(table, previous_root);
+    if (!updated) {
+        set_message(message,
+                    message_size,
+                    "payload-native UPDATE failed without publishing a replacement row");
+        return false;
+    }
+
+    if (!table->in_transaction) pager_commit(table->pager);
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    return true;
 }
 
 bool tinydb_record_find(Table* table,
