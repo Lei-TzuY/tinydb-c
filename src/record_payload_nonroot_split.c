@@ -47,6 +47,7 @@ static bool previous_boundary_allows(Table* table,
                TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
            tinydb_slotted_leaf_v2_validate(previous_page, PAGE_SIZE) &&
            tinydb_leaf_page_next(previous_page, PAGE_SIZE, &previous_next) &&
+           previous_next == 0u + (previous_next == 0u ? 0u : previous_next) &&
            tinydb_leaf_page_count(previous_page, PAGE_SIZE, &count) &&
            count > 0u &&
            tinydb_leaf_page_key_at(previous_page,
@@ -334,13 +335,11 @@ bool tinydb_record_payload_try_nonroot_split(
         return false;
     }
 
-    if (!tinydb_generic_index_epoch_before_mutation(table, schema)) {
-        set_message(message,
-                    message_size,
-                    "unable to persist generic-index mutation epoch");
-        return false;
-    }
-
+    /* Claim the page reservation before publishing the durable generic-index
+     * mutation epoch. A reservation mismatch is a pre-mutation failure and
+     * must not advance the epoch or make an otherwise current secondary-index
+     * snapshot look stale. The reservation itself is reversible until the
+     * staged page batch is published. */
     uint32_t original_num_pages = table->pager->num_pages;
     uint32_t original_free_page_count = table->pager->free_page_count;
     uint32_t claimed = get_unused_page_num(table->pager);
@@ -370,6 +369,16 @@ bool tinydb_record_payload_try_nonroot_split(
         set_message(message,
                     message_size,
                     "payload-native V2 split could not acquire publication targets");
+        return false;
+    }
+
+    if (!tinydb_generic_index_epoch_before_mutation(table, schema)) {
+        restore_allocator_reservation(table->pager,
+                                      original_num_pages,
+                                      original_free_page_count);
+        set_message(message,
+                    message_size,
+                    "unable to persist generic-index mutation epoch");
         return false;
     }
 
