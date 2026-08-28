@@ -26,7 +26,7 @@ def cleanup(path):
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = os.path.join(
-        repo_root, "tests", "v2_recursive_internal_underflow_guard_probe.c"
+        repo_root, "tests", "v2_recursive_internal_underflow_guard_current_probe.c"
     )
     core_library = find_core_library(repo_root)
     if core_library is None:
@@ -35,6 +35,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="tinydb-v2-recursive-underflow-") as temp_dir:
         source_cmake = source.replace("\\", "/")
         include_cmake = os.path.join(repo_root, "src").replace("\\", "/")
+        tests_cmake = os.path.join(repo_root, "tests").replace("\\", "/")
         library_cmake = core_library.replace("\\", "/")
         with open(os.path.join(temp_dir, "CMakeLists.txt"), "w", encoding="utf-8") as handle:
             handle.write(
@@ -51,7 +52,7 @@ def main():
                 "add_library(tinydb_core STATIC IMPORTED GLOBAL)\n"
                 f'set_target_properties(tinydb_core PROPERTIES IMPORTED_LOCATION "{library_cmake}")\n'
                 f'add_executable(v2_recursive_internal_underflow_guard_probe "{source_cmake}")\n'
-                f'target_include_directories(v2_recursive_internal_underflow_guard_probe PRIVATE "{include_cmake}")\n'
+                f'target_include_directories(v2_recursive_internal_underflow_guard_probe PRIVATE "{include_cmake}" "{tests_cmake}")\n'
                 "target_link_libraries(v2_recursive_internal_underflow_guard_probe PRIVATE tinydb_core)\n"
             )
 
@@ -107,8 +108,7 @@ def main():
             raise AssertionError(output)
         for marker in (
             "V2_RECURSIVE_INTERNAL_UNDERFLOW_GUARD_OK",
-            "right=yes",
-            "left=yes",
+            "unsupported_right=yes",
             "height4=yes",
             "fail_closed=yes",
             "root_stable=yes",
@@ -124,9 +124,10 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: height-4 V2 DELETE fails closed when merging two minimum leaf-parent "
-        "internals would leave their non-root ancestor with one child; records, "
-        "topology, leaf links, allocator state, and reopen integrity stay unchanged"
+        "PASS: unsupported height-4 V2 DELETE orientation remains fail-closed; "
+        "records, topology, leaf links, allocator state, and reopen integrity "
+        "stay unchanged while the separately covered root-height orientation "
+        "is allowed to contract"
     )
 
 
