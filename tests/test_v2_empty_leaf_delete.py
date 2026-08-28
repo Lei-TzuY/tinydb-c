@@ -106,7 +106,7 @@ def main():
             "rollback=yes",
             "page_reclaim=yes",
             "root_collapse_fail_closed=yes",
-            "edge_fail_closed=yes",
+            "underflow_fail_closed=yes",
             "reopen=yes",
             "integrity=yes",
             "wal=yes",
@@ -118,7 +118,7 @@ def main():
     print(
         "PASS: V2 singleton interior leaf deletion atomically removes the child, "
         "relinks siblings, reclaims the page, rolls back cleanly, persists across "
-        "reopen, and keeps root-collapse/edge removal fail-closed"
+        "reopen, and keeps parent-underflow/root-collapse cases fail-closed"
     )
 
 
