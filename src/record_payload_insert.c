@@ -3,6 +3,7 @@
 #include "leaf_format.h"
 #include "leaf_page_access.h"
 #include "record_payload.h"
+#include "record_payload_root_split.h"
 #include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 
@@ -80,10 +81,7 @@ static bool payload_insert_preserves_topology(Table* table,
     }
 
     if (page_num == schema->root_page_num) {
-        /* A root leaf owns the entire key space. An empty root is the only
-         * topology-neutral way to create the first wide payload row; a
-         * non-empty root leaf may accept any additional key while it remains a
-         * single leaf because there is no parent separator to update. */
+        /* A root leaf owns the whole key space and has no parent separator. */
         return previous_page_num == 0u && next_page_num == 0u;
     }
 
@@ -95,9 +93,8 @@ static bool payload_insert_preserves_topology(Table* table,
                                  count - 1u,
                                  &last_key) ||
         key >= last_key) {
-        /* A non-root child maximum is routing metadata. Keep this first seam
-         * deliberately topology-neutral and leave separator propagation to the
-         * existing split/insert production chain. */
+        /* A non-root child maximum is routing metadata. Separator propagation
+         * for payload-native non-root inserts is intentionally a later seam. */
         return false;
     }
 
@@ -203,13 +200,14 @@ bool tinydb_record_payload_insert(Table* table,
         return false;
     }
 
-    void* page = get_page(table->pager, cursor->page_num);
+    uint32_t target_page_num = cursor->page_num;
+    void* page = get_page(table->pager, target_page_num);
     if (tinydb_leaf_format_detect_page(page, PAGE_SIZE) !=
             TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
         !tinydb_slotted_leaf_v2_validate(page, PAGE_SIZE) ||
         !payload_insert_preserves_topology(table,
                                            schema,
-                                           cursor->page_num,
+                                           target_page_num,
                                            page,
                                            key)) {
         free(cursor);
@@ -220,13 +218,30 @@ bool tinydb_record_payload_insert(Table* table,
         return false;
     }
 
-    if (TINYDB_SLOTTED_V2_SLOT_SIZE + envelope_length >
-        tinydb_slotted_leaf_v2_free_bytes(page, PAGE_SIZE)) {
+    uint32_t required = TINYDB_SLOTTED_V2_SLOT_SIZE + envelope_length;
+    if (required > tinydb_slotted_leaf_v2_free_bytes(page, PAGE_SIZE)) {
+        bool root_leaf = target_page_num == schema->root_page_num;
         free(cursor);
         end_root_scope(table, previous_root);
+
+        if (root_leaf) {
+            bool applicable = false;
+            if (tinydb_record_payload_try_root_split(table,
+                                                     schema,
+                                                     key,
+                                                     envelope,
+                                                     envelope_length,
+                                                     &applicable,
+                                                     message,
+                                                     message_size)) {
+                return true;
+            }
+            if (applicable) return false;
+        }
+
         set_message(message,
                     message_size,
-                    "payload-native INSERT requires existing V2 leaf space and cannot split the leaf yet");
+                    "payload-native INSERT requires existing non-root V2 leaf space; non-root split propagation is not implemented yet");
         return false;
     }
 
@@ -256,7 +271,7 @@ bool tinydb_record_payload_insert(Table* table,
         return false;
     }
 
-    mark_page_dirty(table->pager, cursor->page_num);
+    mark_page_dirty(table->pager, target_page_num);
     free(cursor);
     end_root_scope(table, previous_root);
     if (!table->in_transaction) pager_commit(table->pager);
