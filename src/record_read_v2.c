@@ -1,3 +1,4 @@
+#include "leaf_cursor_read.h"
 #include "leaf_page_access.h"
 #include "leaf_value.h"
 #include "record.h"
@@ -20,7 +21,7 @@ static void end_root_scope(Table* table, uint32_t previous_root) {
 static bool cursor_key_equals(Cursor* cursor, uint32_t key) {
     if (cursor == NULL || cursor->table == NULL ||
         cursor->table->pager == NULL ||
-        cursor->page_num >= cursor->table->pager->num_pages) {
+        cursor->page_num == INVALID_PAGE_NUM) {
         return false;
     }
     void* page = get_page(cursor->table->pager, cursor->page_num);
@@ -65,7 +66,7 @@ bool tinydb_record_find(Table* table,
 
     uint32_t previous_root = 0u;
     begin_root_scope(table, schema, &previous_root);
-    Cursor* cursor = table_find(table, id);
+    Cursor* cursor = tinydb_leaf_read_find(table, id);
     bool found = cursor_key_equals(cursor, id) &&
                  cursor_to_record(schema, cursor, record);
     free(cursor);
@@ -85,7 +86,7 @@ uint32_t tinydb_record_scan(Table* table,
 
     uint32_t previous_root = 0u;
     begin_root_scope(table, schema, &previous_root);
-    Cursor* cursor = table_start(table);
+    Cursor* cursor = tinydb_leaf_read_start(table);
     if (cursor == NULL) {
         end_root_scope(table, previous_root);
         return 0u;
@@ -97,7 +98,7 @@ uint32_t tinydb_record_scan(Table* table,
         if (!cursor_to_record(schema, cursor, &record)) break;
         count++;
         if (visitor != NULL && !visitor(schema, &record, context)) break;
-        cursor_advance(cursor);
+        tinydb_leaf_read_advance(cursor);
     }
 
     free(cursor);
