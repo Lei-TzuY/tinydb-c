@@ -29,6 +29,7 @@ static uint32_t read_u32_native(const unsigned char* bytes) {
 
 static bool previous_boundary_allows(Table* table,
                                      uint32_t previous_page_num,
+                                     uint32_t current_page_num,
                                      uint32_t key) {
     if (previous_page_num == 0u) return true;
     if (table == NULL || table->pager == NULL ||
@@ -47,6 +48,7 @@ static bool previous_boundary_allows(Table* table,
                TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
            tinydb_slotted_leaf_v2_validate(previous_page, PAGE_SIZE) &&
            tinydb_leaf_page_next(previous_page, PAGE_SIZE, &previous_next) &&
+           previous_next == current_page_num &&
            tinydb_leaf_page_count(previous_page, PAGE_SIZE, &count) &&
            count > 0u &&
            tinydb_leaf_page_key_at(previous_page,
@@ -54,6 +56,24 @@ static bool previous_boundary_allows(Table* table,
                                    count - 1u,
                                    &max_key) &&
            key > max_key;
+}
+
+static bool next_boundary_allows(const unsigned char next_page[PAGE_SIZE],
+                                 uint32_t current_page_num,
+                                 uint32_t current_max_key) {
+    uint32_t next_previous = 0u;
+    uint32_t count = 0u;
+    uint32_t min_key = 0u;
+    return next_page != NULL &&
+           tinydb_leaf_format_detect_page(next_page, PAGE_SIZE) ==
+               TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
+           tinydb_slotted_leaf_v2_validate(next_page, PAGE_SIZE) &&
+           tinydb_leaf_page_prev(next_page, PAGE_SIZE, &next_previous) &&
+           next_previous == current_page_num &&
+           tinydb_leaf_page_count(next_page, PAGE_SIZE, &count) &&
+           count > 0u &&
+           tinydb_leaf_page_key_at(next_page, PAGE_SIZE, 0u, &min_key) &&
+           min_key > current_max_key;
 }
 
 static bool peek_unused_page_num(const Pager* pager, uint32_t* page_num) {
@@ -149,7 +169,10 @@ bool tinydb_record_payload_try_nonroot_split(
                                &next_page_num) ||
         next_page_num == left_page_num ||
         (next_page_num != 0u && next_page_num >= table->pager->num_pages) ||
-        !previous_boundary_allows(table, previous_page_num, key)) {
+        !previous_boundary_allows(table,
+                                  previous_page_num,
+                                  left_page_num,
+                                  key)) {
         free(cursor);
         table->root_page_num = previous_root;
         set_message(message,
@@ -209,9 +232,7 @@ bool tinydb_record_payload_try_nonroot_split(
     if (get_node_type(parent_before) != NODE_INTERNAL ||
         !tinydb_parent_stage_validate(parent_before, PAGE_SIZE) ||
         (!is_tail &&
-         (tinydb_leaf_format_detect_page(next_before, PAGE_SIZE) !=
-              TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
-          !tinydb_slotted_leaf_v2_validate(next_before, PAGE_SIZE)))) {
+         !next_boundary_allows(next_before, left_page_num, old_left_max))) {
         set_message(message,
                     message_size,
                     "payload-native non-root split found inconsistent parent/sibling topology");
