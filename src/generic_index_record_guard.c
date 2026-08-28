@@ -3,7 +3,6 @@
 #include "record.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 
 bool tinydb_record_insert_base(Table* table,
                                const TableSchema* schema,
@@ -39,60 +38,79 @@ static void set_message(char* message,
     }
 }
 
-static bool mutation_tree_is_fixed_v1(Table* table,
-                                      const TableSchema* schema,
-                                      char* message,
-                                      size_t message_size) {
-    if (table == NULL || table->pager == NULL || schema == NULL ||
-        schema->root_page_num >= table->pager->num_pages) {
-        return true;
-    }
-
-    uint32_t previous_root = table->root_page_num;
-    table->root_page_num = schema->root_page_num;
-    Cursor* cursor = table_start(table);
-    if (cursor == NULL) {
-        table->root_page_num = previous_root;
+static bool subtree_is_fixed_v1(Table* table,
+                                uint32_t page_num,
+                                uint32_t depth,
+                                char* message,
+                                size_t message_size) {
+    if (page_num == INVALID_PAGE_NUM || depth > 64u) {
         set_message(message,
                     message_size,
-                    "unable to validate leaf format before generic mutation");
+                    "unable to validate generic B+ tree before mutation");
         return false;
     }
 
-    uint32_t page_num = cursor->page_num;
-    free(cursor);
-    while (true) {
-        if (page_num >= table->pager->num_pages) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "generic leaf chain points outside the database");
-            return false;
-        }
-
-        void* page = get_page(table->pager, page_num);
-        if (!tinydb_leaf_page_is_fixed_v1(page, PAGE_SIZE)) {
-            table->root_page_num = previous_root;
+    void* node = get_page(table->pager, page_num);
+    NodeType type = get_node_type(node);
+    if (type == NODE_LEAF) {
+        TinyDBLeafPageFormat format =
+            tinydb_leaf_format_detect_page(node, PAGE_SIZE);
+        if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) return true;
+        if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
             set_message(message,
                         message_size,
                         "slotted leaf V2 pages are read-only until V2 mutation and split recovery are enabled");
             return false;
         }
-
-        uint32_t next_page = 0u;
-        if (!tinydb_leaf_page_next(page, PAGE_SIZE, &next_page)) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "unable to validate generic leaf chain before mutation");
-            return false;
-        }
-        if (next_page == 0u) break;
-        page_num = next_page;
+        set_message(message,
+                    message_size,
+                    "unknown or corrupt leaf format blocks generic mutation");
+        return false;
     }
 
-    table->root_page_num = previous_root;
+    if (type != NODE_INTERNAL) {
+        set_message(message,
+                    message_size,
+                    "unknown B+ tree node type blocks generic mutation");
+        return false;
+    }
+
+    uint32_t num_keys = *internal_node_num_keys(node);
+    if (num_keys > INTERNAL_NODE_MAX_KEYS) {
+        set_message(message,
+                    message_size,
+                    "corrupt internal node blocks generic mutation");
+        return false;
+    }
+
+    for (uint32_t i = 0u; i <= num_keys; i++) {
+        uint32_t child_page = *internal_node_child(node, i);
+        if (!subtree_is_fixed_v1(table,
+                                 child_page,
+                                 depth + 1u,
+                                 message,
+                                 message_size)) {
+            return false;
+        }
+    }
     return true;
+}
+
+static bool mutation_tree_is_fixed_v1(Table* table,
+                                      const TableSchema* schema,
+                                      char* message,
+                                      size_t message_size) {
+    if (table == NULL || table->pager == NULL || schema == NULL) {
+        set_message(message,
+                    message_size,
+                    "table and schema are required before generic mutation");
+        return false;
+    }
+    return subtree_is_fixed_v1(table,
+                               schema->root_page_num,
+                               0u,
+                               message,
+                               message_size);
 }
 
 static bool prepare_index_epoch(Table* table,
