@@ -44,9 +44,10 @@ def main():
             raise AssertionError(output)
         marker = (
             "PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 "
-            "leaves across lookup, scan, reopen, reject schema-length-mismatched V2 "
-            "payloads, and fail closed on out-of-range sibling corruption without "
-            "extending the pager; legacy mutation remains rejected."
+            "leaves across lookup, scan, reopen, accept a versioned schema-bound V2 "
+            "row envelope, reject corrupt envelope version/schema/length metadata and "
+            "raw schema-length mismatches, and fail closed on out-of-range sibling "
+            "corruption without extending the pager; legacy mutation remains rejected."
         )
         if marker not in output:
             raise AssertionError("missing success marker\n" + output)
