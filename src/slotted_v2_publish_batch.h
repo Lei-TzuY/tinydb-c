@@ -22,6 +22,10 @@ typedef struct {
  * before the first byte is copied. If publication is interrupted at the
  * deterministic fail_after boundary, every target is restored byte-for-byte.
  *
+ * Page zero is a valid TinyDB root page. INVALID_PAGE_NUM is the only reserved
+ * page identity rejected here; callers that use zero as a topology sentinel
+ * must enforce that invariant before constructing a publication batch.
+ *
  * Only PAGE_USABLE_SIZE is copied. The final checksum trailer remains owned by
  * the Pager/WAL layer and is deliberately preserved.
  *
@@ -41,8 +45,7 @@ static bool tinydb_v2_publish_batch(
     unsigned char before[TINYDB_V2_PUBLISH_BATCH_MAX_PAGES][PAGE_USABLE_SIZE];
 
     for (uint32_t i = 0u; i < count; i++) {
-        if (entries[i].page_num == 0u ||
-            entries[i].page_num == INVALID_PAGE_NUM ||
+        if (entries[i].page_num == INVALID_PAGE_NUM ||
             entries[i].target == NULL || entries[i].staged == NULL) {
             return false;
         }
