@@ -76,6 +76,7 @@ set(TINYDB_CORE_SOURCES
     src/record.c
     src/record_delete_v2.c
     src/record_insert_v2_split.c
+    src/record_insert_v2_nonroot_overflow.c
     src/record_payload.c
     src/record_read_v2.c
     src/slotted_leaf_v2.c
@@ -223,6 +224,11 @@ set_source_files_properties(
     src/record.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base;tinydb_record_find=tinydb_record_find_v1_base;tinydb_record_scan=tinydb_record_scan_v1_base"
+)
+set_source_files_properties(
+    src/record_insert_v2_split.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_record_insert=tinydb_record_insert_v2_split_base"
 )
 
 set_source_files_properties(
