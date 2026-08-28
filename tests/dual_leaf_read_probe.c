@@ -5,6 +5,7 @@
 #include "leaf_mutation_policy.h"
 #include "leaf_page_access.h"
 #include "record.h"
+#include "slotted_leaf_v2.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -155,6 +156,85 @@ static bool migrate_edge_leaves(Table* table, TableSchema* schema) {
     return ok;
 }
 
+static bool expect_v2_length_mismatch_rejected(Table* table,
+                                                TableSchema* schema) {
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+    Cursor* cursor = tinydb_leaf_read_find(table, 1u);
+    if (cursor == NULL) {
+        table->root_page_num = previous_root;
+        return false;
+    }
+
+    uint32_t page_num = cursor->page_num;
+    uint32_t cell_num = cursor->cell_num;
+    free(cursor);
+    void* page = get_page(table->pager, page_num);
+    if (tinydb_leaf_format_detect_page(page, PAGE_SIZE) !=
+        TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        table->root_page_num = previous_root;
+        fprintf(stderr, "expected first leaf to be slotted V2\n");
+        return false;
+    }
+
+    uint32_t key = 0u;
+    const void* value = NULL;
+    uint32_t value_length = 0u;
+    if (!tinydb_leaf_page_key_at(page, PAGE_SIZE, cell_num, &key) ||
+        key != 1u ||
+        !tinydb_leaf_page_value_at(page,
+                                   PAGE_SIZE,
+                                   cell_num,
+                                   &value,
+                                   &value_length) ||
+        value_length != schema->row_size ||
+        value_length + 1u > ROW_SIZE) {
+        table->root_page_num = previous_root;
+        fprintf(stderr, "unable to capture canonical V2 payload\n");
+        return false;
+    }
+
+    unsigned char canonical[ROW_SIZE];
+    unsigned char oversized[ROW_SIZE];
+    memset(canonical, 0, sizeof(canonical));
+    memset(oversized, 0, sizeof(oversized));
+    memcpy(canonical, value, value_length);
+    memcpy(oversized, value, value_length);
+    oversized[value_length] = 0xA5u;
+
+    if (!tinydb_slotted_leaf_v2_update(page,
+                                       PAGE_SIZE,
+                                       key,
+                                       oversized,
+                                       (uint16_t)(value_length + 1u))) {
+        table->root_page_num = previous_root;
+        fprintf(stderr, "unable to create valid oversized V2 payload\n");
+        return false;
+    }
+    mark_page_dirty(table->pager, page_num);
+    table->root_page_num = previous_root;
+
+    TinyDBRecord record;
+    bool rejected = !tinydb_record_find(table, schema, key, &record) &&
+                    tinydb_record_scan(table, schema, NULL, NULL) == 0u;
+
+    page = get_page(table->pager, page_num);
+    bool restored = tinydb_slotted_leaf_v2_update(page,
+                                                  PAGE_SIZE,
+                                                  key,
+                                                  canonical,
+                                                  (uint16_t)value_length);
+    if (restored) mark_page_dirty(table->pager, page_num);
+
+    if (!rejected || !restored) {
+        fprintf(stderr,
+                "V2 schema-length mismatch was not fail-closed or restore failed\n");
+        return false;
+    }
+    return expect_row(table, schema, 1u, 1u, 10u) &&
+           tinydb_record_scan(table, schema, NULL, NULL) == 40u;
+}
+
 static bool expect_out_of_range_sibling_rejected(Table* table,
                                                   TableSchema* schema) {
     uint32_t previous_root = table->root_page_num;
@@ -298,6 +378,7 @@ int main(int argc, char** argv) {
     }
     if (!migrate_edge_leaves(table, schema) ||
         !verify_reads(table, schema) ||
+        !expect_v2_length_mismatch_rejected(table, schema) ||
         !expect_out_of_range_sibling_rejected(table, schema) ||
         !expect_mutation_rejected(table, schema)) {
         tinydb_close(db);
@@ -310,6 +391,7 @@ int main(int argc, char** argv) {
     table = tinydb_table(db);
     schema = table_get_schema(table, "metrics");
     if (schema == NULL || !verify_reads(table, schema) ||
+        !expect_v2_length_mismatch_rejected(table, schema) ||
         !expect_out_of_range_sibling_rejected(table, schema) ||
         !expect_mutation_rejected(table, schema)) {
         tinydb_close(db);
@@ -317,6 +399,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(db);
-    printf("PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, scan, reopen, and fail closed on out-of-range sibling corruption without extending the pager; legacy mutation remains rejected.\n");
+    printf("PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, scan, reopen, reject schema-length-mismatched V2 payloads, and fail closed on out-of-range sibling corruption without extending the pager; legacy mutation remains rejected.\n");
     return 0;
 }
