@@ -101,12 +101,7 @@ static inline TinyDBInternalMergeRootResult
         tinydb_internal_borrow_read_u32(obsolete + PARENT_POINTER_OFFSET) !=
             right_grand_num ||
         tinydb_parent_stage_read_u32(
-            obsolete + INTERNAL_NODE_NUM_KEYS_OFFSET) != 1u ||
-        tinydb_parent_stage_key_at(right_grand, 0u) !=
-            tinydb_parent_stage_key_at(obsolete, 0u + 0u) +
-                (removed_key - tinydb_parent_stage_key_at(obsolete, 0u))) {
-        /* Keep the structural checks above explicit; exact subtree maxima are
-         * validated from the survivor leaves below rather than inferred here. */
+            obsolete + INTERNAL_NODE_NUM_KEYS_OFFSET) != 1u) {
         return TINYDB_INTERNAL_MERGE_ROOT_NOT_APPLICABLE;
     }
 
