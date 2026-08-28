@@ -82,11 +82,11 @@ static bool reciprocal_backward_transition(Table* table,
            forward_link == current_page;
 }
 
-/* Validate invariants that are required to choose a child safely. Parent
- * backlinks are intentionally not part of this read-path contract: older
- * trees and split staging can carry stale maintenance metadata while their
- * forward routing topology is still valid. PRAGMA integrity_check owns the
- * stronger whole-tree backlink invariant. */
+/* Validate only invariants encoded in the current internal page image. The
+ * Pager has a bounded frame pool, so fetching every child here can evict the
+ * very frame backing `node` and invalidate subsequent pointer arithmetic.
+ * The selected child is loaded and type-checked only after routing. Stronger
+ * cross-page topology checks remain the job of PRAGMA integrity_check. */
 static bool internal_routing_valid(Table* table,
                                    uint32_t page_num,
                                    void* node) {
@@ -116,17 +116,8 @@ static bool internal_routing_valid(Table* table,
         for (uint32_t j = 0u; j < i; j++) {
             if (*internal_node_child(node, j) == child_page) return false;
         }
-
-        void* child = get_page(table->pager, child_page);
-        NodeType child_type = get_node_type(child);
-        if (child_type != NODE_LEAF && child_type != NODE_INTERNAL) {
-            return false;
-        }
     }
-
-    void* right = get_page(table->pager, right_child);
-    NodeType right_type = get_node_type(right);
-    return right_type == NODE_LEAF || right_type == NODE_INTERNAL;
+    return true;
 }
 
 static Cursor* leaf_find(Table* table, uint32_t page_num, uint32_t key) {
