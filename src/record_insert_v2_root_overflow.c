@@ -6,6 +6,7 @@
 #include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 #include "slotted_leaf_v2_root_split_stage.h"
+#include "slotted_v2_publish_batch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,22 +93,48 @@ static bool peek_unused_page_nums(const Pager* pager,
     return true;
 }
 
-static bool claim_reserved_page_nums(Pager* pager,
-                                     const uint32_t page_nums[2]) {
-    for (uint32_t i = 0u; i < 2u; i++) {
-        uint32_t claimed = get_unused_page_num(pager);
-        if (claimed != page_nums[i]) return false;
-        (void)get_page(pager, claimed);
+static void restore_allocator_reservation(Pager* pager,
+                                          uint32_t original_num_pages,
+                                          uint32_t original_free_page_count) {
+    if (pager == NULL) return;
+    if (pager->num_pages > original_num_pages) {
+        pager_shrink(pager, original_num_pages);
     }
-    return true;
+    pager->free_page_count = original_free_page_count;
 }
 
-static void publish_page(Pager* pager,
-                         uint32_t page_num,
-                         const unsigned char image[PAGE_SIZE]) {
-    unsigned char* page = (unsigned char*)get_page(pager, page_num);
-    memcpy(page, image, PAGE_USABLE_SIZE);
-    mark_page_dirty(pager, page_num);
+static bool claim_reserved_page_nums(Pager* pager,
+                                     const uint32_t page_nums[2],
+                                     unsigned char* targets[2],
+                                     uint32_t* original_num_pages,
+                                     uint32_t* original_free_page_count) {
+    if (pager == NULL || page_nums == NULL || targets == NULL ||
+        original_num_pages == NULL || original_free_page_count == NULL) {
+        return false;
+    }
+
+    *original_num_pages = pager->num_pages;
+    *original_free_page_count = pager->free_page_count;
+    targets[0] = NULL;
+    targets[1] = NULL;
+
+    for (uint32_t i = 0u; i < 2u; i++) {
+        uint32_t claimed = get_unused_page_num(pager);
+        if (claimed != page_nums[i]) {
+            restore_allocator_reservation(pager,
+                                          *original_num_pages,
+                                          *original_free_page_count);
+            return false;
+        }
+        targets[i] = (unsigned char*)get_page(pager, claimed);
+        if (targets[i] == NULL) {
+            restore_allocator_reservation(pager,
+                                          *original_num_pages,
+                                          *original_free_page_count);
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool try_root_leaf_split(Table* table,
@@ -250,16 +277,43 @@ static bool try_root_leaf_split(Table* table,
                     "unable to persist generic-index mutation epoch");
         return false;
     }
-    if (!claim_reserved_page_nums(table->pager, reserved_pages)) {
+
+    unsigned char* child_targets[2] = {NULL, NULL};
+    uint32_t original_num_pages = 0u;
+    uint32_t original_free_page_count = 0u;
+    if (!claim_reserved_page_nums(table->pager,
+                                  reserved_pages,
+                                  child_targets,
+                                  &original_num_pages,
+                                  &original_free_page_count)) {
         set_message(message,
                     message_size,
                     "V2 root split page reservation changed before publication");
         return false;
     }
 
-    publish_page(table->pager, schema->root_page_num, root_after);
-    publish_page(table->pager, reserved_pages[0], left_after);
-    publish_page(table->pager, reserved_pages[1], right_after);
+    unsigned char* root_target =
+        (unsigned char*)get_page(table->pager, schema->root_page_num);
+    TinyDBV2PublishEntry entries[3] = {
+        {schema->root_page_num, root_target, root_after},
+        {reserved_pages[0], child_targets[0], left_after},
+        {reserved_pages[1], child_targets[1], right_after},
+    };
+    if (!tinydb_v2_publish_batch(entries,
+                                 3u,
+                                 TINYDB_V2_PUBLISH_NO_FAIL)) {
+        restore_allocator_reservation(table->pager,
+                                      original_num_pages,
+                                      original_free_page_count);
+        set_message(message,
+                    message_size,
+                    "V2 root split atomic page publication failed");
+        return false;
+    }
+
+    mark_page_dirty(table->pager, schema->root_page_num);
+    mark_page_dirty(table->pager, reserved_pages[0]);
+    mark_page_dirty(table->pager, reserved_pages[1]);
 
     if (!table->in_transaction) pager_commit(table->pager);
     if (message != NULL && message_size > 0u) message[0] = '\0';
