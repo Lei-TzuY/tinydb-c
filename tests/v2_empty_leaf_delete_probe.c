@@ -220,6 +220,10 @@ static bool delete_key(Table* table,
                                 TINYDB_RECORD_MESSAGE_MAX);
 }
 
+static bool underflow_fail_closed_message(const char* message) {
+    return message != NULL && strstr(message, "underflow") != NULL;
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s DATABASE\n", argv[0]);
@@ -293,7 +297,7 @@ int main(int argc, char** argv) {
     }
 
     if (delete_key(table, schema, 10u, message) ||
-        strstr(message, "empty a non-root leaf") == NULL ||
+        !underflow_fail_closed_message(message) ||
         !record_present(table, schema, 10u) ||
         !root_two_children(table, schema, leaf_pages) ||
         table->pager->free_page_count != free_before + 1u ||
@@ -305,12 +309,12 @@ int main(int argc, char** argv) {
     }
 
     if (delete_key(table, schema, 30u, message) ||
-        strstr(message, "empty a non-root leaf") == NULL ||
+        !underflow_fail_closed_message(message) ||
         !record_present(table, schema, 30u) ||
         !root_two_children(table, schema, leaf_pages) ||
         table->pager->free_page_count != free_before + 1u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "right-edge empty-leaf delete did not remain fail-closed: %s\n", message);
+        fprintf(stderr, "two-child parent underflow did not remain fail-closed: %s\n", message);
         tinydb_close(db);
         return EXIT_FAILURE;
     }
@@ -337,7 +341,7 @@ int main(int argc, char** argv) {
 
     printf("V2_EMPTY_LEAF_DELETE_OK interior_child_remove=yes sibling_relink=yes "
            "rollback=yes page_reclaim=yes root_collapse_fail_closed=yes "
-           "edge_fail_closed=yes reopen=yes integrity=yes wal=yes\n");
+           "underflow_fail_closed=yes reopen=yes integrity=yes wal=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
 }
