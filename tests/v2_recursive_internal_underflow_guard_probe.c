@@ -240,19 +240,49 @@ static bool unchanged_state(Table* table,
     const uint32_t g1_children[2] = {parents[2], parents[3]};
     const uint32_t g1_keys[1] = {60u};
     if (!internal_matches(table, schema->root_page_num,
-                          root_children, root_keys, 2u) ||
-        !internal_matches(table, grands[0], g0_children, g0_keys, 2u) ||
-        !internal_matches(table, grands[1], g1_children, g1_keys, 2u) ||
-        table->pager->free_page_count != free_before ||
-        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS) {
+                          root_children, root_keys, 2u)) {
+        fprintf(stderr, "unchanged_state: root topology drifted\n");
+        return false;
+    }
+    if (!internal_matches(table, grands[0], g0_children, g0_keys, 2u)) {
+        fprintf(stderr, "unchanged_state: left grand topology drifted\n");
+        return false;
+    }
+    if (!internal_matches(table, grands[1], g1_children, g1_keys, 2u)) {
+        fprintf(stderr, "unchanged_state: right grand topology drifted\n");
+        return false;
+    }
+    if (table->pager->free_page_count != free_before) {
+        fprintf(stderr,
+                "unchanged_state: allocator drifted before=%u after=%u\n",
+                free_before,
+                table->pager->free_page_count);
+        return false;
+    }
+    uint32_t scan_count = tinydb_record_scan(table, schema, NULL, NULL);
+    if (scan_count != BASELINE_ROWS) {
+        fprintf(stderr,
+                "unchanged_state: scan count drifted expected=%u actual=%u\n",
+                BASELINE_ROWS,
+                scan_count);
         return false;
     }
     for (uint32_t i = 0u; i < LEAF_COUNT; i++) {
         uint32_t expected_prev = i == 0u ? 0u : leaves[i - 1u];
         uint32_t expected_next = i + 1u == LEAF_COUNT ? 0u : leaves[i + 1u];
         if (!leaf_state(table, leaves[i], parents[i / 2u],
-                        expected_prev, expected_next) ||
-            !present(table, schema, 10u * (i + 1u))) {
+                        expected_prev, expected_next)) {
+            fprintf(stderr,
+                    "unchanged_state: leaf topology drifted index=%u page=%u\n",
+                    i,
+                    leaves[i]);
+            return false;
+        }
+        if (!present(table, schema, 10u * (i + 1u))) {
+            fprintf(stderr,
+                    "unchanged_state: record disappeared key=%u leaf_page=%u\n",
+                    10u * (i + 1u),
+                    leaves[i]);
             return false;
         }
     }
