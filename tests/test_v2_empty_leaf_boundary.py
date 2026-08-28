@@ -105,7 +105,8 @@ def main():
             "right=yes",
             "rollback=yes",
             "allocator=yes",
-            "underflow_guard=yes",
+            "root_collapse=yes",
+            "collapse_rollback=yes",
             "reopen=yes",
             "integrity=yes",
             "wal=yes",
@@ -115,9 +116,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: production V2 empty-leaf removal handles left/right leaf-list "
-        "boundaries with rollback-safe allocator state and keeps true parent "
-        "underflow fail-closed"
+        "PASS: production V2 empty-leaf removal handles both leaf-list boundaries, "
+        "then contracts either side of a two-leaf root with rollback-safe allocator "
+        "state and reopen durability"
     )
 
 
