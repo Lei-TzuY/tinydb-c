@@ -1,4 +1,5 @@
 #include "slotted_leaf_v2.h"
+#include "slotted_leaf_v2_split.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,20 @@ static void fill_pattern(unsigned char* bytes,
     for (size_t i = 0u; i < length; i++) {
         bytes[i] = (unsigned char)(seed + (unsigned char)(i % 23u));
     }
+}
+
+static uint32_t read_u32_le_probe(const unsigned char* bytes) {
+    return (uint32_t)bytes[0] |
+           ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+
+static void write_u32_le_probe(unsigned char* bytes, uint32_t value) {
+    bytes[0] = (unsigned char)(value & 0xffu);
+    bytes[1] = (unsigned char)((value >> 8) & 0xffu);
+    bytes[2] = (unsigned char)((value >> 16) & 0xffu);
+    bytes[3] = (unsigned char)((value >> 24) & 0xffu);
 }
 
 static bool expect_value(const unsigned char page[PAGE_SIZE],
@@ -42,6 +57,135 @@ static bool checksum_trailer_untouched(const unsigned char page[PAGE_SIZE],
     for (uint32_t i = PAGE_USABLE_SIZE; i < PAGE_SIZE; i++) {
         if (page[i] != marker) return false;
     }
+    return true;
+}
+
+static bool exercise_byte_balanced_split(void) {
+    unsigned char left[PAGE_SIZE];
+    unsigned char right[PAGE_SIZE];
+    memset(left, 0xA5, sizeof(left));
+    memset(right, 0x5A, sizeof(right));
+    if (!tinydb_slotted_leaf_v2_init(left, sizeof(left))) return false;
+
+    left[IS_ROOT_OFFSET] = 0u;
+    write_u32_le_probe(left + PARENT_POINTER_OFFSET, 77u);
+    write_u32_le_probe(left + TINYDB_SLOTTED_V2_PREV_LEAF_OFFSET, 40u);
+    write_u32_le_probe(left + TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET, 60u);
+
+    unsigned char small1[100];
+    unsigned char small2[120];
+    unsigned char large1[1100];
+    unsigned char large2[1300];
+    unsigned char small3[140];
+    fill_pattern(small1, sizeof(small1), 0x11u);
+    fill_pattern(small2, sizeof(small2), 0x22u);
+    fill_pattern(large1, sizeof(large1), 0x33u);
+    fill_pattern(large2, sizeof(large2), 0x44u);
+    fill_pattern(small3, sizeof(small3), 0x55u);
+
+    if (!tinydb_slotted_leaf_v2_insert(left,
+                                       sizeof(left),
+                                       10u,
+                                       small1,
+                                       (uint16_t)sizeof(small1)) ||
+        !tinydb_slotted_leaf_v2_insert(left,
+                                       sizeof(left),
+                                       20u,
+                                       small2,
+                                       (uint16_t)sizeof(small2)) ||
+        !tinydb_slotted_leaf_v2_insert(left,
+                                       sizeof(left),
+                                       30u,
+                                       large1,
+                                       (uint16_t)sizeof(large1)) ||
+        !tinydb_slotted_leaf_v2_insert(left,
+                                       sizeof(left),
+                                       40u,
+                                       large2,
+                                       (uint16_t)sizeof(large2)) ||
+        !tinydb_slotted_leaf_v2_insert(left,
+                                       sizeof(left),
+                                       50u,
+                                       small3,
+                                       (uint16_t)sizeof(small3))) {
+        return false;
+    }
+
+    uint16_t chosen = tinydb_slotted_leaf_v2_choose_split_index(left,
+                                                                 sizeof(left));
+    if (chosen != 3u) {
+        fprintf(stderr, "byte-balanced split selected row-count midpoint %u\n",
+                (unsigned)chosen);
+        return false;
+    }
+
+    uint16_t actual_split = 0u;
+    if (!tinydb_slotted_leaf_v2_split_nonroot(left,
+                                               sizeof(left),
+                                               50u,
+                                               right,
+                                               sizeof(right),
+                                               51u,
+                                               &actual_split) ||
+        actual_split != chosen ||
+        !tinydb_slotted_leaf_v2_validate(left, sizeof(left)) ||
+        !tinydb_slotted_leaf_v2_validate(right, sizeof(right)) ||
+        tinydb_slotted_leaf_v2_count(left, sizeof(left)) != 3u ||
+        tinydb_slotted_leaf_v2_count(right, sizeof(right)) != 2u ||
+        read_u32_le_probe(left + PARENT_POINTER_OFFSET) != 77u ||
+        read_u32_le_probe(right + PARENT_POINTER_OFFSET) != 77u ||
+        read_u32_le_probe(left + TINYDB_SLOTTED_V2_PREV_LEAF_OFFSET) != 40u ||
+        read_u32_le_probe(left + TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET) != 51u ||
+        read_u32_le_probe(right + TINYDB_SLOTTED_V2_PREV_LEAF_OFFSET) != 50u ||
+        read_u32_le_probe(right + TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET) != 60u ||
+        !expect_value(left, 10u, small1, (uint16_t)sizeof(small1)) ||
+        !expect_value(left, 20u, small2, (uint16_t)sizeof(small2)) ||
+        !expect_value(left, 30u, large1, (uint16_t)sizeof(large1)) ||
+        !expect_value(right, 40u, large2, (uint16_t)sizeof(large2)) ||
+        !expect_value(right, 50u, small3, (uint16_t)sizeof(small3)) ||
+        !checksum_trailer_untouched(left, 0xA5u) ||
+        !checksum_trailer_untouched(right, 0x5Au)) {
+        fprintf(stderr, "byte-balanced split redistribution/identity failed\n");
+        return false;
+    }
+
+    unsigned char root_source[PAGE_SIZE];
+    unsigned char root_destination[PAGE_SIZE];
+    unsigned char root_before[PAGE_SIZE];
+    unsigned char destination_before[PAGE_SIZE];
+    memset(root_source, 0x17, sizeof(root_source));
+    memset(root_destination, 0x29, sizeof(root_destination));
+    if (!tinydb_slotted_leaf_v2_init(root_source, sizeof(root_source)) ||
+        !tinydb_slotted_leaf_v2_insert(root_source,
+                                       sizeof(root_source),
+                                       1u,
+                                       small1,
+                                       (uint16_t)sizeof(small1)) ||
+        !tinydb_slotted_leaf_v2_insert(root_source,
+                                       sizeof(root_source),
+                                       2u,
+                                       small2,
+                                       (uint16_t)sizeof(small2))) {
+        return false;
+    }
+    root_source[IS_ROOT_OFFSET] = 1u;
+    memcpy(root_before, root_source, sizeof(root_before));
+    memcpy(destination_before, root_destination, sizeof(destination_before));
+    if (tinydb_slotted_leaf_v2_split_nonroot(root_source,
+                                              sizeof(root_source),
+                                              0u,
+                                              root_destination,
+                                              sizeof(root_destination),
+                                              1u,
+                                              NULL) ||
+        memcmp(root_source, root_before, sizeof(root_source)) != 0 ||
+        memcmp(root_destination,
+               destination_before,
+               sizeof(root_destination)) != 0) {
+        fprintf(stderr, "failed root split modified caller pages\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -217,6 +361,11 @@ int main(void) {
         !tinydb_slotted_leaf_v2_validate(full_page, sizeof(full_page)) ||
         !checksum_trailer_untouched(full_page, 0x5Au)) {
         fprintf(stderr, "V2 exact-capacity boundary failed\n");
+        return EXIT_FAILURE;
+    }
+
+    if (!exercise_byte_balanced_split()) {
+        fprintf(stderr, "V2 byte-balanced split regression failed\n");
         return EXIT_FAILURE;
     }
 
