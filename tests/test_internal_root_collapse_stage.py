@@ -95,6 +95,8 @@ def main():
             "left=yes",
             "right=yes",
             "v2_root=yes",
+            "internal=yes",
+            "descendant_reparent=yes",
             "survivor_immutable=yes",
             "atomic_failure=yes",
             "checksum_reserved=yes",
@@ -103,8 +105,9 @@ def main():
                 raise AssertionError(f"missing {marker}\n{output}")
 
     print(
-        "PASS: root-collapse staging promotes either surviving V2 leaf into the "
-        "stable root page, preserves the source page/checksum trailer, and fails atomically"
+        "PASS: root-collapse staging promotes V2-leaf or internal survivors into "
+        "the stable root, reparents direct descendants, preserves source/checksum "
+        "bytes, and fails atomically"
     )
 
 
