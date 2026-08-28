@@ -3,6 +3,7 @@
 #include "record.h"
 #include "record_payload.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static void begin_root_scope(Table* table,
