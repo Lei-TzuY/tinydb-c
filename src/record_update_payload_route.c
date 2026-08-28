@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <string.h>
 
 bool tinydb_record_update_mixed_legacy_base(Table* table,
                                             const TableSchema* schema,
@@ -31,6 +32,18 @@ static bool ci_equal(const char* left, const char* right) {
         right++;
     }
     return *left == '\0' && *right == '\0';
+}
+
+static void preserve_value_update_rejection_contract(char* message,
+                                                     size_t message_size) {
+    if (message == NULL || message_size == 0u ||
+        strstr(message,
+               "payload-native UPDATE requires an existing compact V2 row") == NULL) {
+        return;
+    }
+    set_message(message,
+                message_size,
+                "unable to update logical leaf value: slotted V2 rows are read-only unless already stored as compact envelope V2 and the replacement fits without splitting");
 }
 
 /*
@@ -79,10 +92,12 @@ bool tinydb_record_update(Table* table,
         return false;
     }
 
-    return tinydb_record_payload_update(table,
-                                        schema,
-                                        id,
-                                        &payload,
-                                        message,
-                                        message_size);
+    bool updated = tinydb_record_payload_update(table,
+                                                schema,
+                                                id,
+                                                &payload,
+                                                message,
+                                                message_size);
+    if (!updated) preserve_value_update_rejection_contract(message, message_size);
+    return updated;
 }
