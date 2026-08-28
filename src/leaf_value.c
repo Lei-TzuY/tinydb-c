@@ -1,5 +1,6 @@
 #include "leaf_value.h"
 #include "leaf_format.h"
+#include "leaf_mutation_policy.h"
 #include "leaf_page_access.h"
 
 #include <stddef.h>
@@ -37,12 +38,22 @@ static bool cursor_is_fixed_v1(Cursor* cursor) {
     return tinydb_leaf_page_is_fixed_v1(page, PAGE_SIZE);
 }
 
+static bool tree_is_mutable_v1(Cursor* cursor) {
+    if (!valid_cursor(cursor)) return false;
+    char message[128];
+    return tinydb_leaf_tree_mutation_supported(cursor->table,
+                                               cursor->table->root_page_num,
+                                               message,
+                                               sizeof(message));
+}
+
 bool tinydb_leaf_value_insert(Cursor* cursor,
                               uint32_t key,
                               const void* bytes,
                               uint32_t length) {
     if (!valid_args(cursor, bytes, length) ||
         !tinydb_leaf_value_legacy_layout_compatible() ||
+        !tree_is_mutable_v1(cursor) ||
         !cursor_is_fixed_v1(cursor)) {
         return false;
     }
@@ -61,7 +72,9 @@ bool tinydb_leaf_value_insert(Cursor* cursor,
 bool tinydb_leaf_value_write(Cursor* cursor,
                              const void* bytes,
                              uint32_t length) {
-    if (!valid_args(cursor, bytes, length) || !cursor_is_fixed_v1(cursor)) {
+    if (!valid_args(cursor, bytes, length) ||
+        !tree_is_mutable_v1(cursor) ||
+        !cursor_is_fixed_v1(cursor)) {
         return false;
     }
 
