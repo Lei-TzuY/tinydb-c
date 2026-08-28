@@ -1,6 +1,7 @@
 #ifndef SLOTTED_LEAF_V2_ROOT_SPLIT_STAGE_H
 #define SLOTTED_LEAF_V2_ROOT_SPLIT_STAGE_H
 
+#include "leaf_page_access.h"
 #include "slotted_leaf_v2_parent_stage.h"
 #include "slotted_leaf_v2_split.h"
 
