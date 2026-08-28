@@ -48,13 +48,13 @@ def main():
         marker = "PASS: production compact V2 non-split INSERT supports safe lower-boundary growth"
         if marker not in output:
             raise AssertionError(f"missing compact V2 mutation marker\n{output}")
-        if "topology-neutral non-max DELETE" not in output or "max-key" not in output:
-            raise AssertionError(f"missing compact V2 DELETE topology coverage\n{output}")
+        if "safe max-key separator updates" not in output or "mixed V1 updates" not in output:
+            raise AssertionError(f"missing compact V2 DELETE separator-update coverage\n{output}")
         print(
             "PASS: production compact V2 rows support safe non-splitting INSERT, "
-            "variable-length UPDATE, and topology-neutral non-max DELETE with "
-            "rollback/reopen durability; max-key, fixed-target, and split-requiring "
-            "structural mutations remain fail-closed"
+            "variable-length UPDATE, interior DELETE, and non-empty max-key DELETE "
+            "with parent-separator maintenance plus rollback/reopen durability; "
+            "fixed-target and split-requiring structural inserts remain fail-closed"
         )
     finally:
         cleanup(db_path)
