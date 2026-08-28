@@ -57,6 +57,11 @@ static bool expect_item(Table* table,
            values[2].int_value == price;
 }
 
+static bool item_absent(Table* table, TableSchema* schema, uint32_t id) {
+    TinyDBRecord record;
+    return !tinydb_record_find(table, schema, id, &record);
+}
+
 static bool install_compact_row(Table* table, TableSchema* schema, uint32_t key) {
     uint32_t previous_root = table->root_page_num;
     table->root_page_num = schema->root_page_num;
@@ -197,6 +202,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* Create two interior gaps while the tree is still entirely fixed V1. The
+     * first gap will be filled by a committed V2 insert; the second exercises
+     * transactional rollback of the same fast path. */
+    if (!exec_ok(db, "DELETE FROM items WHERE id = 2;") ||
+        !exec_ok(db, "DELETE FROM items WHERE id = 4;")) {
+        tinydb_close(db);
+        return 1;
+    }
+
     Table* table = tinydb_table(db);
     TableSchema* schema = find_schema(table, "items");
     uint32_t initial_compact_length = 0u;
@@ -204,8 +218,21 @@ int main(int argc, char** argv) {
         !install_compact_row(table, schema, 1u) ||
         !expect_item(table, schema, 1u, "item-1", 10u) ||
         !compact_row_metadata(table, schema, 1u, &initial_compact_length) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 24u) {
-        fprintf(stderr, "compact V2 row was not readable before update\n");
+        tinydb_record_scan(table, schema, NULL, NULL) != 22u) {
+        fprintf(stderr, "compact V2 row was not readable before mutation\n");
+        tinydb_close(db);
+        return 1;
+    }
+
+    /* A missing interior key whose target is already V2 may be inserted when
+     * the existing leaf has free space. The inserted value must itself be a
+     * compact V2 envelope and duplicate insertion must remain rejected. */
+    if (!exec_ok(db, "INSERT INTO items VALUES (2, 'v2-inserted', 202);") ||
+        !expect_item(table, schema, 2u, "v2-inserted", 202u) ||
+        !compact_row_metadata(table, schema, 2u, NULL) ||
+        !exec_fails(db, "INSERT INTO items VALUES (2, 'duplicate', 999);") ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
+        fprintf(stderr, "production non-split compact V2 INSERT failed\n");
         tinydb_close(db);
         return 1;
     }
@@ -255,30 +282,37 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Structural mutation stays fail-closed until V2 insert/delete/split and
-     * recovery are explicitly enabled. */
-    if (!exec_fails(db, "INSERT INTO items VALUES (25, 'blocked', 250);") ||
-        !exec_fails(db, "DELETE FROM items WHERE id = 2;") ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 24u ||
-        !expect_item(table, schema, 2u, "item-2", 20u)) {
-        fprintf(stderr, "mixed tree unexpectedly allowed structural mutation\n");
+    /* Structural cases that could alter a separator or require another leaf
+     * format/split stay fail-closed. id=0 would become a new left boundary,
+     * while id=25 targets the untouched fixed right edge. DELETE is unchanged. */
+    if (!exec_fails(db, "INSERT INTO items VALUES (0, 'boundary', 0);") ||
+        !exec_fails(db, "INSERT INTO items VALUES (25, 'blocked', 250);") ||
+        !exec_fails(db, "DELETE FROM items WHERE id = 3;") ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
+        !expect_item(table, schema, 3u, "item-3", 30u)) {
+        fprintf(stderr, "mixed tree unexpectedly allowed unsafe structural mutation\n");
         tinydb_close(db);
         return 1;
     }
 
-    /* V2 payload mutation must participate in the existing transaction rollback
-     * path just like fixed-row mutation. */
+    /* Both V2 payload UPDATE and V2 non-split INSERT participate in the pager
+     * transaction rollback path. id=4 is an existing interior gap in the V2
+     * leaf and must disappear again after rollback. */
     if (!exec_ok(db, "BEGIN;") ||
         !exec_ok(db,
                  "UPDATE items SET name = 'rolled-back', price = 999 WHERE id = 1;") ||
+        !exec_ok(db, "INSERT INTO items VALUES (4, 'rolled-back-insert', 404);") ||
         !expect_item(table, schema, 1u, "rolled-back", 999u) ||
+        !expect_item(table, schema, 4u, "rolled-back-insert", 404u) ||
         !exec_ok(db, "ROLLBACK;") ||
         !expect_item(table,
                      schema,
                      1u,
                      "a-significantly-longer-item-name",
-                     222u)) {
-        fprintf(stderr, "compact V2 UPDATE did not roll back atomically\n");
+                     222u) ||
+        !item_absent(table, schema, 4u) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
+        fprintf(stderr, "compact V2 mutation did not roll back atomically\n");
         tinydb_close(db);
         return 1;
     }
@@ -299,17 +333,20 @@ int main(int argc, char** argv) {
                      1u,
                      "a-significantly-longer-item-name",
                      222u) ||
+        !expect_item(table, schema, 2u, "v2-inserted", 202u) ||
         !expect_item(table, schema, 12u, "item-12", 120u) ||
         !expect_item(table, schema, 24u, "fixed-updated", 2424u) ||
+        !item_absent(table, schema, 4u) ||
         !compact_row_metadata(table, schema, 1u, NULL) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 24u ||
+        !compact_row_metadata(table, schema, 2u, NULL) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "mixed V1/V2 UPDATE state did not survive reopen\n");
+        fprintf(stderr, "mixed V1/V2 INSERT/UPDATE state did not survive reopen\n");
         tinydb_close(db);
         return 1;
     }
     tinydb_close(db);
     remove(argv[1]);
-    printf("PASS: production existing-row UPDATE shrinks/grows compact V2 payloads, updates fixed rows in the same mixed tree, rolls back transactionally, reopens durably, and keeps structural mutation fail-closed.\n");
+    printf("PASS: production compact V2 non-split INSERT persists and rolls back safely, duplicate/boundary/fixed-target structural mutations stay fail-closed, existing-row UPDATE still shrinks/grows V2 payloads, mixed V1 updates survive, and integrity/reopen remain valid.\n");
     return 0;
 }
