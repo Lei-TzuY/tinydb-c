@@ -105,8 +105,8 @@ def main():
             "sibling_relink=yes",
             "rollback=yes",
             "page_reclaim=yes",
-            "root_collapse_fail_closed=yes",
-            "underflow_fail_closed=yes",
+            "root_collapse=yes",
+            "root_collapse_rollback=yes",
             "reopen=yes",
             "integrity=yes",
             "wal=yes",
@@ -116,9 +116,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: V2 singleton interior leaf deletion atomically removes the child, "
-        "relinks siblings, reclaims the page, rolls back cleanly, persists across "
-        "reopen, and keeps parent-underflow/root-collapse cases fail-closed"
+        "PASS: V2 singleton leaf deletion removes interior children, contracts "
+        "a two-leaf root transactionally, reclaims old child pages, rolls back "
+        "cleanly, and survives reopen"
     )
 
 
