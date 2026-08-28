@@ -265,22 +265,176 @@ static bool update_existing_mixed(Table* table,
     return true;
 }
 
+static bool insert_key_preserves_parent_separator(const void* page,
+                                                  uint32_t key) {
+    if (is_node_root((void*)page)) return true;
+
+    uint32_t count = 0u;
+    uint32_t first_key = 0u;
+    uint32_t last_key = 0u;
+    if (!tinydb_leaf_page_count(page, PAGE_SIZE, &count) || count == 0u ||
+        !tinydb_leaf_page_key_at(page, PAGE_SIZE, 0u, &first_key) ||
+        !tinydb_leaf_page_key_at(page,
+                                 PAGE_SIZE,
+                                 count - 1u,
+                                 &last_key)) {
+        return false;
+    }
+    return key > first_key && key < last_key;
+}
+
+static bool insert_non_split_slotted_v2(Table* table,
+                                        const TableSchema* schema,
+                                        const TinyDBValue* values,
+                                        uint32_t value_count,
+                                        char* message,
+                                        size_t message_size) {
+    if (table == NULL || schema == NULL ||
+        !tinydb_schema_supports_records(schema, message, message_size)) {
+        return false;
+    }
+    if (ci_equal(schema->name, "users")) {
+        set_message(message,
+                    message_size,
+                    "use the legacy users execution path so its secondary indexes stay synchronized");
+        return false;
+    }
+
+    TinyDBRecord record;
+    if (!tinydb_record_encode(schema,
+                              values,
+                              value_count,
+                              &record,
+                              message,
+                              message_size)) {
+        return false;
+    }
+    TinyDBRecordPayload payload;
+    if (!tinydb_record_payload_from_record(schema,
+                                           &record,
+                                           &payload,
+                                           message,
+                                           message_size)) {
+        return false;
+    }
+
+    uint32_t key = 0u;
+    memcpy(&key, payload.bytes, sizeof(key));
+    uint32_t previous_root = 0u;
+    begin_root_scope(table, schema, &previous_root);
+    Cursor* cursor = tinydb_leaf_read_find(table, key);
+    if (cursor == NULL) {
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "unable to locate target leaf for slotted V2 insert");
+        return false;
+    }
+    if (cursor_matches_key(cursor, key)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message, message_size, "duplicate primary key");
+        return false;
+    }
+
+    void* page = get_page(table->pager, cursor->page_num);
+    if (tinydb_leaf_format_detect_page(page, PAGE_SIZE) !=
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+        !tinydb_slotted_leaf_v2_validate(page, PAGE_SIZE) ||
+        !insert_key_preserves_parent_separator(page, key)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "slotted V2 insert is allowed only when the target V2 leaf can accept the key without changing a parent separator");
+        return false;
+    }
+
+    unsigned char envelope[PAGE_SIZE];
+    uint32_t envelope_length = 0u;
+    if (!tinydb_row_envelope_encode_compact_v2(schema,
+                                               &payload,
+                                               envelope,
+                                               sizeof(envelope),
+                                               &envelope_length) ||
+        envelope_length == 0u || envelope_length > UINT16_MAX ||
+        TINYDB_SLOTTED_V2_SLOT_SIZE + envelope_length >
+            tinydb_slotted_leaf_v2_free_bytes(page, PAGE_SIZE)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "slotted V2 insert requires existing free space and cannot split the leaf");
+        return false;
+    }
+
+    if (!prepare_index_epoch(table, schema, message, message_size)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        return false;
+    }
+
+    unsigned char before[PAGE_USABLE_SIZE];
+    memcpy(before, page, sizeof(before));
+    bool inserted = tinydb_slotted_leaf_v2_insert(page,
+                                                  PAGE_SIZE,
+                                                  key,
+                                                  envelope,
+                                                  (uint16_t)envelope_length);
+    if (!inserted) {
+        memcpy(page, before, sizeof(before));
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "slotted V2 non-split insert failed without modifying the page");
+        return false;
+    }
+
+    mark_page_dirty(table->pager, cursor->page_num);
+    free(cursor);
+    end_root_scope(table, previous_root);
+    if (!table->in_transaction) pager_commit(table->pager);
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    return true;
+}
+
 bool tinydb_record_insert(Table* table,
                           const TableSchema* schema,
                           const TinyDBValue* values,
                           uint32_t value_count,
                           char* message,
                           size_t message_size) {
-    if (!mutation_tree_is_fixed_v1(table, schema, message, message_size)) {
-        return false;
+    char policy_message[TINYDB_RECORD_MESSAGE_MAX];
+    if (mutation_tree_is_fixed_v1(table,
+                                  schema,
+                                  policy_message,
+                                  sizeof(policy_message))) {
+        if (!prepare_index_epoch(table, schema, message, message_size)) return false;
+        return tinydb_record_insert_base(table,
+                                         schema,
+                                         values,
+                                         value_count,
+                                         message,
+                                         message_size);
     }
-    if (!prepare_index_epoch(table, schema, message, message_size)) return false;
-    return tinydb_record_insert_base(table,
-                                     schema,
-                                     values,
-                                     value_count,
-                                     message,
-                                     message_size);
+
+    if (insert_non_split_slotted_v2(table,
+                                    schema,
+                                    values,
+                                    value_count,
+                                    message,
+                                    message_size)) {
+        return true;
+    }
+    if (message != NULL && message_size > 0u && message[0] == '\0') {
+        set_message(message,
+                    message_size,
+                    policy_message[0] != '\0'
+                        ? policy_message
+                        : "generic insert is not supported for this leaf layout");
+    }
+    return false;
 }
 
 bool tinydb_record_update(Table* table,
