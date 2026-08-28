@@ -279,13 +279,17 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    if (delete_key(table, schema, 40u, message) ||
-        strstr(message, "empty a non-root leaf") == NULL ||
+    if (!exec_ok(db, "BEGIN;") ||
+        !delete_key(table, schema, 40u, message) ||
+        record_present(table, schema, 40u) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 1u ||
+        !exec_ok(db, "PRAGMA integrity_check;") ||
+        !exec_ok(db, "ROLLBACK;") ||
         !record_present(table, schema, 40u) ||
         !root_shape(table, schema, leaf_pages, 30u, 40u) ||
         tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "single-row leaf delete did not remain fail-closed: %s\n", message);
+        fprintf(stderr, "transactional empty-leaf removal rollback failed: %s\n", message);
         tinydb_close(db);
         return EXIT_FAILURE;
     }
@@ -332,7 +336,7 @@ int main(int argc, char** argv) {
     }
 
     printf("V2_MAX_DELETE_OK separator_update=yes rollback=yes "
-           "empty_leaf_fail_closed=yes root_rightmost=yes reopen=yes "
+           "empty_leaf_rollback=yes root_rightmost=yes reopen=yes "
            "integrity=yes wal=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
