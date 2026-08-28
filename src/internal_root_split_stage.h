@@ -17,7 +17,8 @@
  * rather than ever writing an over-capacity root page, this helper builds the
  * merged child/key sequence in ordinary C arrays, partitions it into two new
  * non-root internal pages, and rewrites the stable root page as a one-key root
- * pointing at those two internal pages.
+ * pointing at those two internal pages. Page zero is a valid stable root page;
+ * only newly allocated child/internal pages must be nonzero.
  *
  * Only PAGE_USABLE_SIZE is published into caller images. Pager-owned checksum
  * trailers are preserved byte-for-byte. The caller remains responsible for
@@ -90,7 +91,7 @@ static inline bool tinydb_stage_full_root_after_child_split(
     if (root_page == NULL || new_left_internal_page == NULL ||
         new_right_internal_page == NULL || root_capacity < PAGE_SIZE ||
         left_capacity < PAGE_SIZE || right_capacity < PAGE_SIZE ||
-        root_page_num == 0u || new_left_internal_page_num == 0u ||
+        new_left_internal_page_num == 0u ||
         new_right_internal_page_num == 0u ||
         root_page_num == new_left_internal_page_num ||
         root_page_num == new_right_internal_page_num ||
