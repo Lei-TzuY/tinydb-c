@@ -290,3 +290,6 @@ target_link_libraries(tinydb_leaf_migration_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_dual_leaf_read_probe tests/dual_leaf_read_probe.c)
 target_link_libraries(tinydb_dual_leaf_read_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_row_envelope_probe tests/row_envelope_probe.c)
+target_link_libraries(tinydb_row_envelope_probe PRIVATE tinydb_core)
