@@ -17,6 +17,10 @@ typedef struct {
     unsigned char bytes[TINYDB_RECORD_PAYLOAD_MAX];
 } TinyDBRecordPayload;
 
+typedef bool (*TinyDBRecordPayloadVisitor)(const TableSchema* schema,
+                                           const TinyDBRecordPayload* payload,
+                                           void* context);
+
 /* Schema-aware logical codecs. These operate directly on the sized payload
  * carrier so generic rows can be wider than the legacy ROW_SIZE value slot.
  * They do not imply that every physical leaf format can store every payload. */
@@ -38,6 +42,26 @@ bool tinydb_record_payload_decode_values(const TableSchema* schema,
                                          uint32_t* value_count,
                                          char* message,
                                          size_t message_size);
+
+/* Payload-native record reads are the wide-schema query seam. They use the
+ * dual-format leaf cursor and decode either raw V1/V2 logical bytes or compact
+ * V2 row envelopes without forcing the result back through TinyDBRecord.
+ * scan_complete is set false when traversal detects corruption or a malformed
+ * value so callers can distinguish an empty table from a truncated scan. */
+bool tinydb_record_payload_find(Table* table,
+                                const TableSchema* schema,
+                                uint32_t id,
+                                TinyDBRecordPayload* payload,
+                                char* message,
+                                size_t message_size);
+
+uint32_t tinydb_record_payload_scan(Table* table,
+                                    const TableSchema* schema,
+                                    TinyDBRecordPayloadVisitor visitor,
+                                    void* context,
+                                    bool* scan_complete,
+                                    char* message,
+                                    size_t message_size);
 
 /* Compatibility adapters for callers that still use the historical fixed
  * TinyDBRecord carrier. They intentionally reject rows wider than ROW_SIZE. */
