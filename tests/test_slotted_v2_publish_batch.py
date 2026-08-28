@@ -79,14 +79,15 @@ def main():
             "rollback=yes",
             "checksum_isolated=yes",
             "duplicate_guard=yes",
+            "root0=yes",
         ):
             if marker not in output:
                 raise AssertionError(f"missing {marker}\n{output}")
 
     print(
         "PASS: staged slotted V2 page batches prevalidate topology identities, "
-        "restore every caller page after deterministic partial publication, and "
-        "leave Pager-owned checksum trailers untouched"
+        "restore every caller page after deterministic partial publication, "
+        "support page-zero roots, and leave checksum trailers untouched"
     )
 
 
