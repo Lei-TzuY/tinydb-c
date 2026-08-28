@@ -42,7 +42,7 @@ def main():
         output = result.stdout + result.stderr
         if result.returncode != 0:
             raise AssertionError(output)
-        marker = "PASS: production cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves"
+        marker = "PASS: isolated production read cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves"
         if marker not in output:
             raise AssertionError("missing success marker\n" + output)
         print(output.strip())
