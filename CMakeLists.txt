@@ -70,6 +70,7 @@ set(TINYDB_CORE_SOURCES
     src/sized_table_alter.c
     src/sized_table_create.c
     src/pager.c
+    src/pager_checkpoint_order.c
     src/prepared_route.c
     src/profile.c
     src/record.c
@@ -232,6 +233,11 @@ set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
     "table_create_table=table_create_table_legacy_base;table_add_column=table_add_column_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy;table_find=table_find_v1_base;table_start=table_start_v1_base;cursor_value=cursor_value_v1_base;cursor_advance=cursor_advance_v1_base;table_end=table_end_v1_base;cursor_retreat=cursor_retreat_v1_base"
+)
+set_source_files_properties(
+    src/pager.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "pager_checkpoint=pager_checkpoint_legacy_base"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
