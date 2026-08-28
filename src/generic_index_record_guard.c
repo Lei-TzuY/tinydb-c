@@ -1,10 +1,8 @@
 #include "generic_index_epoch.h"
-#include "leaf_cursor_read.h"
-#include "leaf_page_access.h"
+#include "leaf_mutation_policy.h"
 #include "record.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 
 bool tinydb_record_insert_base(Table* table,
                                const TableSchema* schema,
@@ -44,73 +42,16 @@ static bool mutation_tree_is_fixed_v1(Table* table,
                                       const TableSchema* schema,
                                       char* message,
                                       size_t message_size) {
-    if (table == NULL || table->pager == NULL || schema == NULL) {
+    if (schema == NULL) {
         set_message(message,
                     message_size,
-                    "table and schema are required before generic mutation");
+                    "schema is required before generic mutation");
         return false;
     }
-
-    uint32_t previous_root = table->root_page_num;
-    table->root_page_num = schema->root_page_num;
-    Cursor* cursor = tinydb_leaf_read_start(table);
-    if (cursor == NULL) {
-        table->root_page_num = previous_root;
-        set_message(message,
-                    message_size,
-                    "unable to locate the first leaf before generic mutation");
-        return false;
-    }
-
-    uint32_t page_num = cursor->page_num;
-    free(cursor);
-
-    /* A sibling cycle is corruption. Keep the guard independent of the main
-     * file page count because committed WAL shadow pages can legitimately sit
-     * beyond the checkpointed file length until recovery/checkpoint catches up. */
-    uint32_t traversed = 0u;
-    const uint32_t traversal_limit = 1000000u;
-    while (true) {
-        if (page_num == INVALID_PAGE_NUM || traversed++ >= traversal_limit) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "corrupt or cyclic leaf chain blocks generic mutation");
-            return false;
-        }
-
-        void* page = get_page(table->pager, page_num);
-        TinyDBLeafPageFormat format =
-            tinydb_leaf_format_detect_page(page, PAGE_SIZE);
-        if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "slotted leaf V2 pages are read-only until V2 mutation and split recovery are enabled");
-            return false;
-        }
-        if (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "unknown or corrupt leaf format blocks generic mutation");
-            return false;
-        }
-
-        uint32_t next_page = 0u;
-        if (!tinydb_leaf_page_next(page, PAGE_SIZE, &next_page)) {
-            table->root_page_num = previous_root;
-            set_message(message,
-                        message_size,
-                        "unable to validate the leaf chain before generic mutation");
-            return false;
-        }
-        if (next_page == 0u) break;
-        page_num = next_page;
-    }
-
-    table->root_page_num = previous_root;
-    return true;
+    return tinydb_leaf_tree_mutation_supported(table,
+                                               schema->root_page_num,
+                                               message,
+                                               message_size);
 }
 
 static bool prepare_index_epoch(Table* table,
