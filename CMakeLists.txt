@@ -303,3 +303,6 @@ target_link_libraries(tinydb_row_envelope_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_compact_v2_read_probe tests/compact_v2_read_probe.c)
 target_link_libraries(tinydb_compact_v2_read_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_slotted_v2_split_insert_probe tests/slotted_v2_split_insert_probe.c)
+target_link_libraries(tinydb_slotted_v2_split_insert_probe PRIVATE tinydb_core)
