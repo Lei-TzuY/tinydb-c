@@ -86,6 +86,33 @@ int main(void) {
         return 7;
     }
 
-    printf("SLOTTED_V2_PUBLISH_BATCH_OK atomic=yes rollback=yes checksum_isolated=yes duplicate_guard=yes\n");
+    unsigned char root_page[PAGE_SIZE];
+    unsigned char staged_root[PAGE_SIZE];
+    memset(root_page, 0x71, PAGE_USABLE_SIZE);
+    memset(root_page + PAGE_USABLE_SIZE, 0xD4, PAGE_CHECKSUM_SIZE);
+    memset(staged_root, 0x82, sizeof(staged_root));
+    TinyDBV2PublishEntry root_zero = {0u, root_page, staged_root};
+    if (!tinydb_v2_publish_batch(&root_zero,
+                                 1u,
+                                 TINYDB_V2_PUBLISH_NO_FAIL) ||
+        !page_equals(root_page, 0x82, 0xD4)) {
+        fprintf(stderr, "valid page-zero root publication was rejected\n");
+        return 8;
+    }
+
+    TinyDBV2PublishEntry invalid = {
+        INVALID_PAGE_NUM,
+        root_page,
+        staged_root,
+    };
+    if (tinydb_v2_publish_batch(&invalid,
+                                1u,
+                                TINYDB_V2_PUBLISH_NO_FAIL)) {
+        fprintf(stderr, "INVALID_PAGE_NUM publication was accepted\n");
+        return 9;
+    }
+
+    printf("SLOTTED_V2_PUBLISH_BATCH_OK atomic=yes rollback=yes "
+           "checksum_isolated=yes duplicate_guard=yes root0=yes\n");
     return 0;
 }
