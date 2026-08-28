@@ -27,21 +27,25 @@ static void end_root_scope(Table* table, uint32_t previous_root) {
     table->root_page_num = previous_root;
 }
 
-static bool cursor_key_equals(Cursor* cursor, uint32_t key) {
+static bool cursor_key(Cursor* cursor, uint32_t* key) {
+    if (key != NULL) *key = 0u;
     if (cursor == NULL || cursor->table == NULL ||
-        cursor->table->pager == NULL ||
+        cursor->table->pager == NULL || key == NULL ||
         cursor->page_num == INVALID_PAGE_NUM ||
         cursor->page_num >= cursor->table->pager->num_pages) {
         return false;
     }
     void* page = get_page(cursor->table->pager, cursor->page_num);
     if (get_node_type(page) != NODE_LEAF) return false;
-    uint32_t found = 0u;
     return tinydb_leaf_page_key_at(page,
                                    PAGE_SIZE,
                                    cursor->cell_num,
-                                   &found) &&
-           found == key;
+                                   key);
+}
+
+static bool cursor_key_equals(Cursor* cursor, uint32_t key) {
+    uint32_t found = 0u;
+    return cursor_key(cursor, &found) && found == key;
 }
 
 static bool raw_value_to_payload(const TableSchema* schema,
@@ -201,6 +205,75 @@ uint32_t tinydb_record_payload_scan(Table* table,
         if (!tinydb_leaf_read_advance_checked(cursor)) {
             complete = false;
             set_message(message, message_size, "leaf scan encountered corrupt traversal metadata");
+            break;
+        }
+    }
+
+    free(cursor);
+    end_root_scope(table, previous_root);
+    if (scan_complete != NULL) *scan_complete = complete;
+    return complete ? count : 0u;
+}
+
+uint32_t tinydb_record_payload_scan_range(Table* table,
+                                          const TableSchema* schema,
+                                          uint32_t min_id,
+                                          uint32_t max_id,
+                                          TinyDBRecordPayloadVisitor visitor,
+                                          void* context,
+                                          bool* scan_complete,
+                                          char* message,
+                                          size_t message_size) {
+    if (scan_complete != NULL) *scan_complete = false;
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (table == NULL || schema == NULL) {
+        set_message(message, message_size, "table and schema are required");
+        return 0u;
+    }
+    if (!tinydb_record_payload_schema_supported(schema, message, message_size)) {
+        return 0u;
+    }
+    if (min_id > max_id) {
+        if (scan_complete != NULL) *scan_complete = true;
+        return 0u;
+    }
+
+    uint32_t previous_root = 0u;
+    begin_root_scope(table, schema, &previous_root);
+    Cursor* cursor = tinydb_leaf_read_find(table, min_id);
+    if (cursor == NULL) {
+        end_root_scope(table, previous_root);
+        set_message(message, message_size, "unable to seek to payload range start");
+        return 0u;
+    }
+
+    uint32_t count = 0u;
+    bool complete = true;
+    while (!cursor->end_of_table) {
+        uint32_t key = 0u;
+        if (!cursor_key(cursor, &key)) {
+            complete = false;
+            set_message(message, message_size, "unable to read primary key during payload range scan");
+            break;
+        }
+        if (key > max_id) break;
+        if (key < min_id) {
+            complete = false;
+            set_message(message, message_size, "payload range cursor moved before its lower bound");
+            break;
+        }
+
+        TinyDBRecordPayload payload;
+        if (!cursor_to_payload(schema, cursor, &payload)) {
+            complete = false;
+            set_message(message, message_size, "unable to decode logical row payload during range scan");
+            break;
+        }
+        count++;
+        if (visitor != NULL && !visitor(schema, &payload, context)) break;
+        if (!tinydb_leaf_read_advance_checked(cursor)) {
+            complete = false;
+            set_message(message, message_size, "payload range scan encountered corrupt traversal metadata");
             break;
         }
     }
