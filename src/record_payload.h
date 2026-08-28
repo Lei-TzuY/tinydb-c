@@ -77,7 +77,18 @@ uint32_t tinydb_record_payload_scan_range(Table* table,
                                           char* message,
                                           size_t message_size);
 
-/* Payload-native point UPDATE is the first wide-schema mutation seam. It keeps
+/* Payload-native INSERT writes a schema-sized payload directly into an
+ * existing slotted V2 leaf. The first production seam is deliberately
+ * topology-neutral: it may initialize an empty V2 root leaf or insert without
+ * changing a non-root leaf maximum/sibling boundary, but it does not split a
+ * leaf or propagate parent separators yet. */
+bool tinydb_record_payload_insert(Table* table,
+                                  const TableSchema* schema,
+                                  const TinyDBRecordPayload* payload,
+                                  char* message,
+                                  size_t message_size);
+
+/* Payload-native point UPDATE is the wide-schema replacement seam. It keeps
  * the primary key stable, invalidates generic secondary-index snapshots before
  * mutation, supports fixed V1 rows only when the logical payload fits ROW_SIZE,
  * and updates existing compact-envelope V2 rows in place when the replacement
