@@ -50,7 +50,8 @@ bool tinydb_record_delete(Table* table,
     unsigned char leaf_before[PAGE_SIZE];
     memset(leaf_before, 0, sizeof(leaf_before));
 
-    if (cursor != NULL && cursor->page_num != INVALID_PAGE_NUM &&
+    if (cursor != NULL && cursor->page_num != 0u &&
+        cursor->page_num != INVALID_PAGE_NUM &&
         cursor->page_num < table->pager->num_pages &&
         cursor->page_num != schema->root_page_num) {
         leaf_page_num = cursor->page_num;
