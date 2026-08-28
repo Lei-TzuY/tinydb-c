@@ -103,7 +103,9 @@ def main():
             "V2_MAX_DELETE_OK",
             "separator_update=yes",
             "rollback=yes",
-            "empty_leaf_rollback=yes",
+            "empty_leaf_remove=yes",
+            "allocator_rollback=yes",
+            "sibling_relink=yes",
             "root_rightmost=yes",
             "reopen=yes",
             "integrity=yes",
@@ -114,9 +116,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: V2 max-key deletion can atomically lower separators, rolls back "
-        "both non-empty and supported empty-leaf mutations cleanly, and permits "
-        "a root's rightmost child max delete"
+        "PASS: V2 max-key deletion lowers separators and safely removes a supported "
+        "single-row interior leaf, restoring topology/free-list state on rollback "
+        "and preserving child removal plus sibling relinks across commit/reopen"
     )
 
 
