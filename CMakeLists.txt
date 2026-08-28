@@ -82,6 +82,7 @@ set(TINYDB_CORE_SOURCES
     src/record_insert_v2_root_overflow.c
     src/record_payload.c
     src/record_read_v2.c
+    src/record_update_payload_route.c
     src/slotted_leaf_v2.c
     src/table.c
     src/varchar_width_parser.c
@@ -221,7 +222,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_index_record_guard.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_record_insert=tinydb_record_insert_mixed_base;tinydb_record_delete=tinydb_record_delete_mixed_base"
+    "tinydb_record_insert=tinydb_record_insert_mixed_base;tinydb_record_update=tinydb_record_update_mixed_legacy_base;tinydb_record_delete=tinydb_record_delete_mixed_base"
 )
 set_source_files_properties(
     src/record.c
