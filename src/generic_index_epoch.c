@@ -7,7 +7,9 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -70,6 +72,43 @@ static bool sync_file(FILE* file) {
 #endif
 }
 
+#ifndef _WIN32
+static bool sync_parent_directory(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') return false;
+
+    char directory[600];
+    int written = snprintf(directory, sizeof(directory), "%s", filename);
+    if (written < 0 || (size_t)written >= sizeof(directory)) return false;
+
+    char* slash = strrchr(directory, '/');
+    if (slash == NULL) {
+        snprintf(directory, sizeof(directory), ".");
+    } else if (slash == directory) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+
+    int fd = open(directory, O_RDONLY);
+    if (fd < 0) return false;
+    bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
+}
+#endif
+
+static bool replace_file_atomically(const char* temporary,
+                                    const char* destination) {
+#ifdef _WIN32
+    return MoveFileExA(temporary,
+                       destination,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    if (rename(temporary, destination) != 0) return false;
+    return sync_parent_directory(destination);
+#endif
+}
+
 static bool epoch_filename(const Table* table, char* output, size_t output_size) {
     if (table == NULL || table->pager == NULL) return false;
     int written = snprintf(output,
@@ -94,7 +133,13 @@ static uint64_t epoch_checksum(uint64_t epoch) {
 }
 
 static bool write_epoch_file(const char* filename, uint64_t epoch) {
-    FILE* file = fopen(filename, "wb");
+    if (filename == NULL || filename[0] == '\0') return false;
+
+    char temporary[640];
+    int written = snprintf(temporary, sizeof(temporary), "%s.tmp", filename);
+    if (written < 0 || (size_t)written >= sizeof(temporary)) return false;
+
+    FILE* file = fopen(temporary, "wb");
     if (file == NULL) return false;
 
     unsigned char u32[4];
@@ -112,7 +157,16 @@ static bool write_epoch_file(const char* filename, uint64_t epoch) {
 
     if (ok) ok = sync_file(file);
     if (fclose(file) != 0) ok = false;
-    return ok;
+    if (!ok) {
+        remove(temporary);
+        return false;
+    }
+
+    if (!replace_file_atomically(temporary, filename)) {
+        remove(temporary);
+        return false;
+    }
+    return true;
 }
 
 static bool read_epoch_file(const char* filename, uint64_t* epoch) {
