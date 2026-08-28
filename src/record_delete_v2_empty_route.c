@@ -8,6 +8,7 @@
 #include "record_delete_v2_internal_borrow_local.h"
 #include "record_delete_v2_internal_borrow_root.h"
 #include "record_delete_v2_internal_merge_borrow_root.h"
+#include "record_delete_v2_internal_merge_borrow_root_left.h"
 #include "record_delete_v2_internal_merge_local.h"
 #include "record_delete_v2_internal_merge_root.h"
 #include "record_delete_v2_internal_merge_wide_root.h"
@@ -147,6 +148,17 @@ bool tinydb_record_delete(Table* table,
                                                             id,
                                                             message,
                                                             message_size);
+        if (merge == TINYDB_INTERNAL_MERGE_ROOT_SUCCESS) return true;
+        if (merge == TINYDB_INTERNAL_MERGE_ROOT_FAILURE) return false;
+
+        merge = tinydb_try_delete_v2_internal_merge_borrow_root_from_left(
+            table,
+            schema,
+            leaf_page_num,
+            leaf_before,
+            id,
+            message,
+            message_size);
         if (merge == TINYDB_INTERNAL_MERGE_ROOT_SUCCESS) return true;
         if (merge == TINYDB_INTERNAL_MERGE_ROOT_FAILURE) return false;
 
