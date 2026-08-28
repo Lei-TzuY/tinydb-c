@@ -94,16 +94,17 @@ def main():
             "row_size=308",
             "initial_root=1",
             "duplicate_guard=1",
-            "capacity_guard=1",
+            "root_split=1",
+            "nonroot_guard=1",
             "reopen=1",
         ):
             if marker not in output:
                 raise AssertionError(output)
 
     print(
-        "PASS: payload-native INSERT creates and grows a real 308-byte compact V2 "
-        "root leaf without TinyDBRecord narrowing, rejects duplicates and split-required "
-        "capacity overflow atomically, and survives reopen"
+        "PASS: payload-native INSERT creates a real 308-byte compact V2 root leaf, "
+        "grows it through an atomic stable-root split into two linked V2 children, "
+        "keeps unsupported non-root separator growth fail-closed, and survives reopen"
     )
 
 
