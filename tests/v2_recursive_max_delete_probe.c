@@ -52,12 +52,6 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
-static uint32_t read_u32(const unsigned char* p) {
-    uint32_t value = 0u;
-    memcpy(&value, p, sizeof(value));
-    return value;
-}
-
 static void write_u32(unsigned char* p, uint32_t value) {
     memcpy(p, &value, sizeof(value));
 }
