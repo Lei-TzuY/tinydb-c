@@ -3,6 +3,7 @@
 #include "leaf_page_access.h"
 #include "record.h"
 #include "record_payload.h"
+#include "row_envelope.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,36 @@ static bool cursor_key_equals(Cursor* cursor, uint32_t key) {
            found == key;
 }
 
+static bool raw_value_to_payload(const TableSchema* schema,
+                                 const void* value,
+                                 uint32_t stored_length,
+                                 TinyDBLeafPageFormat format,
+                                 TinyDBRecordPayload* payload) {
+    if (schema == NULL || value == NULL || payload == NULL ||
+        schema->row_size == 0u || schema->row_size > ROW_SIZE) {
+        return false;
+    }
+
+    memset(payload, 0, sizeof(*payload));
+    if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        if (stored_length < schema->row_size) return false;
+        payload->length = schema->row_size;
+        memcpy(payload->bytes, value, payload->length);
+        return true;
+    }
+    if (format != TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) return false;
+
+    if (stored_length == schema->row_size) {
+        payload->length = schema->row_size;
+        memcpy(payload->bytes, value, payload->length);
+        return true;
+    }
+    return tinydb_row_envelope_decode(schema,
+                                      value,
+                                      stored_length,
+                                      payload);
+}
+
 static bool cursor_to_record(const TableSchema* schema,
                              Cursor* cursor,
                              TinyDBRecord* record) {
@@ -60,20 +91,15 @@ static bool cursor_to_record(const TableSchema* schema,
         return false;
     }
 
+    TinyDBRecordPayload payload;
     TinyDBLeafPageFormat format = tinydb_leaf_format_detect_page(page, PAGE_SIZE);
-    if ((format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 &&
-         stored_length < schema->row_size) ||
-        (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
-         stored_length != schema->row_size) ||
-        (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 &&
-         format != TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2)) {
+    if (!raw_value_to_payload(schema,
+                              value,
+                              stored_length,
+                              format,
+                              &payload)) {
         return false;
     }
-
-    TinyDBRecordPayload payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.length = schema->row_size;
-    memcpy(payload.bytes, value, payload.length);
 
     char message[TINYDB_RECORD_MESSAGE_MAX];
     return tinydb_record_payload_to_record(schema,
