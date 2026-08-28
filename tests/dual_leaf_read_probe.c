@@ -1,0 +1,234 @@
+#include "engine.h"
+#include "leaf_format.h"
+#include "leaf_migration.h"
+#include "leaf_page_access.h"
+#include "record.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static bool exec_ok(TinyDB* db, const char* sql) {
+    TinyDBSqlResult result;
+    TinyDBSqlStatus status = tinydb_execute_sql(db, sql, &result);
+    if (status != TINYDB_SQL_SUCCESS) {
+        fprintf(stderr, "SQL failed: %s (%s)\n", sql, result.message);
+        return false;
+    }
+    return true;
+}
+
+static TinyDBValue int_value(uint32_t value) {
+    TinyDBValue result;
+    memset(&result, 0, sizeof(result));
+    result.type = COL_TYPE_INT;
+    result.int_value = value;
+    return result;
+}
+
+static bool migrate_leaf(Table* table,
+                         uint32_t page_num,
+                         uint32_t logical_value_length) {
+    void* page = get_page(table->pager, page_num);
+    if (!tinydb_leaf_page_is_fixed_v1(page, PAGE_SIZE)) return false;
+
+    unsigned char scratch[PAGE_SIZE];
+    memset(scratch, 0, sizeof(scratch));
+    if (!tinydb_leaf_migrate_v1_to_v2(page,
+                                      PAGE_SIZE,
+                                      logical_value_length,
+                                      scratch,
+                                      sizeof(scratch))) {
+        return false;
+    }
+
+    memcpy(page, scratch, PAGE_USABLE_SIZE);
+    mark_page_dirty(table->pager, page_num);
+    return tinydb_leaf_format_detect_page(page, PAGE_SIZE) ==
+           TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2;
+}
+
+static bool expect_row(Table* table,
+                       TableSchema* schema,
+                       uint32_t id,
+                       uint32_t bucket,
+                       uint32_t score) {
+    TinyDBRecord record;
+    if (!tinydb_record_find(table, schema, id, &record)) {
+        fprintf(stderr, "record %u was not found\n", id);
+        return false;
+    }
+
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    uint32_t count = 0u;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_decode(schema,
+                              &record,
+                              values,
+                              MAX_COLUMNS_PER_TABLE,
+                              &count,
+                              message,
+                              sizeof(message))) {
+        fprintf(stderr, "record %u decode failed: %s\n", id, message);
+        return false;
+    }
+    return count == 3u &&
+           values[0].int_value == id &&
+           values[1].int_value == bucket &&
+           values[2].int_value == score;
+}
+
+static uint32_t forward_count(Table* table, const TableSchema* schema) {
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+    Cursor* cursor = table_start(table);
+    uint32_t count = 0u;
+    if (cursor != NULL) {
+        while (!cursor->end_of_table) {
+            count++;
+            cursor_advance(cursor);
+        }
+    }
+    free(cursor);
+    table->root_page_num = previous_root;
+    return count;
+}
+
+static uint32_t backward_count(Table* table, const TableSchema* schema) {
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+    Cursor* cursor = table_end(table);
+    uint32_t count = 0u;
+    if (cursor != NULL) {
+        while (!cursor->end_of_table) {
+            count++;
+            cursor_retreat(cursor);
+        }
+    }
+    free(cursor);
+    table->root_page_num = previous_root;
+    return count;
+}
+
+static bool verify_reads(Table* table, TableSchema* schema) {
+    if (!expect_row(table, schema, 1u, 1u, 10u) ||
+        !expect_row(table, schema, 20u, 0u, 200u) ||
+        !expect_row(table, schema, 40u, 0u, 400u)) {
+        return false;
+    }
+    if (tinydb_record_scan(table, schema, NULL, NULL) != 40u) {
+        fprintf(stderr, "mixed-format generic scan did not return 40 rows\n");
+        return false;
+    }
+    if (forward_count(table, schema) != 40u ||
+        backward_count(table, schema) != 40u) {
+        fprintf(stderr, "mixed-format cursor traversal count mismatch\n");
+        return false;
+    }
+    return true;
+}
+
+static bool migrate_edge_leaves(Table* table, TableSchema* schema) {
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+
+    Cursor* first = table_find(table, 1u);
+    Cursor* last = table_find(table, 40u);
+    if (first == NULL || last == NULL || first->page_num == last->page_num) {
+        fprintf(stderr, "test table did not split into distinct edge leaves\n");
+        free(first);
+        free(last);
+        table->root_page_num = previous_root;
+        return false;
+    }
+
+    uint32_t first_page = first->page_num;
+    uint32_t last_page = last->page_num;
+    free(first);
+    free(last);
+
+    bool ok = migrate_leaf(table, first_page, schema->row_size) &&
+              migrate_leaf(table, last_page, schema->row_size);
+    table->root_page_num = previous_root;
+    return ok;
+}
+
+static bool expect_mutation_rejected(Table* table, TableSchema* schema) {
+    TinyDBValue values[3];
+    values[0] = int_value(1u);
+    values[1] = int_value(99u);
+    values[2] = int_value(999u);
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (tinydb_record_update(table,
+                             schema,
+                             1u,
+                             values,
+                             3u,
+                             message,
+                             sizeof(message))) {
+        fprintf(stderr, "mutation unexpectedly wrote a mixed V1/V2 tree\n");
+        return false;
+    }
+    if (strstr(message, "read-only") == NULL) {
+        fprintf(stderr, "unexpected mutation rejection: %s\n", message);
+        return false;
+    }
+    return expect_row(table, schema, 1u, 1u, 10u);
+}
+
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: dual_leaf_read_probe <db-path>\n");
+        return 2;
+    }
+
+    TinyDB* db = tinydb_open(argv[1]);
+    if (db == NULL) return 3;
+    if (!exec_ok(db, "CREATE TABLE metrics (id INT, bucket INT, score INT);")) {
+        tinydb_close(db);
+        return 4;
+    }
+
+    for (uint32_t id = 1u; id <= 40u; id++) {
+        char sql[128];
+        snprintf(sql,
+                 sizeof(sql),
+                 "INSERT INTO metrics VALUES (%u, %u, %u);",
+                 id,
+                 id % 4u,
+                 id * 10u);
+        if (!exec_ok(db, sql)) {
+            tinydb_close(db);
+            return 5;
+        }
+    }
+
+    Table* table = tinydb_table(db);
+    TableSchema* schema = table_get_schema(table, "metrics");
+    if (schema == NULL || schema->row_size != 12u) {
+        fprintf(stderr, "unexpected metrics schema\n");
+        tinydb_close(db);
+        return 6;
+    }
+    if (!migrate_edge_leaves(table, schema) ||
+        !verify_reads(table, schema) ||
+        !expect_mutation_rejected(table, schema)) {
+        tinydb_close(db);
+        return 7;
+    }
+
+    tinydb_close(db);
+    db = tinydb_open(argv[1]);
+    if (db == NULL) return 8;
+    table = tinydb_table(db);
+    schema = table_get_schema(table, "metrics");
+    if (schema == NULL || !verify_reads(table, schema) ||
+        !expect_mutation_rejected(table, schema)) {
+        tinydb_close(db);
+        return 9;
+    }
+
+    tinydb_close(db);
+    printf("PASS: production cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, forward/backward scan, and reopen while mutation fails closed.\n");
+    return 0;
+}
