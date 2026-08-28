@@ -108,7 +108,7 @@ def main():
             raise AssertionError(output)
         for marker in (
             "V2_RECURSIVE_INTERNAL_UNDERFLOW_GUARD_OK",
-            "unsupported_right=yes",
+            "unsupported_outer=yes",
             "height4=yes",
             "fail_closed=yes",
             "root_stable=yes",
@@ -124,10 +124,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: unsupported height-4 V2 DELETE orientation remains fail-closed; "
+        "PASS: unsupported outer-edge height-4 V2 DELETE remains fail-closed; "
         "records, topology, leaf links, allocator state, and reopen integrity "
-        "stay unchanged while the separately covered root-height orientation "
-        "is allowed to contract"
+        "stay unchanged while both boundary root-height orientations contract"
     )
 
 
