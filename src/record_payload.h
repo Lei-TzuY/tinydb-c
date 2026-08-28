@@ -77,11 +77,12 @@ uint32_t tinydb_record_payload_scan_range(Table* table,
                                           char* message,
                                           size_t message_size);
 
-/* Payload-native INSERT writes a schema-sized payload directly into an
- * existing slotted V2 leaf. The first production seam is deliberately
- * topology-neutral: it may initialize an empty V2 root leaf or insert without
- * changing a non-root leaf maximum/sibling boundary, but it does not split a
- * leaf or propagate parent separators yet. */
+/* Payload-native INSERT writes a schema-sized payload directly into compact V2
+ * storage. It can initialize and grow a single V2 root leaf, including an
+ * atomic stable-root split into two linked V2 children when that root fills.
+ * On non-root leaves it remains deliberately topology-neutral: the new key may
+ * not increase the child maximum or cross the previous sibling boundary, and
+ * non-root leaf split/separator propagation is not yet wired to this API. */
 bool tinydb_record_payload_insert(Table* table,
                                   const TableSchema* schema,
                                   const TinyDBRecordPayload* payload,
