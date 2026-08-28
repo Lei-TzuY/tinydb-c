@@ -647,6 +647,19 @@ bool tinydb_record_payload_try_full_root_parent_split(
         return false;
     }
 
+    /* Publication copies are not durable/no-steal protected until their
+     * pages are marked dirty. The descendant reparent walk touches hundreds of
+     * leaves for a full root and therefore creates heavy LRU pressure. Mark the
+     * complete staged batch dirty before that walk so page zero, the split
+     * leaves, and the two new internal pages cannot be evicted as clean frames
+     * and silently reloaded from the old on-disk topology. */
+    mark_page_dirty(table->pager, left_page_num);
+    mark_page_dirty(table->pager, right_leaf_page_num);
+    mark_page_dirty(table->pager, left_internal_page_num);
+    mark_page_dirty(table->pager, right_internal_page_num);
+    mark_page_dirty(table->pager, root_page_num);
+    if (!is_tail) mark_page_dirty(table->pager, next_page_num);
+
     reparent_existing_descendants(table,
                                   left_page_num,
                                   right_leaf_page_num,
@@ -655,13 +668,6 @@ bool tinydb_record_payload_try_full_root_parent_split(
                                   left_internal_after,
                                   right_internal_page_num,
                                   right_internal_after);
-
-    mark_page_dirty(table->pager, left_page_num);
-    mark_page_dirty(table->pager, right_leaf_page_num);
-    mark_page_dirty(table->pager, left_internal_page_num);
-    mark_page_dirty(table->pager, right_internal_page_num);
-    mark_page_dirty(table->pager, root_page_num);
-    if (!is_tail) mark_page_dirty(table->pager, next_page_num);
 
     if (!table->in_transaction) pager_commit(table->pager);
     if (message != NULL && message_size > 0u) message[0] = '\0';
