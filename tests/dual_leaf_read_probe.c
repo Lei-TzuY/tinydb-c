@@ -155,6 +155,75 @@ static bool migrate_edge_leaves(Table* table, TableSchema* schema) {
     return ok;
 }
 
+static bool expect_out_of_range_sibling_rejected(Table* table,
+                                                  TableSchema* schema) {
+    uint32_t previous_root = table->root_page_num;
+    table->root_page_num = schema->root_page_num;
+    Cursor* first = tinydb_leaf_read_start(table);
+    if (first == NULL) {
+        table->root_page_num = previous_root;
+        return false;
+    }
+
+    void* first_page = get_page(table->pager, first->page_num);
+    uint32_t middle_page_num = 0u;
+    bool located = tinydb_leaf_page_next(first_page,
+                                         PAGE_SIZE,
+                                         &middle_page_num) &&
+                   middle_page_num != 0u &&
+                   middle_page_num < table->pager->num_pages;
+    free(first);
+    if (!located) {
+        table->root_page_num = previous_root;
+        fprintf(stderr, "unable to locate middle leaf for corruption probe\n");
+        return false;
+    }
+
+    void* middle_page = get_page(table->pager, middle_page_num);
+    if (!tinydb_leaf_page_is_fixed_v1(middle_page, PAGE_SIZE)) {
+        table->root_page_num = previous_root;
+        fprintf(stderr, "expected middle leaf to remain fixed V1\n");
+        return false;
+    }
+
+    uint32_t original_next = 0u;
+    memcpy(&original_next,
+           (unsigned char*)middle_page + LEAF_NODE_NEXT_LEAF_OFFSET,
+           sizeof(original_next));
+    if (original_next == 0u) {
+        table->root_page_num = previous_root;
+        fprintf(stderr, "middle leaf unexpectedly has no successor\n");
+        return false;
+    }
+
+    uint32_t pages_before = table->pager->num_pages;
+    uint32_t corrupt_next = pages_before + 17u;
+    memcpy((unsigned char*)middle_page + LEAF_NODE_NEXT_LEAF_OFFSET,
+           &corrupt_next,
+           sizeof(corrupt_next));
+    mark_page_dirty(table->pager, middle_page_num);
+    table->root_page_num = previous_root;
+
+    uint32_t corrupt_scan = tinydb_record_scan(table, schema, NULL, NULL);
+    bool rejected = corrupt_scan == 0u && table->pager->num_pages == pages_before;
+
+    middle_page = get_page(table->pager, middle_page_num);
+    memcpy((unsigned char*)middle_page + LEAF_NODE_NEXT_LEAF_OFFSET,
+           &original_next,
+           sizeof(original_next));
+    mark_page_dirty(table->pager, middle_page_num);
+
+    if (!rejected) {
+        fprintf(stderr,
+                "corrupt sibling scan was not fail-closed (rows=%u pages=%u/%u)\n",
+                corrupt_scan,
+                table->pager->num_pages,
+                pages_before);
+        return false;
+    }
+    return tinydb_record_scan(table, schema, NULL, NULL) == 40u;
+}
+
 static bool expect_mutation_rejected(Table* table, TableSchema* schema) {
     char policy_message[TINYDB_RECORD_MESSAGE_MAX];
     if (tinydb_leaf_tree_mutation_supported(table,
@@ -229,6 +298,7 @@ int main(int argc, char** argv) {
     }
     if (!migrate_edge_leaves(table, schema) ||
         !verify_reads(table, schema) ||
+        !expect_out_of_range_sibling_rejected(table, schema) ||
         !expect_mutation_rejected(table, schema)) {
         tinydb_close(db);
         return 7;
@@ -240,12 +310,13 @@ int main(int argc, char** argv) {
     table = tinydb_table(db);
     schema = table_get_schema(table, "metrics");
     if (schema == NULL || !verify_reads(table, schema) ||
+        !expect_out_of_range_sibling_rejected(table, schema) ||
         !expect_mutation_rejected(table, schema)) {
         tinydb_close(db);
         return 9;
     }
 
     tinydb_close(db);
-    printf("PASS: isolated production read cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, forward/backward scan, and reopen while legacy mutation fails closed.\n");
+    printf("PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, scan, reopen, and fail closed on out-of-range sibling corruption without extending the pager; legacy mutation remains rejected.\n");
     return 0;
 }
