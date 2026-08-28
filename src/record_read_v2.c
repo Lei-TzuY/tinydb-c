@@ -1,6 +1,6 @@
 #include "leaf_cursor_read.h"
+#include "leaf_format.h"
 #include "leaf_page_access.h"
-#include "leaf_value.h"
 #include "record.h"
 #include "record_payload.h"
 
@@ -38,15 +38,42 @@ static bool cursor_key_equals(Cursor* cursor, uint32_t key) {
 static bool cursor_to_record(const TableSchema* schema,
                              Cursor* cursor,
                              TinyDBRecord* record) {
+    if (schema == NULL || cursor == NULL || cursor->table == NULL ||
+        cursor->table->pager == NULL || record == NULL ||
+        cursor->page_num == INVALID_PAGE_NUM ||
+        cursor->page_num >= cursor->table->pager->num_pages ||
+        schema->row_size == 0u || schema->row_size > ROW_SIZE) {
+        return false;
+    }
+
+    void* page = get_page(cursor->table->pager, cursor->page_num);
+    if (get_node_type(page) != NODE_LEAF) return false;
+
+    const void* value = NULL;
+    uint32_t stored_length = 0u;
+    if (!tinydb_leaf_page_value_at(page,
+                                   PAGE_SIZE,
+                                   cursor->cell_num,
+                                   &value,
+                                   &stored_length) ||
+        value == NULL) {
+        return false;
+    }
+
+    TinyDBLeafPageFormat format = tinydb_leaf_format_detect_page(page, PAGE_SIZE);
+    if ((format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 &&
+         stored_length < schema->row_size) ||
+        (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
+         stored_length != schema->row_size) ||
+        (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 &&
+         format != TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2)) {
+        return false;
+    }
+
     TinyDBRecordPayload payload;
     memset(&payload, 0, sizeof(payload));
     payload.length = schema->row_size;
-    if (!tinydb_leaf_value_read(cursor,
-                                payload.bytes,
-                                sizeof(payload.bytes),
-                                payload.length)) {
-        return false;
-    }
+    memcpy(payload.bytes, value, payload.length);
 
     char message[TINYDB_RECORD_MESSAGE_MAX];
     return tinydb_record_payload_to_record(schema,
