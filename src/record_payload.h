@@ -78,11 +78,13 @@ uint32_t tinydb_record_payload_scan_range(Table* table,
                                           size_t message_size);
 
 /* Payload-native INSERT writes a schema-sized payload directly into compact V2
- * storage. It can initialize and grow a single V2 root leaf, including an
- * atomic stable-root split into two linked V2 children when that root fills.
- * On non-root leaves it remains deliberately topology-neutral: the new key may
- * not increase the child maximum or cross the previous sibling boundary, and
- * non-root leaf split/separator propagation is not yet wired to this API. */
+ * storage without narrowing through TinyDBRecord. Proven growth paths include:
+ * an empty/single root leaf, atomic root-leaf split, non-root leaf split under
+ * a parent with space, and one-level growth when that parent is the full stable
+ * root (including root page zero). Tail leaves may grow their global maximum;
+ * non-tail separators and reciprocal sibling bounds are validated before
+ * publication. Overflow through a full non-root internal parent and arbitrary
+ * recursive ancestor chains remains a later payload-native seam. */
 bool tinydb_record_payload_insert(Table* table,
                                   const TableSchema* schema,
                                   const TinyDBRecordPayload* payload,
