@@ -308,8 +308,11 @@ static inline bool tinydb_stage_internal_root_collapse_to_internal(
         }
     }
 
-    if ((size_t)direct_child_count > SIZE_MAX / PAGE_SIZE) return false;
-    size_t scratch_bytes = (size_t)direct_child_count * PAGE_SIZE;
+    if (direct_child_count != 0u &&
+        (size_t)PAGE_SIZE > SIZE_MAX / (size_t)direct_child_count) {
+        return false;
+    }
+    size_t scratch_bytes = (size_t)direct_child_count * (size_t)PAGE_SIZE;
     unsigned char* child_scratch = (unsigned char*)malloc(scratch_bytes);
     if (child_scratch == NULL) return false;
 
