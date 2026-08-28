@@ -1,5 +1,5 @@
+#include "leaf_cursor_read.h"
 #include "leaf_page_access.h"
-#include "table.h"
 
 #include <stdlib.h>
 
@@ -57,7 +57,7 @@ static Cursor* internal_find(Table* table, uint32_t page_num, uint32_t key) {
     return NULL;
 }
 
-Cursor* table_find(Table* table, uint32_t key) {
+Cursor* tinydb_leaf_read_find(Table* table, uint32_t key) {
     if (table == NULL || table->pager == NULL ||
         !valid_page_number(table->root_page_num)) {
         return NULL;
@@ -72,8 +72,8 @@ Cursor* table_find(Table* table, uint32_t key) {
     return NULL;
 }
 
-Cursor* table_start(Table* table) {
-    Cursor* cursor = table_find(table, 0u);
+Cursor* tinydb_leaf_read_start(Table* table) {
+    Cursor* cursor = tinydb_leaf_read_find(table, 0u);
     if (cursor == NULL) return NULL;
     void* page = get_page(table->pager, cursor->page_num);
     uint32_t count = 0u;
@@ -85,7 +85,7 @@ Cursor* table_start(Table* table) {
     return cursor;
 }
 
-void* cursor_value(Cursor* cursor) {
+void* tinydb_leaf_read_value(Cursor* cursor) {
     if (cursor == NULL || cursor->table == NULL ||
         cursor->table->pager == NULL || !valid_page_number(cursor->page_num)) {
         return NULL;
@@ -104,7 +104,7 @@ void* cursor_value(Cursor* cursor) {
     return (void*)value;
 }
 
-void cursor_advance(Cursor* cursor) {
+void tinydb_leaf_read_advance(Cursor* cursor) {
     if (cursor == NULL || cursor->end_of_table ||
         cursor->table == NULL || cursor->table->pager == NULL) {
         return;
@@ -136,7 +136,7 @@ void cursor_advance(Cursor* cursor) {
     }
 }
 
-Cursor* table_end(Table* table) {
+Cursor* tinydb_leaf_read_end(Table* table) {
     if (table == NULL || table->pager == NULL ||
         !valid_page_number(table->root_page_num)) {
         return NULL;
@@ -159,7 +159,7 @@ Cursor* table_end(Table* table) {
                        count == 0u);
 }
 
-void cursor_retreat(Cursor* cursor) {
+void tinydb_leaf_read_retreat(Cursor* cursor) {
     if (cursor == NULL || cursor->end_of_table ||
         cursor->table == NULL || cursor->table->pager == NULL) {
         return;
