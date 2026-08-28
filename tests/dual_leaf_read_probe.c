@@ -2,6 +2,7 @@
 #include "leaf_cursor_read.h"
 #include "leaf_format.h"
 #include "leaf_migration.h"
+#include "leaf_mutation_policy.h"
 #include "leaf_page_access.h"
 #include "record.h"
 
@@ -155,6 +156,19 @@ static bool migrate_edge_leaves(Table* table, TableSchema* schema) {
 }
 
 static bool expect_mutation_rejected(Table* table, TableSchema* schema) {
+    char policy_message[TINYDB_RECORD_MESSAGE_MAX];
+    if (tinydb_leaf_tree_mutation_supported(table,
+                                            schema->root_page_num,
+                                            policy_message,
+                                            sizeof(policy_message))) {
+        fprintf(stderr, "shared mutation policy unexpectedly allows mixed V1/V2 tree\n");
+        return false;
+    }
+    if (strstr(policy_message, "read-only") == NULL) {
+        fprintf(stderr, "unexpected policy rejection: %s\n", policy_message);
+        return false;
+    }
+
     TinyDBValue values[3];
     values[0] = int_value(1u);
     values[1] = int_value(99u);
