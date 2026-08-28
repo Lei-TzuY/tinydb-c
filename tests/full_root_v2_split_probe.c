@@ -127,7 +127,6 @@ static bool seed_full_root(TinyDB* db,
     unsigned char candidate_envelope[PAGE_SIZE];
     uint32_t candidate_length = 0u;
     uint32_t previous_max = TARGET_CHILD_INDEX * RANGE_STEP;
-    uint32_t target_max = (TARGET_CHILD_INDEX + 1u) * RANGE_STEP;
     *candidate_key = previous_max + 1u;
     if (!encode_envelope(schema,
                          *candidate_key,
