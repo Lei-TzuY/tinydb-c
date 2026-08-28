@@ -3,6 +3,13 @@
 
 #include <stdlib.h>
 
+Cursor* table_find_v1_base(Table* table, uint32_t key);
+Cursor* table_start_v1_base(Table* table);
+Cursor* table_end_v1_base(Table* table);
+void* cursor_value_v1_base(Cursor* cursor);
+void cursor_advance_v1_base(Cursor* cursor);
+void cursor_retreat_v1_base(Cursor* cursor);
+
 static Cursor* make_cursor(Table* table,
                            uint32_t page_num,
                            uint32_t cell_num,
@@ -194,4 +201,32 @@ void tinydb_leaf_read_retreat(Cursor* cursor) {
             return;
         }
     }
+}
+
+/* Preserve the historical public cursor contract for all existing SQL,
+ * mutation, split, recovery, diagnostics, and legacy-index code. Mixed-format
+ * reads opt into tinydb_leaf_read_* explicitly instead of changing these
+ * semantics underneath V1 production code. */
+Cursor* table_find(Table* table, uint32_t key) {
+    return table_find_v1_base(table, key);
+}
+
+Cursor* table_start(Table* table) {
+    return table_start_v1_base(table);
+}
+
+Cursor* table_end(Table* table) {
+    return table_end_v1_base(table);
+}
+
+void* cursor_value(Cursor* cursor) {
+    return cursor_value_v1_base(cursor);
+}
+
+void cursor_advance(Cursor* cursor) {
+    cursor_advance_v1_base(cursor);
+}
+
+void cursor_retreat(Cursor* cursor) {
+    cursor_retreat_v1_base(cursor);
 }
