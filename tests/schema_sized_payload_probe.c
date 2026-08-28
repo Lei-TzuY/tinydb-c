@@ -1,4 +1,5 @@
 #include "record_payload.h"
+#include "record_payload_key.h"
 #include "row_envelope.h"
 
 #include <stdio.h>
@@ -58,6 +59,30 @@ int main(void) {
         return 3;
     }
 
+    uint32_t primary_key = 0u;
+    if (!tinydb_record_payload_primary_key(&wide,
+                                           &encoded,
+                                           &primary_key,
+                                           message,
+                                           sizeof(message)) ||
+        primary_key != 7u) {
+        fprintf(stderr, "schema-sized primary-key decode failed: %s\n", message);
+        return 4;
+    }
+
+    TinyDBRecordPayload malformed = encoded;
+    malformed.length--;
+    primary_key = 123u;
+    if (tinydb_record_payload_primary_key(&wide,
+                                          &malformed,
+                                          &primary_key,
+                                          message,
+                                          sizeof(message)) ||
+        primary_key != 0u) {
+        fprintf(stderr, "primary-key decoder accepted malformed payload length\n");
+        return 5;
+    }
+
     TinyDBValue decoded[3];
     uint32_t decoded_count = 0u;
     if (!tinydb_record_payload_decode_values(&wide,
@@ -71,7 +96,7 @@ int main(void) {
         strcmp(decoded[1].text, input[1].text) != 0 ||
         decoded[2].int_value != 99u) {
         fprintf(stderr, "wide payload decode failed: %s\n", message);
-        return 4;
+        return 6;
     }
 
     unsigned char stored[PAGE_USABLE_SIZE];
@@ -82,11 +107,11 @@ int main(void) {
                                                sizeof(stored),
                                                &stored_length)) {
         fprintf(stderr, "compact V2 envelope rejected wide logical payload\n");
-        return 5;
+        return 7;
     }
     if (stored_length >= encoded.length) {
         fprintf(stderr, "compact V2 envelope did not compact reserved VARCHAR bytes\n");
-        return 6;
+        return 8;
     }
 
     TinyDBRecordPayload reopened;
@@ -97,7 +122,7 @@ int main(void) {
         reopened.length != encoded.length ||
         memcmp(reopened.bytes, encoded.bytes, encoded.length) != 0) {
         fprintf(stderr, "compact V2 envelope round-trip failed\n");
-        return 7;
+        return 9;
     }
 
     TinyDBRecord legacy;
@@ -107,7 +132,7 @@ int main(void) {
                                         message,
                                         sizeof(message))) {
         fprintf(stderr, "legacy TinyDBRecord adapter accepted an oversized row\n");
-        return 8;
+        return 10;
     }
 
     TableSchema compact;
@@ -142,13 +167,25 @@ int main(void) {
         tinydb_row_envelope_schema_fingerprint(&wide) ==
             tinydb_row_envelope_schema_fingerprint(&compact)) {
         fprintf(stderr, "independent schema layout was not preserved\n");
-        return 9;
+        return 11;
     }
 
-    printf("SCHEMA_SIZED_PAYLOAD_OK wide=%u legacy=%u stored=%u compact=%u\n",
+    primary_key = 0u;
+    if (!tinydb_record_payload_primary_key(&compact,
+                                           &compact_payload,
+                                           &primary_key,
+                                           message,
+                                           sizeof(message)) ||
+        primary_key != 11u) {
+        fprintf(stderr, "compact schema primary-key decode failed: %s\n", message);
+        return 12;
+    }
+
+    printf("SCHEMA_SIZED_PAYLOAD_OK wide=%u legacy=%u stored=%u compact=%u key=%u\n",
            encoded.length,
            (unsigned)ROW_SIZE,
            stored_length,
-           compact_payload.length);
+           compact_payload.length,
+           primary_key);
     return 0;
 }
