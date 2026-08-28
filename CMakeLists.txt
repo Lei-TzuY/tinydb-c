@@ -74,6 +74,7 @@ set(TINYDB_CORE_SOURCES
     src/prepared_route.c
     src/profile.c
     src/record.c
+    src/record_delete_v2.c
     src/record_payload.c
     src/record_read_v2.c
     src/slotted_leaf_v2.c
@@ -212,6 +213,11 @@ set_source_files_properties(
     "tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_compound_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_compound_base"
 )
 
+set_source_files_properties(
+    src/generic_index_record_guard.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_record_delete=tinydb_record_delete_mixed_base"
+)
 set_source_files_properties(
     src/record.c
     PROPERTIES COMPILE_DEFINITIONS
