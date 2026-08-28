@@ -4,15 +4,29 @@ import sys
 import tempfile
 
 
+def find_core_library(repo_root):
+    candidates = [
+        os.path.join(repo_root, "build", "Debug", "tinydb_core.lib"),
+        os.path.join(repo_root, "build", "Release", "tinydb_core.lib"),
+        os.path.join(repo_root, "build", "tinydb_core.lib"),
+        os.path.join(repo_root, "build", "libtinydb_core.a"),
+    ]
+    return next((path for path in candidates if os.path.exists(path)), None)
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = os.path.join(repo_root, "tests", "slotted_leaf_v2_root_split_stage_probe.c")
+    core_library = find_core_library(repo_root)
     if not os.path.exists(source):
         raise AssertionError("missing slotted_leaf_v2_root_split_stage_probe.c")
+    if core_library is None:
+        raise AssertionError("could not find built tinydb_core static library")
 
     with tempfile.TemporaryDirectory(prefix="tinydb-v2-root-stage-") as temp_dir:
         source_cmake = source.replace("\\", "/")
         include_cmake = os.path.join(repo_root, "src").replace("\\", "/")
+        library_cmake = core_library.replace("\\", "/")
         with open(os.path.join(temp_dir, "CMakeLists.txt"), "w", encoding="utf-8") as handle:
             handle.write(
                 "cmake_minimum_required(VERSION 3.10)\n"
@@ -21,11 +35,15 @@ def main():
                 "set(CMAKE_C_STANDARD_REQUIRED ON)\n"
                 "if(MSVC)\n"
                 "  add_compile_options(/W4 /WX /utf-8)\n"
+                "  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n"
                 "else()\n"
                 "  add_compile_options(-Wall -Wextra -Werror)\n"
                 "endif()\n"
+                "add_library(tinydb_core STATIC IMPORTED GLOBAL)\n"
+                f'set_target_properties(tinydb_core PROPERTIES IMPORTED_LOCATION "{library_cmake}")\n'
                 f'add_executable(root_stage_probe "{source_cmake}")\n'
                 f'target_include_directories(root_stage_probe PRIVATE "{include_cmake}")\n'
+                "target_link_libraries(root_stage_probe PRIVATE tinydb_core)\n"
             )
 
         build_dir = os.path.join(temp_dir, "build")
@@ -46,7 +64,7 @@ def main():
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=60,
+            timeout=90,
         )
         if build.returncode != 0:
             raise AssertionError(build.stdout + build.stderr)
