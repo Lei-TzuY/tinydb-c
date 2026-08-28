@@ -78,6 +78,7 @@ set(TINYDB_CORE_SOURCES
     src/record_insert_v2_split.c
     src/record_insert_v2_nonroot_overflow.c
     src/record_insert_v2_recursive_overflow.c
+    src/record_insert_v2_root_overflow.c
     src/record_payload.c
     src/record_read_v2.c
     src/slotted_leaf_v2.c
@@ -235,6 +236,11 @@ set_source_files_properties(
     src/record_insert_v2_nonroot_overflow.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_record_insert=tinydb_record_insert_v2_nonroot_overflow_base"
+)
+set_source_files_properties(
+    src/record_insert_v2_recursive_overflow.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_record_insert=tinydb_record_insert_v2_recursive_overflow_base"
 )
 
 set_source_files_properties(
