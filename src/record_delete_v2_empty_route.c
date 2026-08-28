@@ -3,6 +3,7 @@
 #include "leaf_page_access.h"
 #include "record.h"
 #include "record_delete_v2_empty_leaf.h"
+#include "record_delete_v2_root_leaf_collapse.h"
 #include "slotted_leaf_v2.h"
 
 #include <stdbool.h>
@@ -77,6 +78,17 @@ bool tinydb_record_delete(Table* table,
     end_root_scope(table, previous_root);
 
     if (candidate) {
+        TinyDBRootLeafCollapseResult collapse =
+            tinydb_try_delete_v2_root_leaf_collapse(table,
+                                                    schema,
+                                                    leaf_page_num,
+                                                    leaf_before,
+                                                    id,
+                                                    message,
+                                                    message_size);
+        if (collapse == TINYDB_ROOT_LEAF_COLLAPSE_SUCCESS) return true;
+        if (collapse == TINYDB_ROOT_LEAF_COLLAPSE_FAILURE) return false;
+
         return tinydb_delete_v2_empty_leaf(table,
                                            schema,
                                            leaf_page_num,
