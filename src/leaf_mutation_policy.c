@@ -209,12 +209,26 @@ static bool validate_leaf_chain(Table* table,
         if (count > 0u) {
             uint32_t first_key = 0u;
             uint32_t last_key = 0u;
-            if (!tinydb_leaf_page_key_at(page, PAGE_SIZE, 0u, &first_key) ||
-                !tinydb_leaf_page_key_at(page,
-                                         PAGE_SIZE,
-                                         count - 1u,
-                                         &last_key) ||
-                (have_previous_key && previous_last_key >= first_key)) {
+            uint32_t previous_key = 0u;
+            for (uint32_t i = 0u; i < count; i++) {
+                uint32_t current_key = 0u;
+                if (!tinydb_leaf_page_key_at(page,
+                                             PAGE_SIZE,
+                                             i,
+                                             &current_key) ||
+                    (i > 0u && previous_key >= current_key)) {
+                    set_message(message,
+                                message_size,
+                                "non-monotonic leaf key order blocks mutation");
+                    supported = false;
+                    break;
+                }
+                if (i == 0u) first_key = current_key;
+                last_key = current_key;
+                previous_key = current_key;
+            }
+            if (!supported) break;
+            if (have_previous_key && previous_last_key >= first_key) {
                 set_message(message,
                             message_size,
                             "non-monotonic leaf key order blocks mutation");
