@@ -1,5 +1,6 @@
 #include "leaf_value.h"
 #include "leaf_format.h"
+#include "leaf_page_access.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -18,7 +19,8 @@ bool tinydb_leaf_value_legacy_layout_compatible(void) {
 static bool valid_cursor(const Cursor* cursor) {
     return cursor != NULL &&
            cursor->table != NULL &&
-           cursor->table->pager != NULL;
+           cursor->table->pager != NULL &&
+           cursor->page_num < cursor->table->pager->num_pages;
 }
 
 static bool valid_args(Cursor* cursor,
@@ -29,12 +31,19 @@ static bool valid_args(Cursor* cursor,
            tinydb_leaf_format_can_store_value(length);
 }
 
+static bool cursor_is_fixed_v1(Cursor* cursor) {
+    if (!valid_cursor(cursor)) return false;
+    void* page = get_page(cursor->table->pager, cursor->page_num);
+    return tinydb_leaf_page_is_fixed_v1(page, PAGE_SIZE);
+}
+
 bool tinydb_leaf_value_insert(Cursor* cursor,
                               uint32_t key,
                               const void* bytes,
                               uint32_t length) {
     if (!valid_args(cursor, bytes, length) ||
-        !tinydb_leaf_value_legacy_layout_compatible()) {
+        !tinydb_leaf_value_legacy_layout_compatible() ||
+        !cursor_is_fixed_v1(cursor)) {
         return false;
     }
 
@@ -52,10 +61,13 @@ bool tinydb_leaf_value_insert(Cursor* cursor,
 bool tinydb_leaf_value_write(Cursor* cursor,
                              const void* bytes,
                              uint32_t length) {
-    if (!valid_args(cursor, bytes, length)) return false;
+    if (!valid_args(cursor, bytes, length) || !cursor_is_fixed_v1(cursor)) {
+        return false;
+    }
 
     const TinyDBLeafFormatDescriptor* format = tinydb_leaf_format_current();
     void* slot = cursor_value(cursor);
+    if (slot == NULL) return false;
     memset(slot, 0, format->value_capacity);
     memcpy(slot, bytes, length);
     mark_page_dirty(cursor->table->pager, cursor->page_num);
@@ -66,12 +78,23 @@ bool tinydb_leaf_value_read(Cursor* cursor,
                             void* output,
                             size_t output_capacity,
                             uint32_t length) {
-    if (!valid_cursor(cursor) || output == NULL ||
-        !tinydb_leaf_format_can_store_value(length) ||
+    if (!valid_cursor(cursor) || output == NULL || length == 0u ||
         output_capacity < length) {
         return false;
     }
 
-    memcpy(output, cursor_value(cursor), length);
+    void* page = get_page(cursor->table->pager, cursor->page_num);
+    const void* value = NULL;
+    uint32_t stored_length = 0u;
+    if (!tinydb_leaf_page_value_at(page,
+                                   PAGE_SIZE,
+                                   cursor->cell_num,
+                                   &value,
+                                   &stored_length) ||
+        stored_length < length) {
+        return false;
+    }
+
+    memcpy(output, value, length);
     return true;
 }
