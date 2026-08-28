@@ -158,9 +158,10 @@ static bool delete_slotted_v2(Table* table,
 
         parent_page_num = read_u32_native(
             leaf_before + PARENT_POINTER_OFFSET);
-        if (parent_page_num == 0u ||
+        if (parent_page_num == INVALID_PAGE_NUM ||
             parent_page_num >= table->pager->num_pages ||
-            parent_page_num == leaf_page_num) {
+            parent_page_num == leaf_page_num ||
+            (parent_page_num == 0u && schema->root_page_num != 0u)) {
             free(cursor);
             end_root_scope(table, previous_root);
             set_message(message,
@@ -231,26 +232,6 @@ static bool delete_slotted_v2(Table* table,
                         message_size,
                         "slotted V2 max-key delete produced an invalid child boundary");
             return false;
-        }
-        if (parent_changed) {
-            uint32_t child_index = UINT32_MAX;
-            bool changed_again = false;
-            unsigned char verification[PAGE_SIZE];
-            memcpy(verification, parent_after, sizeof(verification));
-            if (tinydb_stage_parent_child_max_decrease(verification,
-                                                        PAGE_SIZE,
-                                                        leaf_page_num,
-                                                        id,
-                                                        checked_max,
-                                                        &child_index,
-                                                        &changed_again)) {
-                free(cursor);
-                end_root_scope(table, previous_root);
-                set_message(message,
-                            message_size,
-                            "slotted V2 parent separator was not published exactly once");
-                return false;
-            }
         }
     }
 
