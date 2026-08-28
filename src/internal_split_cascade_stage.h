@@ -122,12 +122,9 @@ static inline bool tinydb_stage_internal_split_cascade(
         return false;
     }
 
-    if ((size_t)ancestor_count > SIZE_MAX / PAGE_SIZE ||
-        (new_page_capacity > 0u &&
-         (size_t)new_page_capacity > SIZE_MAX / PAGE_SIZE)) {
-        return false;
-    }
-
+    /* ancestor_count/new_page_capacity are uint32_t and TinyDB's supported
+     * build targets use 64-bit size_t, so PAGE_SIZE multiplication cannot
+     * overflow size_t. malloc remains the authoritative allocation check. */
     unsigned char* scratch_ancestors =
         (unsigned char*)malloc((size_t)ancestor_count * PAGE_SIZE);
     unsigned char* scratch_new = new_page_capacity > 0u
