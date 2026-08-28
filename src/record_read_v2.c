@@ -21,10 +21,12 @@ static void end_root_scope(Table* table, uint32_t previous_root) {
 static bool cursor_key_equals(Cursor* cursor, uint32_t key) {
     if (cursor == NULL || cursor->table == NULL ||
         cursor->table->pager == NULL ||
-        cursor->page_num == INVALID_PAGE_NUM) {
+        cursor->page_num == INVALID_PAGE_NUM ||
+        cursor->page_num >= cursor->table->pager->num_pages) {
         return false;
     }
     void* page = get_page(cursor->table->pager, cursor->page_num);
+    if (get_node_type(page) != NODE_LEAF) return false;
     uint32_t found = 0u;
     return tinydb_leaf_page_key_at(page,
                                    PAGE_SIZE,
@@ -93,15 +95,22 @@ uint32_t tinydb_record_scan(Table* table,
     }
 
     uint32_t count = 0u;
+    bool corrupt = false;
     while (!cursor->end_of_table) {
         TinyDBRecord record;
-        if (!cursor_to_record(schema, cursor, &record)) break;
+        if (!cursor_to_record(schema, cursor, &record)) {
+            corrupt = true;
+            break;
+        }
         count++;
         if (visitor != NULL && !visitor(schema, &record, context)) break;
-        tinydb_leaf_read_advance(cursor);
+        if (!tinydb_leaf_read_advance_checked(cursor)) {
+            corrupt = true;
+            break;
+        }
     }
 
     free(cursor);
     end_root_scope(table, previous_root);
-    return count;
+    return corrupt ? 0u : count;
 }
