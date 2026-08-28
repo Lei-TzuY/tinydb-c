@@ -265,6 +265,27 @@ bool tinydb_record_payload_insert(Table* table,
         return false;
     }
 
+    /* Stage the complete row mutation in a private image before publishing the
+     * durable generic-index epoch.  This keeps every fallible slotted-page
+     * operation on the pre-mutation side of the recovery boundary: once the
+     * epoch advances, publication is a single validated image copy rather than
+     * an in-place mutation that may still fail and require rollback. */
+    unsigned char after[PAGE_SIZE];
+    memcpy(after, page, sizeof(after));
+    if (!tinydb_slotted_leaf_v2_insert(after,
+                                       PAGE_SIZE,
+                                       key,
+                                       envelope,
+                                       (uint16_t)envelope_length) ||
+        !tinydb_slotted_leaf_v2_validate(after, PAGE_SIZE)) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "payload-native INSERT failed before publishing the row");
+        return false;
+    }
+
     if (!tinydb_generic_index_epoch_before_mutation(table, schema)) {
         free(cursor);
         end_root_scope(table, previous_root);
@@ -274,23 +295,7 @@ bool tinydb_record_payload_insert(Table* table,
         return false;
     }
 
-    unsigned char before[PAGE_USABLE_SIZE];
-    memcpy(before, page, sizeof(before));
-    bool inserted = tinydb_slotted_leaf_v2_insert(page,
-                                                  PAGE_SIZE,
-                                                  key,
-                                                  envelope,
-                                                  (uint16_t)envelope_length);
-    if (!inserted) {
-        memcpy(page, before, sizeof(before));
-        free(cursor);
-        end_root_scope(table, previous_root);
-        set_message(message,
-                    message_size,
-                    "payload-native INSERT failed without publishing the row");
-        return false;
-    }
-
+    memcpy(page, after, PAGE_USABLE_SIZE);
     mark_page_dirty(table->pager, target_page_num);
     free(cursor);
     end_root_scope(table, previous_root);
