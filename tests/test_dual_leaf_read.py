@@ -42,7 +42,11 @@ def main():
         output = result.stdout + result.stderr
         if result.returncode != 0:
             raise AssertionError(output)
-        marker = "PASS: isolated production read cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves"
+        marker = (
+            "PASS: dual-format generic reads traverse mixed fixed-V1/slotted-V2 "
+            "leaves across lookup, scan, reopen, and fail closed on out-of-range "
+            "sibling corruption without extending the pager; legacy mutation remains rejected."
+        )
         if marker not in output:
             raise AssertionError("missing success marker\n" + output)
         print(output.strip())
