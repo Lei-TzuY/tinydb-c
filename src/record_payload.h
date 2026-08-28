@@ -63,6 +63,20 @@ uint32_t tinydb_record_payload_scan(Table* table,
                                     char* message,
                                     size_t message_size);
 
+/* Inclusive primary-key range scan for schema-sized payloads. The cursor seeks
+ * directly to min_id and stops before the first key greater than max_id, so
+ * wide generic query paths do not need to fall back through TinyDBRecord.
+ * An inverted range is a valid empty scan. */
+uint32_t tinydb_record_payload_scan_range(Table* table,
+                                          const TableSchema* schema,
+                                          uint32_t min_id,
+                                          uint32_t max_id,
+                                          TinyDBRecordPayloadVisitor visitor,
+                                          void* context,
+                                          bool* scan_complete,
+                                          char* message,
+                                          size_t message_size);
+
 /* Compatibility adapters for callers that still use the historical fixed
  * TinyDBRecord carrier. They intentionally reject rows wider than ROW_SIZE. */
 bool tinydb_record_payload_from_record(const TableSchema* schema,
