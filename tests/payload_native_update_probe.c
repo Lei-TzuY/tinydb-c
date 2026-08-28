@@ -110,6 +110,19 @@ static bool expect_payload(Table* table,
            values[2].int_value == score;
 }
 
+static bool payload_missing(Table* table,
+                            const TableSchema* schema,
+                            uint32_t id) {
+    TinyDBRecordPayload payload;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    return !tinydb_record_payload_find(table,
+                                       schema,
+                                       id,
+                                       &payload,
+                                       message,
+                                       sizeof(message));
+}
+
 static bool fill_until_tight(void* page, const TableSchema* schema) {
     uint32_t id = 1000u;
     while (tinydb_slotted_leaf_v2_free_bytes(page, PAGE_SIZE) >= 128u) {
@@ -233,8 +246,38 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!tinydb_record_payload_delete(table,
+                                      &schema,
+                                      19u,
+                                      message,
+                                      sizeof(message)) ||
+        !payload_missing(table, &schema, 19u) ||
+        !expect_payload(table, &schema, 7u, "alpha", 70u) ||
+        !expect_payload(table, &schema, 31u, "gamma", 310u)) {
+        fprintf(stderr, "payload-native wide delete failed: %s\n", message);
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
+    db_close(table);
+    table = db_open(argv[1]);
+    if (table == NULL || table->pager == NULL) {
+        remove(argv[1]);
+        return 1;
+    }
+    schema = wide_schema(table->root_page_num);
+    if (!payload_missing(table, &schema, 19u) ||
+        !expect_payload(table, &schema, 7u, "alpha", 70u) ||
+        !expect_payload(table, &schema, 31u, "gamma", 310u)) {
+        fprintf(stderr, "reopen lost payload-native delete\n");
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
     db_close(table);
     remove(argv[1]);
-    printf("PAYLOAD_NATIVE_UPDATE_OK row_size=308 pk_guard=1 capacity_guard=1 reopen=1\n");
+    printf("PAYLOAD_NATIVE_UPDATE_OK row_size=308 pk_guard=1 capacity_guard=1 reopen=1 delete_reopen=1\n");
     return 0;
 }
