@@ -75,6 +75,7 @@ set(TINYDB_CORE_SOURCES
     src/profile.c
     src/record.c
     src/record_delete_v2.c
+    src/record_insert_v2_split.c
     src/record_payload.c
     src/record_read_v2.c
     src/slotted_leaf_v2.c
@@ -216,7 +217,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/generic_index_record_guard.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_record_delete=tinydb_record_delete_mixed_base"
+    "tinydb_record_insert=tinydb_record_insert_mixed_base;tinydb_record_delete=tinydb_record_delete_mixed_base"
 )
 set_source_files_properties(
     src/record.c
