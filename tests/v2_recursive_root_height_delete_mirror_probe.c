@@ -44,7 +44,7 @@ static bool contracted_mirror_state(
     return true;
 }
 
-static bool run_case(const char* path) {
+static bool run_mirror_case(const char* path) {
     remove(path);
     TinyDB* db = tinydb_open(path);
     if (db == NULL ||
@@ -105,7 +105,7 @@ static bool run_case(const char* path) {
 
 int main(int argc, char** argv) {
     if (argc != 2) return EXIT_FAILURE;
-    if (!run_case(argv[1])) return EXIT_FAILURE;
+    if (!run_mirror_case(argv[1])) return EXIT_FAILURE;
     printf("V2_RECURSIVE_ROOT_HEIGHT_DELETE_MIRROR_OK deleted=20 mirror=yes "
            "height4_to_height3=yes root_identity=yes bottom_merge=yes "
            "grandparents_reclaimed=yes rollback=yes allocator=yes wal=yes "
