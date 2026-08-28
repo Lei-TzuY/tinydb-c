@@ -57,8 +57,10 @@ set(TINYDB_CORE_SOURCES
     src/generic_range_select_sql.c
     src/generic_sql.c
     src/join_plan.c
+    src/leaf_cursor_read.c
     src/leaf_format.c
     src/leaf_migration.c
+    src/leaf_page_access.c
     src/leaf_value.c
     src/multi_vacuum_into.c
     src/multitable.c
@@ -71,6 +73,7 @@ set(TINYDB_CORE_SOURCES
     src/profile.c
     src/record.c
     src/record_payload.c
+    src/record_read_v2.c
     src/slotted_leaf_v2.c
     src/table.c
     src/varchar_width_parser.c
@@ -210,7 +213,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/record.c
     PROPERTIES COMPILE_DEFINITIONS
-    "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base"
+    "tinydb_record_insert=tinydb_record_insert_base;tinydb_record_update=tinydb_record_update_base;tinydb_record_delete=tinydb_record_delete_base;tinydb_record_delete_all=tinydb_record_delete_all_base;tinydb_record_find=tinydb_record_find_v1_base;tinydb_record_scan=tinydb_record_scan_v1_base"
 )
 
 set_source_files_properties(
@@ -227,7 +230,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
-    "table_create_table=table_create_table_legacy_base;table_add_column=table_add_column_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy"
+    "table_create_table=table_create_table_legacy_base;table_add_column=table_add_column_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy;table_find=table_find_v1_base;table_start=table_start_v1_base;cursor_value=cursor_value_v1_base;cursor_advance=cursor_advance_v1_base;table_end=table_end_v1_base;cursor_retreat=cursor_retreat_v1_base"
 )
 
 add_library(tinydb_core STATIC ${TINYDB_CORE_SOURCES})
@@ -277,3 +280,6 @@ target_link_libraries(tinydb_leaf_format_discriminator_probe PRIVATE tinydb_core
 
 add_executable(tinydb_leaf_migration_probe tests/leaf_migration_probe.c)
 target_link_libraries(tinydb_leaf_migration_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_dual_leaf_read_probe tests/dual_leaf_read_probe.c)
+target_link_libraries(tinydb_dual_leaf_read_probe PRIVATE tinydb_core)
