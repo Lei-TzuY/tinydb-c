@@ -104,9 +104,10 @@ def main():
             "parent_remove=yes",
             "ancestor_max=yes",
             "cross_parent_relink=yes",
+            "redistribute_right=yes",
+            "donor_reparent=yes",
             "rollback=yes",
             "allocator=yes",
-            "underflow_guard=yes",
             "reopen=yes",
             "integrity=yes",
             "wal=yes",
@@ -116,9 +117,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: a rightmost one-row V2 leaf can be removed below a non-root "
-        "internal node while propagating the lowered parent maximum to the root, "
-        "repairing the cross-parent leaf chain, and preserving rollback/reopen"
+        "PASS: recursive V2 empty-leaf deletion can lower an ancestor maximum, "
+        "then resolve a bounded non-root internal underflow by borrowing the "
+        "right sibling's leftmost leaf with rollback/reopen durability"
     )
 
 
