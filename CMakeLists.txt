@@ -60,6 +60,7 @@ set(TINYDB_CORE_SOURCES
     src/leaf_cursor_read.c
     src/leaf_format.c
     src/leaf_migration.c
+    src/leaf_mutation_policy.c
     src/leaf_page_access.c
     src/leaf_value.c
     src/multi_vacuum_into.c
