@@ -125,6 +125,41 @@ static bool visit_payload(const TableSchema* schema,
     return true;
 }
 
+static bool expect_range(Table* table,
+                         const TableSchema* schema,
+                         uint32_t min_id,
+                         uint32_t max_id,
+                         uint32_t expected_count,
+                         uint32_t expected_sum) {
+    ScanState state;
+    memset(&state, 0, sizeof(state));
+    bool scan_complete = false;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    uint32_t count = tinydb_record_payload_scan_range(table,
+                                                      schema,
+                                                      min_id,
+                                                      max_id,
+                                                      visit_payload,
+                                                      &state,
+                                                      &scan_complete,
+                                                      message,
+                                                      sizeof(message));
+    if (!scan_complete || count != expected_count ||
+        state.seen != expected_count || state.id_sum != expected_sum) {
+        fprintf(stderr,
+                "payload range [%u,%u] failed: complete=%d count=%u seen=%u sum=%u message=%s\n",
+                min_id,
+                max_id,
+                scan_complete ? 1 : 0,
+                count,
+                state.seen,
+                state.id_sum,
+                message);
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: payload_native_read_probe <db>\n");
@@ -149,7 +184,8 @@ int main(int argc, char** argv) {
     set_node_root(page, true);
 
     if (!insert_wide(page, &schema, 7u, "alpha", 70u) ||
-        !insert_wide(page, &schema, 19u, "a much longer beta payload", 190u)) {
+        !insert_wide(page, &schema, 19u, "a much longer beta payload", 190u) ||
+        !insert_wide(page, &schema, 31u, "gamma", 310u)) {
         fprintf(stderr, "wide V2 insert setup failed\n");
         db_close(table);
         remove(argv[1]);
@@ -183,6 +219,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!expect_range(table, &schema, 8u, 30u, 1u, 19u) ||
+        !expect_range(table, &schema, 7u, 19u, 2u, 26u) ||
+        !expect_range(table, &schema, 8u, 18u, 0u, 0u) ||
+        !expect_range(table, &schema, 30u, 20u, 0u, 0u)) {
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
     ScanState state;
     memset(&state, 0, sizeof(state));
     bool scan_complete = false;
@@ -193,7 +238,7 @@ int main(int argc, char** argv) {
                                                 &scan_complete,
                                                 message,
                                                 sizeof(message));
-    if (!scan_complete || count != 2u || state.seen != 2u || state.id_sum != 26u) {
+    if (!scan_complete || count != 3u || state.seen != 3u || state.id_sum != 57u) {
         fprintf(stderr,
                 "payload-native wide scan failed: complete=%d count=%u seen=%u sum=%u message=%s\n",
                 scan_complete ? 1 : 0,
@@ -208,6 +253,6 @@ int main(int argc, char** argv) {
 
     db_close(table);
     remove(argv[1]);
-    printf("PAYLOAD_NATIVE_READ_OK row_size=308 rows=2\n");
+    printf("PAYLOAD_NATIVE_READ_OK row_size=308 rows=3 range=1\n");
     return 0;
 }
