@@ -100,10 +100,7 @@ static inline bool tinydb_stage_root_height_outer_left_lower_merge(
         nexts[0] != survivor_leaf_page_nums[1] ||
         prevs[1] != survivor_leaf_page_nums[0] ||
         nexts[1] != survivor_leaf_page_nums[2] ||
-        prevs[2] != survivor_leaf_page_nums[1] ||
-        maxes[0] != tinydb_parent_stage_key_at(old_parent_page_num == 0u ? kept : kept, 0u)) {
-        /* The final comparison above is intentionally completed below against
-         * the kept separator; keep this block focused on chain validation. */
+        prevs[2] != survivor_leaf_page_nums[1]) {
         return false;
     }
     if (maxes[1] != tinydb_parent_stage_key_at(kept, 0u) ||
