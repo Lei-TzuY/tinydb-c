@@ -40,10 +40,12 @@ def main():
             "internal route guard must reject self/duplicate-right child identities")
     require(re.search(r"internal_node_child\(node, j\) == child_page", guard) is not None,
             "internal route guard must reject duplicate non-rightmost children")
-    require(guard.count("*node_parent(") >= 2,
-            "internal route guard must validate parent backlinks for all children")
+    require("child_type != NODE_LEAF && child_type != NODE_INTERNAL" in guard,
+            "internal route guard must validate non-right child node types")
     require("right_type == NODE_LEAF || right_type == NODE_INTERNAL" in guard,
             "internal route guard must validate the right child node type")
+    require("node_parent(" not in guard,
+            "read routing must not reject otherwise valid trees solely on maintenance backlinks")
 
     internal_find_start = source.find("static Cursor* internal_find(")
     internal_find_end = source.find("Cursor* tinydb_leaf_read_find", internal_find_start)
@@ -66,8 +68,9 @@ def main():
             "rightmost traversal must validate the internal page before following its child")
 
     print(
-        "PASS: mixed-format lookup/rightmost traversal fail closed before internal routing "
-        "when separators, child identities, node types, or parent backlinks are corrupt."
+        "PASS: mixed-format lookup/rightmost traversal fail closed on corrupt internal "
+        "separators, child identities and node types without treating maintenance backlinks "
+        "as a read-path routing invariant."
     )
 
 
