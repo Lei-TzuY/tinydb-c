@@ -195,6 +195,22 @@ static bool root_shape(Table* table,
            tinydb_parent_stage_key_at(root, 1u) == second_separator;
 }
 
+static bool root_shape_without_middle(Table* table,
+                                      const TableSchema* schema,
+                                      const uint32_t leaf_pages[CHILD_COUNT],
+                                      uint32_t separator) {
+    unsigned char root[PAGE_SIZE];
+    memcpy(root,
+           get_page(table->pager, schema->root_page_num),
+           sizeof(root));
+    return tinydb_parent_stage_validate(root, PAGE_SIZE) &&
+           root[IS_ROOT_OFFSET] != 0u &&
+           read_u32(root + INTERNAL_NODE_NUM_KEYS_OFFSET) == 1u &&
+           tinydb_parent_stage_child_at(root, 0u) == leaf_pages[0] &&
+           tinydb_parent_stage_child_at(root, 1u) == leaf_pages[2] &&
+           tinydb_parent_stage_key_at(root, 0u) == separator;
+}
+
 static bool leaf_has_max(Table* table,
                          uint32_t page_num,
                          uint32_t expected_count,
@@ -208,6 +224,27 @@ static bool leaf_has_max(Table* table,
            count == expected_count && count > 0u &&
            tinydb_leaf_page_key_at(leaf, PAGE_SIZE, count - 1u, &max_key) &&
            max_key == expected_max;
+}
+
+static bool leaf_links(Table* table,
+                       uint32_t page_num,
+                       uint32_t expected_prev,
+                       uint32_t expected_next) {
+    unsigned char leaf[PAGE_SIZE];
+    uint32_t prev = INVALID_PAGE_NUM;
+    uint32_t next = INVALID_PAGE_NUM;
+    memcpy(leaf, get_page(table->pager, page_num), sizeof(leaf));
+    return tinydb_leaf_page_prev(leaf, PAGE_SIZE, &prev) &&
+           tinydb_leaf_page_next(leaf, PAGE_SIZE, &next) &&
+           prev == expected_prev && next == expected_next;
+}
+
+static bool free_list_contains(const Pager* pager, uint32_t page_num) {
+    if (pager == NULL) return false;
+    for (uint32_t i = 0u; i < pager->free_page_count; i++) {
+        if (pager->free_pages[i] == page_num) return true;
+    }
+    return false;
 }
 
 static bool record_present(Table* table,
@@ -279,26 +316,56 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    uint32_t baseline_free_count = table->pager->free_page_count;
     if (!exec_ok(db, "BEGIN;") ||
         !delete_key(table, schema, 40u, message) ||
         record_present(table, schema, 40u) ||
+        !root_shape_without_middle(table, schema, leaf_pages, 30u) ||
+        !leaf_links(table, leaf_pages[0], 0u, leaf_pages[2]) ||
+        !leaf_links(table, leaf_pages[2], leaf_pages[0], 0u) ||
+        table->pager->free_page_count != baseline_free_count + 1u ||
+        !free_list_contains(table->pager, leaf_pages[1]) ||
         tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 1u ||
         !exec_ok(db, "PRAGMA integrity_check;") ||
-        !exec_ok(db, "ROLLBACK;") ||
-        !record_present(table, schema, 40u) ||
+        !exec_ok(db, "ROLLBACK;")) {
+        fprintf(stderr, "transactional empty-leaf removal failed: %s\n", message);
+        tinydb_close(db);
+        return EXIT_FAILURE;
+    }
+
+    if (!record_present(table, schema, 40u) ||
         !root_shape(table, schema, leaf_pages, 30u, 40u) ||
+        !leaf_links(table, leaf_pages[0], 0u, leaf_pages[1]) ||
+        !leaf_links(table, leaf_pages[1], leaf_pages[0], leaf_pages[2]) ||
+        !leaf_links(table, leaf_pages[2], leaf_pages[1], 0u) ||
+        table->pager->free_page_count != baseline_free_count ||
+        free_list_contains(table->pager, leaf_pages[1]) ||
         tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "transactional empty-leaf removal rollback failed: %s\n", message);
+        fprintf(stderr, "empty-leaf rollback did not restore topology or allocator state\n");
+        tinydb_close(db);
+        return EXIT_FAILURE;
+    }
+
+    if (!delete_key(table, schema, 40u, message) ||
+        record_present(table, schema, 40u) ||
+        !root_shape_without_middle(table, schema, leaf_pages, 30u) ||
+        !leaf_links(table, leaf_pages[0], 0u, leaf_pages[2]) ||
+        !leaf_links(table, leaf_pages[2], leaf_pages[0], 0u) ||
+        table->pager->free_page_count != baseline_free_count + 1u ||
+        !free_list_contains(table->pager, leaf_pages[1]) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 1u ||
+        !exec_ok(db, "PRAGMA integrity_check;")) {
+        fprintf(stderr, "committed empty-leaf removal failed: %s\n", message);
         tinydb_close(db);
         return EXIT_FAILURE;
     }
 
     if (!delete_key(table, schema, 30u, message) ||
         record_present(table, schema, 30u) ||
-        !root_shape(table, schema, leaf_pages, 20u, 40u) ||
+        !root_shape_without_middle(table, schema, leaf_pages, 20u) ||
         !leaf_has_max(table, leaf_pages[0], 2u, 20u) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 1u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 2u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
         fprintf(stderr, "committed separator-update delete failed: %s\n", message);
         tinydb_close(db);
@@ -307,9 +374,9 @@ int main(int argc, char** argv) {
 
     if (!delete_key(table, schema, 70u, message) ||
         record_present(table, schema, 70u) ||
-        !root_shape(table, schema, leaf_pages, 20u, 40u) ||
+        !root_shape_without_middle(table, schema, leaf_pages, 20u) ||
         !leaf_has_max(table, leaf_pages[2], 2u, 60u) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 2u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 3u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
         fprintf(stderr, "root-rightmost max delete failed: %s\n", message);
         tinydb_close(db);
@@ -322,22 +389,28 @@ int main(int argc, char** argv) {
     table = tinydb_table(db);
     schema = find_schema(table, "items");
     if (schema == NULL ||
-        !root_shape(table, schema, leaf_pages, 20u, 40u) ||
+        !root_shape_without_middle(table, schema, leaf_pages, 20u) ||
         record_present(table, schema, 30u) ||
+        record_present(table, schema, 40u) ||
         record_present(table, schema, 70u) ||
-        !record_present(table, schema, 40u) ||
+        !record_present(table, schema, 20u) ||
+        !record_present(table, schema, 60u) ||
+        !leaf_links(table, leaf_pages[0], 0u, leaf_pages[2]) ||
+        !leaf_links(table, leaf_pages[2], leaf_pages[0], 0u) ||
+        table->pager->free_page_count != baseline_free_count + 1u ||
+        !free_list_contains(table->pager, leaf_pages[1]) ||
         !leaf_has_max(table, leaf_pages[0], 2u, 20u) ||
         !leaf_has_max(table, leaf_pages[2], 2u, 60u) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 2u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 3u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "V2 max-key delete state did not survive reopen\n");
+        fprintf(stderr, "V2 empty-leaf/max-key delete state did not survive reopen\n");
         tinydb_close(db);
         return EXIT_FAILURE;
     }
 
     printf("V2_MAX_DELETE_OK separator_update=yes rollback=yes "
-           "empty_leaf_rollback=yes root_rightmost=yes reopen=yes "
-           "integrity=yes wal=yes\n");
+           "empty_leaf_remove=yes allocator_rollback=yes sibling_relink=yes "
+           "root_rightmost=yes reopen=yes integrity=yes wal=yes\n");
     tinydb_close(db);
     return EXIT_SUCCESS;
 }
