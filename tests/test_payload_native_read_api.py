@@ -36,7 +36,7 @@ def main() -> int:
     require(HEADER, "tinydb_record_payload_scan", "payload scan API")
 
     raw = function_body("raw_value_to_payload")
-    require(raw, "tinydb_record_payload_schema_supported", "wide-schema validation")
+    require(raw, "schema->row_size > sizeof(payload->bytes)", "payload capacity guard")
     if "schema->row_size > ROW_SIZE" in raw:
         raise AssertionError("payload-native decoder regressed to the legacy ROW_SIZE ceiling")
     require(raw, "tinydb_row_envelope_decode", "compact V2 decode")
