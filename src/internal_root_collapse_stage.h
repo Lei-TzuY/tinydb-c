@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -159,6 +160,200 @@ static inline bool tinydb_stage_internal_root_collapse_to_v2_leaf(
         *promoted_page_num_out = surviving_leaf_page_num;
     }
     return true;
+}
+
+/* Validate one direct child of an internal node before/after a parent-pointer
+ * rewrite. The common-header parent pointer is shared by internal nodes, fixed
+ * V1 leaves, and slotted V2 leaves. */
+static inline bool tinydb_root_collapse_direct_child_valid(
+    const unsigned char* page,
+    size_t page_capacity,
+    uint32_t expected_parent_page_num) {
+    if (page == NULL || page_capacity < PAGE_SIZE ||
+        page[IS_ROOT_OFFSET] != 0u ||
+        tinydb_parent_stage_read_u32(page + PARENT_POINTER_OFFSET) !=
+            expected_parent_page_num) {
+        return false;
+    }
+
+    NodeType type = get_node_type((void*)page);
+    if (type == NODE_INTERNAL) {
+        return tinydb_parent_stage_validate(page, page_capacity);
+    }
+    if (type != NODE_LEAF) return false;
+
+    TinyDBLeafPageFormat format = tinydb_leaf_format_detect_page(page,
+                                                                 page_capacity);
+    if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return tinydb_slotted_leaf_v2_validate(page, page_capacity);
+    }
+    if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        uint32_t count = 0u;
+        return tinydb_leaf_page_is_fixed_v1(page, page_capacity) &&
+               tinydb_leaf_page_count(page, page_capacity, &count) &&
+               count > 0u;
+    }
+    return false;
+}
+
+/*
+ * Stage root contraction when the surviving child is itself an internal node.
+ *
+ * Copying that internal node into the stable root page is not sufficient: all
+ * of its direct children still name the old internal page as their parent. The
+ * caller therefore supplies every direct child image and page number in exact
+ * child order. This helper stages the promoted root and all parent-pointer
+ * rewrites in scratch storage, validates the complete image set, and only then
+ * publishes PAGE_USABLE_SIZE into the caller buffers.
+ *
+ * The surviving internal source image is immutable. A future live Pager/WAL
+ * route may reclaim its old page only after atomically publishing the staged
+ * root and descendant images. No allocator state is touched here.
+ */
+static inline bool tinydb_stage_internal_root_collapse_to_internal(
+    void* root_page,
+    size_t root_capacity,
+    uint32_t root_page_num,
+    const void* surviving_internal_page,
+    size_t surviving_capacity,
+    uint32_t surviving_internal_page_num,
+    uint32_t surviving_subtree_max,
+    uint32_t removed_child_page_num,
+    uint32_t removed_child_max,
+    void* const* direct_child_pages,
+    const uint32_t* direct_child_page_nums,
+    uint32_t direct_child_count,
+    uint32_t* promoted_page_num_out) {
+    if (promoted_page_num_out != NULL) {
+        *promoted_page_num_out = INVALID_PAGE_NUM;
+    }
+    if (root_page == NULL || surviving_internal_page == NULL ||
+        direct_child_pages == NULL || direct_child_page_nums == NULL ||
+        root_capacity < PAGE_SIZE || surviving_capacity < PAGE_SIZE ||
+        surviving_internal_page_num == 0u ||
+        surviving_internal_page_num == INVALID_PAGE_NUM ||
+        removed_child_page_num == 0u ||
+        removed_child_page_num == INVALID_PAGE_NUM ||
+        surviving_internal_page_num == removed_child_page_num ||
+        surviving_internal_page_num == root_page_num ||
+        removed_child_page_num == root_page_num) {
+        return false;
+    }
+
+    const unsigned char* original_root = (const unsigned char*)root_page;
+    const unsigned char* surviving =
+        (const unsigned char*)surviving_internal_page;
+    if (!tinydb_parent_stage_validate(original_root, root_capacity) ||
+        original_root[IS_ROOT_OFFSET] == 0u ||
+        tinydb_parent_stage_read_u32(original_root + PARENT_POINTER_OFFSET) !=
+            0u ||
+        tinydb_parent_stage_read_u32(
+            original_root + INTERNAL_NODE_NUM_KEYS_OFFSET) != 1u ||
+        !tinydb_parent_stage_validate(surviving, surviving_capacity) ||
+        surviving[IS_ROOT_OFFSET] != 0u ||
+        tinydb_parent_stage_read_u32(surviving + PARENT_POINTER_OFFSET) !=
+            root_page_num) {
+        return false;
+    }
+
+    uint32_t survivor_key_count = tinydb_parent_stage_read_u32(
+        surviving + INTERNAL_NODE_NUM_KEYS_OFFSET);
+    if (survivor_key_count == 0u ||
+        survivor_key_count > INTERNAL_NODE_MAX_KEYS ||
+        direct_child_count != survivor_key_count + 1u ||
+        direct_child_count == 0u ||
+        direct_child_count > INTERNAL_NODE_MAX_KEYS + 1u) {
+        return false;
+    }
+
+    uint32_t root_left = tinydb_parent_stage_child_at(original_root, 0u);
+    uint32_t root_right = tinydb_parent_stage_child_at(original_root, 1u);
+    uint32_t root_separator = tinydb_parent_stage_key_at(original_root, 0u);
+    bool removed_left = root_left == removed_child_page_num &&
+                        root_right == surviving_internal_page_num;
+    bool removed_right = root_right == removed_child_page_num &&
+                         root_left == surviving_internal_page_num;
+    if (removed_left == removed_right) return false;
+    if ((removed_left &&
+         (root_separator != removed_child_max ||
+          removed_child_max >= surviving_subtree_max)) ||
+        (removed_right &&
+         (root_separator != surviving_subtree_max ||
+          removed_child_max <= surviving_subtree_max))) {
+        return false;
+    }
+
+    for (uint32_t i = 0u; i < direct_child_count; i++) {
+        if (direct_child_pages[i] == NULL ||
+            direct_child_pages[i] == root_page ||
+            direct_child_pages[i] == surviving_internal_page ||
+            direct_child_page_nums[i] == 0u ||
+            direct_child_page_nums[i] == INVALID_PAGE_NUM ||
+            direct_child_page_nums[i] == root_page_num ||
+            direct_child_page_nums[i] == surviving_internal_page_num ||
+            direct_child_page_nums[i] == removed_child_page_num ||
+            direct_child_page_nums[i] !=
+                tinydb_parent_stage_child_at(surviving, i) ||
+            !tinydb_root_collapse_direct_child_valid(
+                (const unsigned char*)direct_child_pages[i],
+                PAGE_SIZE,
+                surviving_internal_page_num)) {
+            return false;
+        }
+        for (uint32_t j = 0u; j < i; j++) {
+            if (direct_child_page_nums[i] == direct_child_page_nums[j] ||
+                direct_child_pages[i] == direct_child_pages[j]) {
+                return false;
+            }
+        }
+    }
+
+    if ((size_t)direct_child_count > SIZE_MAX / PAGE_SIZE) return false;
+    size_t scratch_bytes = (size_t)direct_child_count * PAGE_SIZE;
+    unsigned char* child_scratch = (unsigned char*)malloc(scratch_bytes);
+    if (child_scratch == NULL) return false;
+
+    unsigned char root_scratch[PAGE_SIZE];
+    memcpy(root_scratch, original_root, PAGE_SIZE);
+    memcpy(root_scratch, surviving, PAGE_USABLE_SIZE);
+    root_scratch[IS_ROOT_OFFSET] = 1u;
+    tinydb_parent_stage_write_u32(root_scratch + PARENT_POINTER_OFFSET, 0u);
+
+    bool ok = tinydb_parent_stage_validate(root_scratch, PAGE_SIZE) &&
+              root_scratch[IS_ROOT_OFFSET] != 0u &&
+              tinydb_parent_stage_read_u32(
+                  root_scratch + PARENT_POINTER_OFFSET) == 0u &&
+              tinydb_parent_stage_read_u32(
+                  root_scratch + INTERNAL_NODE_NUM_KEYS_OFFSET) ==
+                  survivor_key_count;
+
+    for (uint32_t i = 0u; ok && i < direct_child_count; i++) {
+        unsigned char* staged_child =
+            child_scratch + (size_t)i * PAGE_SIZE;
+        memcpy(staged_child, direct_child_pages[i], PAGE_SIZE);
+        tinydb_parent_stage_write_u32(staged_child + PARENT_POINTER_OFFSET,
+                                      root_page_num);
+        ok = tinydb_root_collapse_direct_child_valid(staged_child,
+                                                     PAGE_SIZE,
+                                                     root_page_num) &&
+             tinydb_parent_stage_child_at(root_scratch, i) ==
+                 direct_child_page_nums[i];
+    }
+
+    if (ok) {
+        memcpy(root_page, root_scratch, PAGE_USABLE_SIZE);
+        for (uint32_t i = 0u; i < direct_child_count; i++) {
+            memcpy(direct_child_pages[i],
+                   child_scratch + (size_t)i * PAGE_SIZE,
+                   PAGE_USABLE_SIZE);
+        }
+        if (promoted_page_num_out != NULL) {
+            *promoted_page_num_out = surviving_internal_page_num;
+        }
+    }
+
+    free(child_scratch);
+    return ok;
 }
 
 #endif /* TINYDB_INTERNAL_ROOT_COLLAPSE_STAGE_H */
