@@ -207,23 +207,6 @@ static bool split_insert_slotted_v2(Table* table,
         return false;
     }
 
-    uint32_t required = TINYDB_SLOTTED_V2_SLOT_SIZE + envelope_length;
-    if (required <= tinydb_slotted_leaf_v2_free_bytes(left_before, PAGE_SIZE)) {
-        free(cursor);
-        end_root_scope(table, previous_root);
-        return false;
-    }
-    if (applicable != NULL) *applicable = true;
-
-    if (left_before[IS_ROOT_OFFSET] != 0u) {
-        free(cursor);
-        end_root_scope(table, previous_root);
-        set_message(message,
-                    message_size,
-                    "slotted V2 root-leaf split INSERT remains fail-closed");
-        return false;
-    }
-
     uint32_t old_left_max = 0u;
     if (!tinydb_leaf_page_key_at(left_before,
                                  PAGE_SIZE,
@@ -255,6 +238,60 @@ static bool split_insert_slotted_v2(Table* table,
     }
 
     bool is_tail = next_page_num == 0u;
+    uint32_t required = TINYDB_SLOTTED_V2_SLOT_SIZE + envelope_length;
+    if (required <= tinydb_slotted_leaf_v2_free_bytes(left_before, PAGE_SIZE)) {
+        if (!is_tail || key <= old_left_max) {
+            free(cursor);
+            end_root_scope(table, previous_root);
+            return false;
+        }
+
+        if (applicable != NULL) *applicable = true;
+        if (!tinydb_generic_index_epoch_before_mutation(table, schema)) {
+            free(cursor);
+            end_root_scope(table, previous_root);
+            set_message(message,
+                        message_size,
+                        "unable to persist generic-index mutation epoch");
+            return false;
+        }
+
+        void* page = get_page(table->pager, left_page_num);
+        unsigned char before[PAGE_USABLE_SIZE];
+        memcpy(before, page, sizeof(before));
+        if (!tinydb_slotted_leaf_v2_insert(page,
+                                           PAGE_SIZE,
+                                           key,
+                                           envelope,
+                                           (uint16_t)envelope_length) ||
+            !tinydb_slotted_leaf_v2_validate(page, PAGE_SIZE)) {
+            memcpy(page, before, sizeof(before));
+            free(cursor);
+            end_root_scope(table, previous_root);
+            set_message(message,
+                        message_size,
+                        "slotted V2 tail append failed without publishing a partial page");
+            return false;
+        }
+
+        mark_page_dirty(table->pager, left_page_num);
+        free(cursor);
+        end_root_scope(table, previous_root);
+        if (!table->in_transaction) pager_commit(table->pager);
+        if (message != NULL && message_size > 0u) message[0] = '\0';
+        return true;
+    }
+    if (applicable != NULL) *applicable = true;
+
+    if (left_before[IS_ROOT_OFFSET] != 0u) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "slotted V2 root-leaf split INSERT remains fail-closed");
+        return false;
+    }
+
     if (!is_tail && key >= old_left_max) {
         free(cursor);
         end_root_scope(table, previous_root);
