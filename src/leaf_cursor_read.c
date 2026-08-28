@@ -82,6 +82,50 @@ static bool reciprocal_backward_transition(Table* table,
            forward_link == current_page;
 }
 
+static bool internal_routing_valid(Table* table,
+                                   uint32_t page_num,
+                                   void* node) {
+    if (table == NULL || node == NULL || get_node_type(node) != NODE_INTERNAL) {
+        return false;
+    }
+
+    uint32_t num_keys = *internal_node_num_keys(node);
+    if (num_keys == 0u || num_keys > INTERNAL_NODE_MAX_KEYS) return false;
+
+    uint32_t right_child = *internal_node_right_child(node);
+    if (!valid_page_number(table, right_child) || right_child == page_num) {
+        return false;
+    }
+
+    uint32_t previous_key = 0u;
+    for (uint32_t i = 0u; i < num_keys; i++) {
+        uint32_t separator = *internal_node_key(node, i);
+        if (i > 0u && separator <= previous_key) return false;
+        previous_key = separator;
+
+        uint32_t child_page = *internal_node_child(node, i);
+        if (!valid_page_number(table, child_page) ||
+            child_page == page_num || child_page == right_child) {
+            return false;
+        }
+        for (uint32_t j = 0u; j < i; j++) {
+            if (*internal_node_child(node, j) == child_page) return false;
+        }
+
+        void* child = get_page(table->pager, child_page);
+        NodeType child_type = get_node_type(child);
+        if ((child_type != NODE_LEAF && child_type != NODE_INTERNAL) ||
+            *node_parent(child) != page_num) {
+            return false;
+        }
+    }
+
+    void* right = get_page(table->pager, right_child);
+    NodeType right_type = get_node_type(right);
+    return (right_type == NODE_LEAF || right_type == NODE_INTERNAL) &&
+           *node_parent(right) == page_num;
+}
+
 static Cursor* leaf_find(Table* table, uint32_t page_num, uint32_t key) {
     if (!valid_page_number(table, page_num)) return NULL;
     void* page = get_page(table->pager, page_num);
@@ -108,7 +152,7 @@ static Cursor* internal_find(Table* table,
         return NULL;
     }
     void* node = get_page(table->pager, page_num);
-    if (get_node_type(node) != NODE_INTERNAL) return NULL;
+    if (!internal_routing_valid(table, page_num, node)) return NULL;
 
     uint32_t child_page = *internal_node_find_child(node, key);
     if (!valid_page_number(table, child_page) || child_page == page_num) {
@@ -260,6 +304,7 @@ Cursor* tinydb_leaf_read_end(Table* table) {
     void* node = get_page(table->pager, page_num);
     uint32_t depth = 0u;
     while (get_node_type(node) == NODE_INTERNAL) {
+        if (!internal_routing_valid(table, page_num, node)) return NULL;
         uint32_t child_page = *internal_node_right_child(node);
         if (!valid_page_number(table, child_page) || child_page == page_num ||
             depth++ >= table->pager->num_pages) {
