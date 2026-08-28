@@ -77,6 +77,18 @@ uint32_t tinydb_record_payload_scan_range(Table* table,
                                           char* message,
                                           size_t message_size);
 
+/* Payload-native point UPDATE is the first wide-schema mutation seam. It keeps
+ * the primary key stable, invalidates generic secondary-index snapshots before
+ * mutation, supports fixed V1 rows only when the logical payload fits ROW_SIZE,
+ * and updates existing compact-envelope V2 rows in place when the replacement
+ * fits the page. It never routes through the legacy TinyDBRecord carrier. */
+bool tinydb_record_payload_update(Table* table,
+                                  const TableSchema* schema,
+                                  uint32_t id,
+                                  const TinyDBRecordPayload* payload,
+                                  char* message,
+                                  size_t message_size);
+
 /* Compatibility adapters for callers that still use the historical fixed
  * TinyDBRecord carrier. They intentionally reject rows wider than ROW_SIZE. */
 bool tinydb_record_payload_from_record(const TableSchema* schema,
