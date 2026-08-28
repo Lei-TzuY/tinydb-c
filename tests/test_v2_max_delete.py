@@ -103,7 +103,7 @@ def main():
             "V2_MAX_DELETE_OK",
             "separator_update=yes",
             "rollback=yes",
-            "empty_leaf_fail_closed=yes",
+            "empty_leaf_rollback=yes",
             "root_rightmost=yes",
             "reopen=yes",
             "integrity=yes",
@@ -114,9 +114,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: V2 max-key deletion can atomically lower an interior root "
-        "separator, rolls back cleanly, permits a root's rightmost child max "
-        "delete, and keeps single-row leaf removal fail-closed"
+        "PASS: V2 max-key deletion can atomically lower separators, rolls back "
+        "both non-empty and supported empty-leaf mutations cleanly, and permits "
+        "a root's rightmost child max delete"
     )
 
 
