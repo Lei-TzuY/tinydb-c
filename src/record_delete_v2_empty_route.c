@@ -12,6 +12,7 @@
 #include "record_delete_v2_internal_merge_local.h"
 #include "record_delete_v2_internal_merge_root.h"
 #include "record_delete_v2_internal_merge_root_height.h"
+#include "record_delete_v2_internal_merge_root_height_inner_right.h"
 #include "record_delete_v2_internal_merge_root_height_mirror.h"
 #include "record_delete_v2_internal_merge_root_height_outer_left.h"
 #include "record_delete_v2_internal_merge_root_height_outer_right.h"
@@ -188,6 +189,17 @@ bool tinydb_record_delete(Table* table,
         if (merge == TINYDB_INTERNAL_MERGE_ROOT_FAILURE) return false;
 
         merge = tinydb_try_delete_v2_internal_merge_root_height_outer_left(
+            table,
+            schema,
+            leaf_page_num,
+            leaf_before,
+            id,
+            message,
+            message_size);
+        if (merge == TINYDB_INTERNAL_MERGE_ROOT_SUCCESS) return true;
+        if (merge == TINYDB_INTERNAL_MERGE_ROOT_FAILURE) return false;
+
+        merge = tinydb_try_delete_v2_internal_merge_root_height_inner_right(
             table,
             schema,
             leaf_page_num,
