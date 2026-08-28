@@ -7,6 +7,7 @@ import tempfile
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     probe_source = os.path.join(repo_root, "tests", "slotted_leaf_v2_tree_split_stage_probe.c")
+    codec_source = os.path.join(repo_root, "src", "slotted_leaf_v2.c")
     src_dir = os.path.join(repo_root, "src")
 
     with tempfile.TemporaryDirectory(prefix="tinydb-v2-tree-split-stage-") as temp_dir:
@@ -15,10 +16,11 @@ def main():
             handle.write(
                 "cmake_minimum_required(VERSION 3.16)\n"
                 "project(tinydb_v2_tree_split_stage C)\n"
-                "set(CMAKE_C_STANDARD 99)\n"
+                "set(CMAKE_C_STANDARD 11)\n"
                 "set(CMAKE_C_STANDARD_REQUIRED ON)\n"
                 "add_executable(tree_split_stage_probe\n"
                 f"  \"{probe_source.replace(os.sep, '/')}\"\n"
+                f"  \"{codec_source.replace(os.sep, '/')}\"\n"
                 ")\n"
                 f"target_include_directories(tree_split_stage_probe PRIVATE \"{src_dir.replace(os.sep, '/')}\")\n"
                 "if(MSVC)\n"
