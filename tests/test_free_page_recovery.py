@@ -3,7 +3,7 @@ import os
 import struct
 import subprocess
 import sys
-import time
+import tempfile
 
 
 FREE_MAGIC = 0x46524545
@@ -18,10 +18,17 @@ def find_tinydb(base_dir):
         os.path.join(base_dir, "build", "tinydb.exe"),
         os.path.join(base_dir, "build", "tinydb"),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return None
+    return next((path for path in candidates if os.path.exists(path)), None)
+
+
+def find_core_library(base_dir):
+    candidates = [
+        os.path.join(base_dir, "build", "Debug", "tinydb_core.lib"),
+        os.path.join(base_dir, "build", "Release", "tinydb_core.lib"),
+        os.path.join(base_dir, "build", "tinydb_core.lib"),
+        os.path.join(base_dir, "build", "libtinydb_core.a"),
+    ]
+    return next((path for path in candidates if os.path.exists(path)), None)
 
 
 def cleanup(db_file):
@@ -45,6 +52,65 @@ def run_session(executable, db_file, commands):
     return result.stdout + result.stderr
 
 
+def build_crash_probe(repo_root, core_library, temp_dir):
+    source = os.path.join(repo_root, "tests", "free_page_recovery_crash_probe.c")
+    source_cmake = source.replace("\\", "/")
+    include_cmake = os.path.join(repo_root, "src").replace("\\", "/")
+    library_cmake = core_library.replace("\\", "/")
+    with open(os.path.join(temp_dir, "CMakeLists.txt"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "cmake_minimum_required(VERSION 3.10)\n"
+            "project(tinydb_free_page_recovery_crash_probe C)\n"
+            "set(CMAKE_C_STANDARD 99)\n"
+            "set(CMAKE_C_STANDARD_REQUIRED ON)\n"
+            "if(MSVC)\n"
+            "  add_compile_options(/W4 /WX /utf-8)\n"
+            "  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n"
+            "else()\n"
+            "  add_compile_options(-Wall -Wextra -Werror)\n"
+            "endif()\n"
+            "add_library(tinydb_core STATIC IMPORTED GLOBAL)\n"
+            f'set_target_properties(tinydb_core PROPERTIES IMPORTED_LOCATION "{library_cmake}")\n'
+            f'add_executable(free_page_recovery_crash_probe "{source_cmake}")\n'
+            f'target_include_directories(free_page_recovery_crash_probe PRIVATE "{include_cmake}")\n'
+            "target_link_libraries(free_page_recovery_crash_probe PRIVATE tinydb_core)\n"
+        )
+
+    build_dir = os.path.join(temp_dir, "build")
+    configure = subprocess.run(
+        ["cmake", "-S", temp_dir, "-B", build_dir, "-DCMAKE_BUILD_TYPE=Debug"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        timeout=60,
+    )
+    if configure.returncode != 0:
+        raise AssertionError(configure.stdout + configure.stderr)
+
+    build = subprocess.run(
+        ["cmake", "--build", build_dir, "--config", "Debug"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        timeout=90,
+    )
+    if build.returncode != 0:
+        raise AssertionError(build.stdout + build.stderr)
+
+    candidates = [
+        os.path.join(build_dir, "Debug", "free_page_recovery_crash_probe.exe"),
+        os.path.join(build_dir, "Release", "free_page_recovery_crash_probe.exe"),
+        os.path.join(build_dir, "free_page_recovery_crash_probe.exe"),
+        os.path.join(build_dir, "free_page_recovery_crash_probe"),
+    ]
+    executable = next((path for path in candidates if os.path.exists(path)), None)
+    if executable is None:
+        raise AssertionError("free-page recovery crash probe was not produced")
+    return executable
+
+
 def read_free_sidecar(path):
     with open(path, "rb") as file:
         payload = file.read()
@@ -65,44 +131,37 @@ def read_free_sidecar(path):
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     executable = find_tinydb(repo_root)
+    core_library = find_core_library(repo_root)
     if executable is None:
-        print("FAIL: Could not find tinydb executable.")
-        sys.exit(1)
+        raise AssertionError("could not find tinydb executable")
+    if core_library is None:
+        raise AssertionError("could not find built tinydb_core static library")
 
-    db_file = os.path.join(os.path.dirname(__file__), "test_free_page_recovery.db")
-    free_file = db_file + ".free"
-    free_wal_file = db_file + ".free.wal"
-    wal_file = db_file + ".wal"
-    cleanup(db_file)
+    with tempfile.TemporaryDirectory(prefix="tinydb-free-page-recovery-") as temp_dir:
+        probe_dir = os.path.join(temp_dir, "probe")
+        os.makedirs(probe_dir)
+        crash_probe = build_crash_probe(repo_root, core_library, probe_dir)
 
-    try:
-        process = subprocess.Popen(
-            [executable, db_file],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        db_file = os.path.join(temp_dir, "test_free_page_recovery.db")
+        free_file = db_file + ".free"
+        free_wal_file = db_file + ".free.wal"
+        wal_file = db_file + ".wal"
+        cleanup(db_file)
+
+        crashed = subprocess.run(
+            [crash_probe, db_file],
+            capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=120,
         )
-        assert process.stdin is not None
-        commands = ["CREATE TABLE metrics (id INT, value INT, tag VARCHAR);"]
-        commands.extend(
-            f"INSERT INTO metrics VALUES ({i}, {i * 10}, 'tag-{i}');"
-            for i in range(1, 61)
-        )
-        commands.extend(
-            f"DELETE FROM metrics WHERE id = {i};"
-            for i in range(1, 56)
-        )
-        process.stdin.write("\n".join(commands) + "\n")
-        process.stdin.flush()
-        time.sleep(2.0)
-        process.kill()
-        process.wait(timeout=30)
-
-        if not os.path.exists(wal_file):
-            raise AssertionError("main WAL missing after hard kill")
+        if crashed.returncode != 0:
+            raise AssertionError(crashed.stdout + crashed.stderr)
+        if not os.path.exists(wal_file) or os.path.getsize(wal_file) == 0:
+            raise AssertionError("main WAL missing after deterministic hard exit")
         if not os.path.exists(free_file):
-            raise AssertionError("free-page sidecar was not published before hard kill")
+            raise AssertionError("free-page sidecar was not published before hard exit")
 
         # Simulate losing the allocator sidecar while retaining the durable
         # main WAL. WAL2 must contain enough committed allocator state to
@@ -163,11 +222,10 @@ def main():
                 "database grew even though recovered free pages should have been reusable"
             )
 
-        print(
-            "PASS: WAL2 reconstructs durable free-page state after crash and reused pages avoid file growth."
-        )
-    finally:
-        cleanup(db_file)
+    print(
+        "PASS: deterministic post-commit hard exit lets WAL2 reconstruct durable "
+        "free-page state, and recovered pages are reused without file growth."
+    )
 
 
 if __name__ == "__main__":
