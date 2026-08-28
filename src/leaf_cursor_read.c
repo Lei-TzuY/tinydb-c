@@ -64,6 +64,23 @@ static bool ordered_backward_transition(Table* table,
            prev_last < current_first;
 }
 
+static bool reciprocal_forward_transition(Table* table,
+                                          uint32_t current_page,
+                                          const void* next_page) {
+    uint32_t back_link = 0u;
+    return tinydb_leaf_page_prev(next_page, PAGE_SIZE, &back_link) &&
+           back_link == current_page;
+}
+
+static bool reciprocal_backward_transition(Table* table,
+                                           uint32_t current_page,
+                                           const void* prev_page) {
+    (void)table;
+    uint32_t forward_link = 0u;
+    return tinydb_leaf_page_next(prev_page, PAGE_SIZE, &forward_link) &&
+           forward_link == current_page;
+}
+
 static Cursor* leaf_find(Table* table, uint32_t page_num, uint32_t key) {
     if (!valid_page_number(table, page_num)) return NULL;
     void* page = get_page(table->pager, page_num);
@@ -208,6 +225,7 @@ bool tinydb_leaf_read_advance_checked(Cursor* cursor) {
         uint32_t next_count = 0u;
         if (get_node_type(next) != NODE_LEAF ||
             !tinydb_leaf_page_count(next, PAGE_SIZE, &next_count) ||
+            !reciprocal_forward_transition(table, current_page, next) ||
             !ordered_forward_transition(table,
                                         current_page,
                                         current_count,
@@ -311,6 +329,7 @@ bool tinydb_leaf_read_retreat_checked(Cursor* cursor) {
         uint32_t prev_count = 0u;
         if (get_node_type(prev) != NODE_LEAF ||
             !tinydb_leaf_page_count(prev, PAGE_SIZE, &prev_count) ||
+            !reciprocal_backward_transition(table, current_page, prev) ||
             !ordered_backward_transition(table,
                                          current_page,
                                          current_count,
