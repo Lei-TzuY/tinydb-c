@@ -80,12 +80,8 @@ def main():
             raise AssertionError(build.stdout + build.stderr)
 
         candidates = [
-            os.path.join(
-                build_dir, "Debug", "v2_recursive_internal_underflow_guard_probe.exe"
-            ),
-            os.path.join(
-                build_dir, "Release", "v2_recursive_internal_underflow_guard_probe.exe"
-            ),
+            os.path.join(build_dir, "Debug", "v2_recursive_internal_underflow_guard_probe.exe"),
+            os.path.join(build_dir, "Release", "v2_recursive_internal_underflow_guard_probe.exe"),
             os.path.join(build_dir, "v2_recursive_internal_underflow_guard_probe.exe"),
             os.path.join(build_dir, "v2_recursive_internal_underflow_guard_probe"),
         ]
@@ -108,7 +104,7 @@ def main():
             raise AssertionError(output)
         for marker in (
             "V2_RECURSIVE_INTERNAL_UNDERFLOW_GUARD_OK",
-            "unsupported_outer=yes",
+            "unsupported_outer_right=yes",
             "height4=yes",
             "fail_closed=yes",
             "root_stable=yes",
@@ -124,9 +120,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: unsupported outer-edge height-4 V2 DELETE remains fail-closed; "
+        "PASS: unsupported outer-right height-4 V2 DELETE remains fail-closed; "
         "records, topology, leaf links, allocator state, and reopen integrity "
-        "stay unchanged while both boundary root-height orientations contract"
+        "stay unchanged while the other root-height orientations contract"
     )
 
 
