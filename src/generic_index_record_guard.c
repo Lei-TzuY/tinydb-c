@@ -83,10 +83,17 @@ static bool subtree_is_fixed_v1(Table* table,
         return false;
     }
 
+    /* get_page() may evict and reuse the frame backing `node`. Snapshot every
+     * child pointer before recursing so a deep tree walk never dereferences a
+     * stale raw page pointer after buffer-pool pressure. */
+    uint32_t child_pages[INTERNAL_NODE_MAX_KEYS + 1u];
     for (uint32_t i = 0u; i <= num_keys; i++) {
-        uint32_t child_page = *internal_node_child(node, i);
+        child_pages[i] = *internal_node_child(node, i);
+    }
+
+    for (uint32_t i = 0u; i <= num_keys; i++) {
         if (!subtree_is_fixed_v1(table,
-                                 child_page,
+                                 child_pages[i],
                                  depth + 1u,
                                  message,
                                  message_size)) {
