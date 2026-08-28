@@ -365,15 +365,15 @@ int main(int argc, char** argv) {
                              1u,
                              &v2_max_key,
                              &rollback_delete_key)) {
-        fprintf(stderr, "unable to derive safe/unsafe V2 delete keys\n");
+        fprintf(stderr, "unable to derive V2 delete keys\n");
         tinydb_close(db);
         return 1;
     }
 
     /* Structural growth at the untouched fixed right edge remains blocked.
-     * In contrast, deleting a non-maximum key from a V2 leaf is topology
-     * neutral and can be committed safely. Removing that V2 leaf's maximum
-     * would change the parent separator, so that case must still fail closed. */
+     * Deleting an interior V2 key is topology-neutral, while deleting the
+     * maximum of a non-empty V2 leaf now atomically lowers the parent separator.
+     * Both mutations must preserve mixed V1/V2 routing and row counts. */
     char max_delete_sql[96];
     snprintf(max_delete_sql,
              sizeof(max_delete_sql),
@@ -383,9 +383,10 @@ int main(int argc, char** argv) {
         !exec_ok(db, "DELETE FROM items WHERE id = 3;") ||
         !item_absent(table, schema, 3u) ||
         tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
-        !exec_fails(db, max_delete_sql) ||
-        !expect_original_item(table, schema, v2_max_key) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
+        !exec_ok(db, max_delete_sql) ||
+        !item_absent(table, schema, v2_max_key) ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 22u ||
+        !exec_ok(db, "PRAGMA integrity_check;")) {
         fprintf(stderr, "slotted V2 topology-neutral/max-key DELETE policy failed\n");
         tinydb_close(db);
         return 1;
@@ -407,7 +408,7 @@ int main(int argc, char** argv) {
         !expect_item(table, schema, 1u, "rolled-back", 999u) ||
         !expect_item(table, schema, 4u, "rolled-back-insert", 404u) ||
         !item_absent(table, schema, rollback_delete_key) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 22u ||
         !exec_ok(db, "ROLLBACK;") ||
         !expect_item(table,
                      schema,
@@ -416,7 +417,7 @@ int main(int argc, char** argv) {
                      222u) ||
         !item_absent(table, schema, 4u) ||
         !expect_original_item(table, schema, rollback_delete_key) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u) {
+        tinydb_record_scan(table, schema, NULL, NULL) != 22u) {
         fprintf(stderr, "compact V2 mutation did not roll back atomically\n");
         tinydb_close(db);
         return 1;
@@ -443,13 +444,13 @@ int main(int argc, char** argv) {
         !item_absent(table, schema, 3u) ||
         !item_absent(table, schema, 4u) ||
         !expect_original_item(table, schema, rollback_delete_key) ||
-        !expect_original_item(table, schema, v2_max_key) ||
+        !item_absent(table, schema, v2_max_key) ||
         !expect_item(table, schema, 12u, "item-12", 120u) ||
         !expect_item(table, schema, 24u, "fixed-updated", 2424u) ||
         !compact_row_metadata(table, schema, 0u, NULL) ||
         !compact_row_metadata(table, schema, 1u, NULL) ||
         !compact_row_metadata(table, schema, 2u, NULL) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != 23u ||
+        tinydb_record_scan(table, schema, NULL, NULL) != 22u ||
         !exec_ok(db, "PRAGMA integrity_check;")) {
         fprintf(stderr, "mixed V1/V2 INSERT/UPDATE/DELETE state did not survive reopen\n");
         tinydb_close(db);
@@ -457,6 +458,6 @@ int main(int argc, char** argv) {
     }
     tinydb_close(db);
     remove(argv[1]);
-    printf("PASS: production compact V2 non-split INSERT supports safe lower-boundary growth; UPDATE and topology-neutral non-max DELETE commit, roll back, and reopen safely; max-key/fixed-target/split-requiring structural mutations stay fail-closed; mixed V1 updates and integrity remain valid.\n");
+    printf("PASS: production compact V2 non-split INSERT supports safe lower-boundary growth; UPDATE, interior DELETE, and safe max-key separator updates commit/rollback/reopen correctly; fixed-target/split-requiring structural inserts stay fail-closed; mixed V1 updates and integrity remain valid.\n");
     return 0;
 }
