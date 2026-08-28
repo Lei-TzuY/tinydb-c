@@ -45,13 +45,14 @@ def main():
         output = result.stdout + result.stderr
         if result.returncode != 0:
             raise AssertionError(output)
-        marker = "PASS: production existing-row UPDATE shrinks/grows compact V2 payloads"
+        marker = "PASS: production compact V2 non-split INSERT persists and rolls back safely"
         if marker not in output:
-            raise AssertionError(f"missing compact V2 production-update marker\n{output}")
+            raise AssertionError(f"missing compact V2 production-mutation marker\n{output}")
         print(
-            "PASS: production generic UPDATE rewrites variable-length compact V2 "
-            "rows in mixed trees with rollback/reopen durability while keeping "
-            "structural mutation fail-closed"
+            "PASS: production generic compact V2 rows support non-splitting interior "
+            "INSERT plus variable-length UPDATE with rollback/reopen durability, while "
+            "separator-changing, fixed-target, DELETE, and split-requiring mutations "
+            "remain fail-closed"
         )
     finally:
         cleanup(db_path)
