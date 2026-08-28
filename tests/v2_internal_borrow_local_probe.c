@@ -340,7 +340,8 @@ static bool run_case(const char* path, bool from_right) {
     remove(path);
     TinyDB* db = tinydb_open(path);
     if (db == NULL || !exec_ok(db,"CREATE TABLE items (id INT, name VARCHAR(255), price INT);")) {
-        if (db != NULL) tinydb_close(db); return false;
+        if (db != NULL) tinydb_close(db);
+        return false;
     }
     Table* table=tinydb_table(db); TableSchema* schema=find_schema(table,"items");
     uint32_t grands[GRAND_COUNT]={0u,0u};
