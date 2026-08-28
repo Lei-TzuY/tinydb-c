@@ -104,7 +104,7 @@ def main():
             raise AssertionError(output)
         for marker in (
             "V2_RECURSIVE_INTERNAL_UNDERFLOW_GUARD_OK",
-            "unsupported_inner_right=yes",
+            "unsupported_right_inner_left=yes",
             "height4=yes",
             "fail_closed=yes",
             "root_stable=yes",
@@ -120,10 +120,9 @@ def main():
         cleanup(db_path)
 
     print(
-        "PASS: the remaining key-40 inner-right height-4 V2 DELETE shape stays "
-        "fail-closed with records, topology, links, allocator state, and reopen "
-        "integrity unchanged while the four implemented contraction orientations "
-        "are covered by dedicated live regressions"
+        "PASS: the remaining key-50 right-inner-left height-4 V2 DELETE shape "
+        "stays fail-closed with records, topology, links, allocator state, and "
+        "reopen integrity unchanged while key 40 has a dedicated live route"
     )
 
 
