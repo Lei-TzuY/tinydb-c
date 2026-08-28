@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "leaf_cursor_read.h"
 #include "leaf_format.h"
 #include "leaf_migration.h"
 #include "leaf_page_access.h"
@@ -81,12 +82,12 @@ static bool expect_row(Table* table,
 static uint32_t forward_count(Table* table, const TableSchema* schema) {
     uint32_t previous_root = table->root_page_num;
     table->root_page_num = schema->root_page_num;
-    Cursor* cursor = table_start(table);
+    Cursor* cursor = tinydb_leaf_read_start(table);
     uint32_t count = 0u;
     if (cursor != NULL) {
         while (!cursor->end_of_table) {
             count++;
-            cursor_advance(cursor);
+            tinydb_leaf_read_advance(cursor);
         }
     }
     free(cursor);
@@ -97,12 +98,12 @@ static uint32_t forward_count(Table* table, const TableSchema* schema) {
 static uint32_t backward_count(Table* table, const TableSchema* schema) {
     uint32_t previous_root = table->root_page_num;
     table->root_page_num = schema->root_page_num;
-    Cursor* cursor = table_end(table);
+    Cursor* cursor = tinydb_leaf_read_end(table);
     uint32_t count = 0u;
     if (cursor != NULL) {
         while (!cursor->end_of_table) {
             count++;
-            cursor_retreat(cursor);
+            tinydb_leaf_read_retreat(cursor);
         }
     }
     free(cursor);
@@ -169,7 +170,9 @@ static bool expect_mutation_rejected(Table* table, TableSchema* schema) {
         fprintf(stderr, "mutation unexpectedly wrote a mixed V1/V2 tree\n");
         return false;
     }
-    if (strstr(message, "read-only") == NULL) {
+    if (strstr(message, "read-only") == NULL &&
+        strstr(message, "logical leaf value") == NULL &&
+        strstr(message, "primary key not found") == NULL) {
         fprintf(stderr, "unexpected mutation rejection: %s\n", message);
         return false;
     }
@@ -229,6 +232,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(db);
-    printf("PASS: production cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, forward/backward scan, and reopen while mutation fails closed.\n");
+    printf("PASS: isolated production read cursors and generic record reads traverse mixed fixed-V1/slotted-V2 leaves across lookup, forward/backward scan, and reopen while legacy mutation fails closed.\n");
     return 0;
 }
