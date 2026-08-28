@@ -124,6 +124,10 @@ static bool seed_tree(TinyDB* db,
     for (uint32_t i = 0u; i < LEAF_COUNT; i++) {
         leaves[i] = get_unused_page_num(pager);
         if (leaves[i] == 0u || leaves[i] == INVALID_PAGE_NUM) return false;
+        (void)get_page(pager, leaves[i]);
+    }
+
+    for (uint32_t i = 0u; i < LEAF_COUNT; i++) {
         unsigned char* leaf = (unsigned char*)get_page(pager, leaves[i]);
         memset(leaf, 0, PAGE_SIZE);
         if (!tinydb_slotted_leaf_v2_init(leaf, PAGE_SIZE)) return false;
