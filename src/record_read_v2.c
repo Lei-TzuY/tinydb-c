@@ -49,11 +49,15 @@ static bool raw_value_to_payload(const TableSchema* schema,
                                  uint32_t stored_length,
                                  TinyDBLeafPageFormat format,
                                  TinyDBRecordPayload* payload) {
-    char message[TINYDB_RECORD_MESSAGE_MAX];
+    /* Callers validate the schema contract appropriate to their API before
+     * reaching this physical decoder: payload-native callers use the full
+     * schema-sized validator while legacy callers retain their historical
+     * compatibility validator. Keep this helper layout-focused so tightening
+     * the new API cannot accidentally reject an otherwise supported legacy
+     * catalog layout. */
     if (schema == NULL || value == NULL || payload == NULL ||
-        !tinydb_record_payload_schema_supported(schema,
-                                                message,
-                                                sizeof(message))) {
+        schema->row_size == 0u ||
+        schema->row_size > sizeof(payload->bytes)) {
         return false;
     }
 
@@ -61,10 +65,7 @@ static bool raw_value_to_payload(const TableSchema* schema,
     if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
         /* A fixed V1 slot can only contain schemas that physically fit it.
          * Wide schemas therefore fail closed here rather than being truncated. */
-        if (stored_length < schema->row_size ||
-            schema->row_size > TINYDB_RECORD_PAYLOAD_MAX) {
-            return false;
-        }
+        if (stored_length < schema->row_size) return false;
         payload->length = schema->row_size;
         memcpy(payload->bytes, value, payload->length);
         return true;
@@ -74,7 +75,6 @@ static bool raw_value_to_payload(const TableSchema* schema,
     /* V2 accepts both migration-era raw logical payloads and compact row
      * envelopes. Neither path is constrained by the historical ROW_SIZE. */
     if (stored_length == schema->row_size) {
-        if (stored_length > sizeof(payload->bytes)) return false;
         payload->length = stored_length;
         memcpy(payload->bytes, value, payload->length);
         return true;
