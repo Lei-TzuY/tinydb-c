@@ -6,6 +6,7 @@
 #include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 #include "slotted_leaf_v2_tree_split_stage.h"
+#include "slotted_leaf_v2_tree_split_tail_stage.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -227,13 +228,12 @@ static bool split_insert_slotted_v2(Table* table,
     if (!tinydb_leaf_page_key_at(left_before,
                                  PAGE_SIZE,
                                  count - 1u,
-                                 &old_left_max) ||
-        key >= old_left_max) {
+                                 &old_left_max)) {
         free(cursor);
         end_root_scope(table, previous_root);
         set_message(message,
                     message_size,
-                    "slotted V2 split INSERT must preserve the existing child upper boundary");
+                    "slotted V2 split INSERT could not read the child upper boundary");
         return false;
     }
 
@@ -243,14 +243,24 @@ static bool split_insert_slotted_v2(Table* table,
                                PAGE_SIZE,
                                &previous_page_num) ||
         !tinydb_leaf_page_next(left_before, PAGE_SIZE, &next_page_num) ||
-        next_page_num == 0u || next_page_num >= table->pager->num_pages ||
         next_page_num == left_page_num ||
+        (next_page_num != 0u && next_page_num >= table->pager->num_pages) ||
         !previous_boundary_allows(table, previous_page_num, key)) {
         free(cursor);
         end_root_scope(table, previous_root);
         set_message(message,
                     message_size,
-                    "slotted V2 split INSERT requires a valid non-tail sibling range");
+                    "slotted V2 split INSERT requires a valid sibling range");
+        return false;
+    }
+
+    bool is_tail = next_page_num == 0u;
+    if (!is_tail && key >= old_left_max) {
+        free(cursor);
+        end_root_scope(table, previous_root);
+        set_message(message,
+                    message_size,
+                    "non-tail slotted V2 split INSERT must preserve the existing child upper boundary");
         return false;
     }
 
@@ -271,19 +281,23 @@ static bool split_insert_slotted_v2(Table* table,
 
     unsigned char next_before[PAGE_SIZE];
     unsigned char parent_before[PAGE_SIZE];
-    memcpy(next_before,
-           get_page(table->pager, next_page_num),
-           sizeof(next_before));
+    memset(next_before, 0, sizeof(next_before));
+    if (!is_tail) {
+        memcpy(next_before,
+               get_page(table->pager, next_page_num),
+               sizeof(next_before));
+    }
     memcpy(parent_before,
            get_page(table->pager, parent_page_num),
            sizeof(parent_before));
-    if (tinydb_leaf_format_detect_page(next_before, PAGE_SIZE) !=
-            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
-        !tinydb_slotted_leaf_v2_validate(next_before, PAGE_SIZE) ||
-        get_node_type(parent_before) != NODE_INTERNAL) {
+    if (get_node_type(parent_before) != NODE_INTERNAL ||
+        (!is_tail &&
+         (tinydb_leaf_format_detect_page(next_before, PAGE_SIZE) !=
+              TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+          !tinydb_slotted_leaf_v2_validate(next_before, PAGE_SIZE)))) {
         set_message(message,
                     message_size,
-                    "production V2 split currently requires a V2 next sibling and an existing internal parent");
+                    "production V2 split requires an internal parent and a valid V2 next sibling when non-tail");
         return false;
     }
 
@@ -303,23 +317,37 @@ static bool split_insert_slotted_v2(Table* table,
     unsigned char parent_after[PAGE_SIZE];
     memcpy(left_after, left_before, sizeof(left_after));
     memset(right_after, 0, sizeof(right_after));
-    memcpy(next_after, next_before, sizeof(next_after));
+    memset(next_after, 0, sizeof(next_after));
+    if (!is_tail) memcpy(next_after, next_before, sizeof(next_after));
     memcpy(parent_after, parent_before, sizeof(parent_after));
 
-    if (!tinydb_slotted_leaf_v2_stage_tree_split_nonroot_with_next(
-            left_after,
-            PAGE_SIZE,
-            left_page_num,
-            right_after,
-            PAGE_SIZE,
-            right_page_num,
-            next_after,
-            PAGE_SIZE,
-            next_page_num,
-            parent_after,
-            PAGE_SIZE,
-            NULL,
-            NULL)) {
+    bool staged = is_tail
+        ? tinydb_slotted_leaf_v2_stage_tree_split_nonroot_tail(
+              left_after,
+              PAGE_SIZE,
+              left_page_num,
+              right_after,
+              PAGE_SIZE,
+              right_page_num,
+              parent_after,
+              PAGE_SIZE,
+              NULL,
+              NULL)
+        : tinydb_slotted_leaf_v2_stage_tree_split_nonroot_with_next(
+              left_after,
+              PAGE_SIZE,
+              left_page_num,
+              right_after,
+              PAGE_SIZE,
+              right_page_num,
+              next_after,
+              PAGE_SIZE,
+              next_page_num,
+              parent_after,
+              PAGE_SIZE,
+              NULL,
+              NULL);
+    if (!staged) {
         set_message(message,
                     message_size,
                     "slotted V2 split staging rejected parent overflow or inconsistent topology");
@@ -354,7 +382,7 @@ static bool split_insert_slotted_v2(Table* table,
                                        (uint16_t)envelope_length) ||
         !tinydb_slotted_leaf_v2_validate(left_after, PAGE_SIZE) ||
         !tinydb_slotted_leaf_v2_validate(right_after, PAGE_SIZE) ||
-        !tinydb_slotted_leaf_v2_validate(next_after, PAGE_SIZE)) {
+        (!is_tail && !tinydb_slotted_leaf_v2_validate(next_after, PAGE_SIZE))) {
         set_message(message,
                     message_size,
                     "byte-balanced V2 split did not leave enough space for the inserted row");
@@ -373,7 +401,11 @@ static bool split_insert_slotted_v2(Table* table,
                                  PAGE_SIZE,
                                  (uint32_t)right_count - 1u,
                                  &checked_right_max) ||
-        checked_left_max != left_max || checked_right_max != old_left_max) {
+        checked_left_max != left_max ||
+        (!is_tail && checked_right_max != old_left_max) ||
+        (is_tail &&
+         (checked_right_max < old_left_max ||
+          checked_right_max <= checked_left_max))) {
         set_message(message,
                     message_size,
                     "slotted V2 split INSERT would invalidate staged parent separators");
@@ -401,7 +433,7 @@ static bool split_insert_slotted_v2(Table* table,
 
     if (!publish_page(table->pager, left_page_num, left_after) ||
         !publish_page(table->pager, right_page_num, right_after) ||
-        !publish_page(table->pager, next_page_num, next_after) ||
+        (!is_tail && !publish_page(table->pager, next_page_num, next_after)) ||
         !publish_page(table->pager, parent_page_num, parent_after)) {
         set_message(message,
                     message_size,
