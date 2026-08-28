@@ -89,6 +89,22 @@ bool tinydb_record_payload_update(Table* table,
                                   char* message,
                                   size_t message_size);
 
+/* DELETE has no replacement row to carry, but exposing it on the payload API
+ * keeps wide-schema CRUD callers on one schema-sized surface. The generic
+ * delete implementation is already schema-aware and format-aware; validate the
+ * wider logical schema contract here before delegating so invalid layouts fail
+ * before any mutation or generic-index epoch publication. */
+static inline bool tinydb_record_payload_delete(Table* table,
+                                                const TableSchema* schema,
+                                                uint32_t id,
+                                                char* message,
+                                                size_t message_size) {
+    if (!tinydb_record_payload_schema_supported(schema, message, message_size)) {
+        return false;
+    }
+    return tinydb_record_delete(table, schema, id, message, message_size);
+}
+
 /* Compatibility adapters for callers that still use the historical fixed
  * TinyDBRecord carrier. They intentionally reject rows wider than ROW_SIZE. */
 bool tinydb_record_payload_from_record(const TableSchema* schema,
