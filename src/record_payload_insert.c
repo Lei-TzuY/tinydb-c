@@ -3,6 +3,7 @@
 #include "leaf_format.h"
 #include "leaf_page_access.h"
 #include "record_payload.h"
+#include "record_payload_key.h"
 #include "record_payload_nonroot_split.h"
 #include "record_payload_root_split.h"
 #include "row_envelope.h"
@@ -157,9 +158,7 @@ bool tinydb_record_payload_insert(Table* table,
                     "payload-native INSERT excludes the legacy users table so its secondary indexes stay synchronized");
         return false;
     }
-    if (schema->root_page_num >= table->pager->num_pages ||
-        payload->length != schema->row_size ||
-        payload->length < sizeof(uint32_t)) {
+    if (schema->root_page_num >= table->pager->num_pages) {
         set_message(message,
                     message_size,
                     "payload length or schema root is invalid for payload-native INSERT");
@@ -167,7 +166,13 @@ bool tinydb_record_payload_insert(Table* table,
     }
 
     uint32_t key = 0u;
-    memcpy(&key, payload->bytes, sizeof(key));
+    if (!tinydb_record_payload_primary_key(schema,
+                                           payload,
+                                           &key,
+                                           message,
+                                           message_size)) {
+        return false;
+    }
 
     unsigned char envelope[PAGE_SIZE];
     uint32_t envelope_length = 0u;
