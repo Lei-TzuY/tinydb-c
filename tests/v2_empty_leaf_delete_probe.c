@@ -296,25 +296,51 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    if (delete_key(table, schema, 10u, message) ||
-        !underflow_fail_closed_message(message) ||
-        !record_present(table, schema, 10u) ||
-        !root_two_children(table, schema, leaf_pages) ||
-        table->pager->free_page_count != free_before + 1u ||
-        tinydb_record_scan(table, schema, NULL, NULL) != BASELINE_ROWS - 1u ||
-        !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "root-collapse delete did not remain fail-closed: %s\n", message);
+    bool left_deleted = delete_key(table, schema, 10u, message);
+    bool left_message_ok = underflow_fail_closed_message(message);
+    bool left_record_ok = record_present(table, schema, 10u);
+    bool left_root_ok = root_two_children(table, schema, leaf_pages);
+    bool left_free_ok = table->pager->free_page_count == free_before + 1u;
+    uint32_t left_scan_count = tinydb_record_scan(table, schema, NULL, NULL);
+    bool left_integrity_ok = exec_ok(db, "PRAGMA integrity_check;");
+    if (left_deleted || !left_message_ok || !left_record_ok || !left_root_ok ||
+        !left_free_ok || left_scan_count != BASELINE_ROWS - 1u ||
+        !left_integrity_ok) {
+        fprintf(stderr,
+                "root-collapse fail-closed mismatch: deleted=%s message_ok=%s "
+                "record_ok=%s root_ok=%s free_ok=%s scan=%u integrity=%s "
+                "message=%s\n",
+                left_deleted ? "yes" : "no",
+                left_message_ok ? "yes" : "no",
+                left_record_ok ? "yes" : "no",
+                left_root_ok ? "yes" : "no",
+                left_free_ok ? "yes" : "no",
+                left_scan_count,
+                left_integrity_ok ? "yes" : "no",
+                message);
         tinydb_close(db);
         return EXIT_FAILURE;
     }
 
-    if (delete_key(table, schema, 30u, message) ||
-        !underflow_fail_closed_message(message) ||
-        !record_present(table, schema, 30u) ||
-        !root_two_children(table, schema, leaf_pages) ||
-        table->pager->free_page_count != free_before + 1u ||
-        !exec_ok(db, "PRAGMA integrity_check;")) {
-        fprintf(stderr, "two-child parent underflow did not remain fail-closed: %s\n", message);
+    bool right_deleted = delete_key(table, schema, 30u, message);
+    bool right_message_ok = underflow_fail_closed_message(message);
+    bool right_record_ok = record_present(table, schema, 30u);
+    bool right_root_ok = root_two_children(table, schema, leaf_pages);
+    bool right_free_ok = table->pager->free_page_count == free_before + 1u;
+    bool right_integrity_ok = exec_ok(db, "PRAGMA integrity_check;");
+    if (right_deleted || !right_message_ok || !right_record_ok ||
+        !right_root_ok || !right_free_ok || !right_integrity_ok) {
+        fprintf(stderr,
+                "two-child underflow fail-closed mismatch: deleted=%s "
+                "message_ok=%s record_ok=%s root_ok=%s free_ok=%s "
+                "integrity=%s message=%s\n",
+                right_deleted ? "yes" : "no",
+                right_message_ok ? "yes" : "no",
+                right_record_ok ? "yes" : "no",
+                right_root_ok ? "yes" : "no",
+                right_free_ok ? "yes" : "no",
+                right_integrity_ok ? "yes" : "no",
+                message);
         tinydb_close(db);
         return EXIT_FAILURE;
     }
