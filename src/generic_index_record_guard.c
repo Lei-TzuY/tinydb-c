@@ -265,22 +265,56 @@ static bool update_existing_mixed(Table* table,
     return true;
 }
 
-static bool insert_key_preserves_parent_separator(const void* page,
+static bool insert_key_preserves_tree_boundaries(Table* table,
+                                                  uint32_t page_num,
+                                                  const void* page,
                                                   uint32_t key) {
-    if (is_node_root((void*)page)) return true;
+    if (table == NULL || table->pager == NULL || page == NULL ||
+        page_num >= table->pager->num_pages) {
+        return false;
+    }
 
     uint32_t count = 0u;
-    uint32_t first_key = 0u;
     uint32_t last_key = 0u;
     if (!tinydb_leaf_page_count(page, PAGE_SIZE, &count) || count == 0u ||
-        !tinydb_leaf_page_key_at(page, PAGE_SIZE, 0u, &first_key) ||
         !tinydb_leaf_page_key_at(page,
                                  PAGE_SIZE,
                                  count - 1u,
                                  &last_key)) {
         return false;
     }
-    return key > first_key && key < last_key;
+
+    /* Internal separators are the maximum key of the child to their left.
+     * Therefore a non-splitting insert is topology-neutral as long as it does
+     * not increase this leaf's maximum key. Root leaves have no parent
+     * separator, but the same bound keeps this narrow fast path predictable. */
+    if (key >= last_key) return false;
+
+    uint32_t prev_page_num = 0u;
+    if (!tinydb_leaf_page_prev(page, PAGE_SIZE, &prev_page_num)) return false;
+    if (prev_page_num == 0u) return true;
+    if (prev_page_num >= table->pager->num_pages || prev_page_num == page_num) {
+        return false;
+    }
+
+    void* prev_page = get_page(table->pager, prev_page_num);
+    uint32_t prev_next = 0u;
+    uint32_t prev_count = 0u;
+    uint32_t prev_last_key = 0u;
+    if (!tinydb_leaf_page_next(prev_page, PAGE_SIZE, &prev_next) ||
+        prev_next != page_num ||
+        !tinydb_leaf_page_count(prev_page, PAGE_SIZE, &prev_count) ||
+        prev_count == 0u ||
+        !tinydb_leaf_page_key_at(prev_page,
+                                 PAGE_SIZE,
+                                 prev_count - 1u,
+                                 &prev_last_key)) {
+        return false;
+    }
+
+    /* A lower-boundary insert may move this leaf's first key leftward, but it
+     * must remain strictly above the previous sibling's maximum key. */
+    return key > prev_last_key;
 }
 
 static bool insert_non_split_slotted_v2(Table* table,
@@ -341,12 +375,15 @@ static bool insert_non_split_slotted_v2(Table* table,
     if (tinydb_leaf_format_detect_page(page, PAGE_SIZE) !=
             TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
         !tinydb_slotted_leaf_v2_validate(page, PAGE_SIZE) ||
-        !insert_key_preserves_parent_separator(page, key)) {
+        !insert_key_preserves_tree_boundaries(table,
+                                              cursor->page_num,
+                                              page,
+                                              key)) {
         free(cursor);
         end_root_scope(table, previous_root);
         set_message(message,
                     message_size,
-                    "slotted V2 insert is allowed only when the target V2 leaf can accept the key without changing a parent separator");
+                    "slotted V2 insert is allowed only when the target V2 leaf can accept the key without changing a parent separator or crossing a sibling key boundary");
         return false;
     }
 
