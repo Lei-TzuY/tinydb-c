@@ -95,16 +95,17 @@ def main():
             "initial_root=1",
             "duplicate_guard=1",
             "root_split=1",
-            "nonroot_guard=1",
+            "nonroot_split=1",
+            "tail_append=1",
             "reopen=1",
         ):
             if marker not in output:
                 raise AssertionError(output)
 
     print(
-        "PASS: payload-native INSERT creates a real 308-byte compact V2 root leaf, "
-        "grows it through an atomic stable-root split into two linked V2 children, "
-        "keeps unsupported non-root separator growth fail-closed, and survives reopen"
+        "PASS: payload-native INSERT persists a real 308-byte compact V2 row set, "
+        "grows through an atomic stable-root split and a non-root leaf split, "
+        "supports the resulting tail append, and survives reopen"
     )
 
 
