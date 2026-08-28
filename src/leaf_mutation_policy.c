@@ -58,6 +58,43 @@ static bool validate_leaf_for_mutation(Table* table,
     return true;
 }
 
+static bool page_descends_from_root(Table* table,
+                                    uint32_t page_num,
+                                    uint32_t root_page_num) {
+    uint32_t traversed = 0u;
+    while (valid_page_num(table, page_num) &&
+           traversed++ <= table->pager->num_pages) {
+        if (page_num == root_page_num) return true;
+        void* page = get_page(table->pager, page_num);
+        if (is_node_root(page)) return false;
+        uint32_t parent = *node_parent(page);
+        if (!valid_page_num(table, parent) || parent == page_num) return false;
+        page_num = parent;
+    }
+    return false;
+}
+
+static bool reject_descendant_v2_pages(Table* table,
+                                       uint32_t root_page_num,
+                                       char* message,
+                                       size_t message_size) {
+    for (uint32_t page_num = 0u; page_num < table->pager->num_pages; page_num++) {
+        void* page = get_page(table->pager, page_num);
+        if (get_node_type(page) != NODE_LEAF) continue;
+        if (tinydb_leaf_format_detect_page(page, PAGE_SIZE) !=
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+            continue;
+        }
+        if (page_descends_from_root(table, page_num, root_page_num)) {
+            set_message(message,
+                        message_size,
+                        "slotted leaf V2 pages are read-only until V2 mutation and split recovery are enabled");
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool find_leftmost_leaf(Table* table,
                                uint32_t root_page_num,
                                uint32_t* leaf_page_num,
@@ -310,7 +347,11 @@ bool tinydb_leaf_tree_mutation_supported(Table* table,
         return false;
     }
 
-    if (!validate_tree_structure(table,
+    if (!reject_descendant_v2_pages(table,
+                                    root_page_num,
+                                    message,
+                                    message_size) ||
+        !validate_tree_structure(table,
                                  root_page_num,
                                  message,
                                  message_size)) {
