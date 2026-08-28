@@ -52,13 +52,16 @@ def main():
             "reopen=yes",
             "parent_update=yes",
             "wal=yes",
+            "tail=yes",
+            "rightmost=yes",
         ):
             if marker not in output:
                 raise AssertionError(f"missing {marker}\n{output}")
 
         print(
-            "PASS: production non-root slotted V2 overflow INSERT publishes a "
-            "leaf/sibling/parent split atomically through Pager/WAL and rolls back cleanly"
+            "PASS: production non-root slotted V2 overflow INSERT publishes both "
+            "middle and rightmost tail leaf splits atomically through Pager/WAL, "
+            "rolls back cleanly, and survives reopen"
         )
     finally:
         cleanup(db_path)
