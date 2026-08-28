@@ -67,6 +67,7 @@ static bool ordered_backward_transition(Table* table,
 static bool reciprocal_forward_transition(Table* table,
                                           uint32_t current_page,
                                           const void* next_page) {
+    (void)table;
     uint32_t back_link = 0u;
     return tinydb_leaf_page_prev(next_page, PAGE_SIZE, &back_link) &&
            back_link == current_page;
