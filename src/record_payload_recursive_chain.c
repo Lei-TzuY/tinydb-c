@@ -242,7 +242,7 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                                                     &plan,
                                                     local_message,
                                                     sizeof(local_message)) ||
-        plan.full_internal_levels < 3u) {
+        plan.full_internal_levels < 2u) {
         tinydb_record_payload_ancestor_chain_release(&chain);
         return false;
     }
@@ -268,7 +268,7 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                                                          local_message,
                                                          sizeof(local_message)) ||
         reservation.new_leaf_pages != 1u ||
-        reservation.new_internal_pages < 3u ||
+        reservation.new_internal_pages < 2u ||
         !tinydb_record_payload_prepare_page_claim_plan(table->pager,
                                                        &chain,
                                                        &reservation,
