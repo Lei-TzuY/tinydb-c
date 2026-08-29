@@ -1,5 +1,6 @@
 #include "generic_predicate.h"
 #include "generic_sql.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 
@@ -30,6 +31,7 @@ typedef struct {
     bool has_limit;
     uint32_t limit;
     uint32_t offset;
+    bool payload_native;
 } GenericOrSelect;
 
 typedef struct {
@@ -210,11 +212,18 @@ static TinyDBGenericSqlStatus parse_or_select(Table* table,
     if (select->schema == NULL || is_legacy_fixed_row_schema(select->schema)) {
         return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
     }
+    select->payload_native = select->schema->row_size > ROW_SIZE;
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_schema_supports_records(select->schema,
-                                        schema_message,
-                                        sizeof(schema_message))) {
+    if (select->payload_native) {
+        if (!tinydb_record_payload_schema_supported(select->schema,
+                                                    schema_message,
+                                                    sizeof(schema_message))) {
+            return execute_error(result, schema_message);
+        }
+    } else if (!tinydb_schema_supports_records(select->schema,
+                                               schema_message,
+                                               sizeof(schema_message))) {
         return execute_error(result, schema_message);
     }
 
@@ -301,12 +310,41 @@ static bool decode_values(const TableSchema* schema,
            value_count == schema->num_columns;
 }
 
+static bool decode_payload_values(const TableSchema* schema,
+                                  const TinyDBRecordPayload* payload,
+                                  TinyDBValue* values) {
+    uint32_t value_count = 0u;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    return tinydb_record_payload_decode_values(schema,
+                                               payload,
+                                               values,
+                                               MAX_COLUMNS_PER_TABLE,
+                                               &value_count,
+                                               message,
+                                               sizeof(message)) &&
+           value_count == schema->num_columns;
+}
+
 static void print_value(const TinyDBValue* value) {
     if (value->type == COL_TYPE_INT) {
         printf("%u\n", value->int_value);
     } else {
         printf("%s\n", value->text);
     }
+}
+
+static void print_payload_row(const TinyDBValue* values,
+                              uint32_t value_count) {
+    printf("(");
+    for (uint32_t i = 0u; i < value_count; i++) {
+        if (i > 0u) printf(", ");
+        if (values[i].type == COL_TYPE_INT) {
+            printf("%u", values[i].int_value);
+        } else {
+            printf("%s", values[i].text);
+        }
+    }
+    printf(")\n");
 }
 
 static bool visit_or_record(const TableSchema* schema,
@@ -342,6 +380,34 @@ static bool visit_or_record(const TableSchema* schema,
     return true;
 }
 
+static bool visit_or_payload(const TableSchema* schema,
+                             const TinyDBRecordPayload* payload,
+                             void* raw_context) {
+    GenericOrSelectContext* context = (GenericOrSelectContext*)raw_context;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    if (!decode_payload_values(schema, payload, values)) {
+        context->decode_failed = true;
+        return false;
+    }
+    if (!expression_matches(&context->select->expression, values)) return true;
+
+    context->matched++;
+    if (context->select->projection_kind == OR_PROJECTION_COUNT ||
+        context->matched <= context->select->offset ||
+        (context->select->has_limit &&
+         context->emitted >= context->select->limit)) {
+        return true;
+    }
+
+    if (context->select->projection_kind == OR_PROJECTION_COLUMN) {
+        print_value(&values[context->select->projection_column_index]);
+    } else {
+        print_payload_row(values, schema->num_columns);
+    }
+    context->emitted++;
+    return true;
+}
+
 static TinyDBGenericSqlStatus execute_or_select(Table* table,
                                                  const char* sql,
                                                  TinyDBGenericSqlResult* result) {
@@ -352,11 +418,31 @@ static TinyDBGenericSqlStatus execute_or_select(Table* table,
     GenericOrSelectContext context;
     memset(&context, 0, sizeof(context));
     context.select = &select;
-    (void)tinydb_record_scan(table, select.schema, visit_or_record, &context);
-    if (context.decode_failed) {
-        return execute_error(
-            result,
-            "unable to decode generic record during OR predicate SELECT");
+    if (select.payload_native) {
+        bool scan_complete = false;
+        char message[TINYDB_RECORD_MESSAGE_MAX];
+        message[0] = '\0';
+        (void)tinydb_record_payload_scan(table,
+                                        select.schema,
+                                        visit_or_payload,
+                                        &context,
+                                        &scan_complete,
+                                        message,
+                                        sizeof(message));
+        if (!scan_complete || context.decode_failed) {
+            return execute_error(
+                result,
+                message[0] != '\0'
+                    ? message
+                    : "unable to decode schema-sized payload during OR predicate SELECT");
+        }
+    } else {
+        (void)tinydb_record_scan(table, select.schema, visit_or_record, &context);
+        if (context.decode_failed) {
+            return execute_error(
+                result,
+                "unable to decode generic record during OR predicate SELECT");
+        }
     }
 
     if (select.projection_kind == OR_PROJECTION_COUNT) {
