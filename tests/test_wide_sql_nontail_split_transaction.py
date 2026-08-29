@@ -106,14 +106,19 @@ def main():
                 insert_sql(14, left, right),
                 insert_sql(15, left, right),
                 "SELECT COUNT(*) FROM wide_nontail;",
-                "SELECT COUNT(*) FROM wide_nontail WHERE id BETWEEN 10 AND 40;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 11;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 15;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 20;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 30;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 40;",
                 ".stats",
                 "PRAGMA integrity_check;",
                 "ROLLBACK;",
                 "SELECT COUNT(*) FROM wide_nontail;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 11;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 15;",
-                "SELECT COUNT(*) FROM wide_nontail WHERE id BETWEEN 10 AND 40;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 20;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 30;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 40;",
                 ".stats",
                 "PRAGMA integrity_check;",
@@ -125,7 +130,10 @@ def main():
                 insert_sql(15, left, right),
                 "COMMIT;",
                 "SELECT COUNT(*) FROM wide_nontail;",
-                "SELECT COUNT(*) FROM wide_nontail WHERE id BETWEEN 10 AND 40;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 11;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 15;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 20;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 30;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 40;",
                 ".stats",
                 "PRAGMA integrity_check;",
@@ -136,7 +144,12 @@ def main():
         reject_storage_failure(first)
 
         counts = scalar_results(first)
-        expected = [8, 13, 9, 1, 8, 0, 4, 1, 13, 9, 1]
+        expected = [
+            8,
+            13, 1, 1, 1, 1, 1,
+            8, 0, 0, 1, 1, 1,
+            13, 1, 1, 1, 1, 1,
+        ]
         if counts != expected:
             raise AssertionError(
                 f"unexpected non-tail split transaction counts {counts!r}, expected {expected!r}\n{first}"
@@ -173,9 +186,13 @@ def main():
             db_path,
             [
                 "SELECT COUNT(*) FROM wide_nontail;",
-                "SELECT COUNT(*) FROM wide_nontail WHERE id BETWEEN 10 AND 40;",
-                "SELECT COUNT(*) FROM wide_nontail WHERE id = 40;",
+                # Point probes straddle the two split children and the untouched
+                # old-next sibling, exercising the rewritten parent separators.
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 11;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 15;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 20;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 30;",
+                "SELECT COUNT(*) FROM wide_nontail WHERE id = 40;",
                 ".stats",
                 "PRAGMA integrity_check;",
                 # Exercise both the newly split range and the untouched old
@@ -188,7 +205,6 @@ def main():
                 "SELECT COUNT(*) FROM wide_nontail;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 15;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE id = 40;",
-                "SELECT COUNT(*) FROM wide_nontail WHERE id BETWEEN 10 AND 40;",
                 "SELECT COUNT(*) FROM wide_nontail WHERE left_text = 'temporary';",
                 ".stats",
                 "PRAGMA integrity_check;",
@@ -198,7 +214,7 @@ def main():
         reject_storage_failure(reopened)
 
         reopened_counts = scalar_results(reopened)
-        reopened_expected = [13, 9, 1, 1, 13, 1, 1, 9, 0]
+        reopened_expected = [13, 1, 1, 1, 1, 1, 13, 1, 1, 0]
         if reopened_counts != reopened_expected:
             raise AssertionError(
                 f"unexpected reopened non-tail split counts {reopened_counts!r}, "
@@ -218,8 +234,8 @@ def main():
 
         print(
             "PASS: a 516-byte SQL table performs a non-tail V2 leaf split inside BEGIN; "
-            "the split adds exactly one page, range routing through the rewritten parent and "
-            "old-next sibling remains correct, ROLLBACK restores rows/allocation/topology, "
+            "the split adds exactly one page, point routing across both rewritten child ranges "
+            "and the old-next sibling remains correct, ROLLBACK restores rows/allocation/topology, "
             "and COMMIT plus reopen preserves sibling backlinks and integrity."
         )
     finally:
