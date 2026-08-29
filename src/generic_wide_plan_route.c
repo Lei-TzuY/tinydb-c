@@ -39,6 +39,21 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
+static GenericSecondaryIndex* find_single_column_index(Table* table,
+                                                        const char* table_name,
+                                                        const char* column_name) {
+    if (table == NULL || table_name == NULL || column_name == NULL) return NULL;
+    for (uint32_t i = 0u; i < table->num_sec_indexes; i++) {
+        GenericSecondaryIndex* index = &table->sec_indexes[i];
+        if (index->enabled && index->num_columns == 1u &&
+            ci_equal(index->table_name, table_name) &&
+            ci_equal(index->column_name, column_name)) {
+            return index;
+        }
+    }
+    return NULL;
+}
+
 static bool is_legacy_fixed_row_schema(const TableSchema* schema) {
     return schema != NULL &&
            schema->num_columns == 3u &&
@@ -131,15 +146,40 @@ static const TinyDBGenericPredicate* first_predicate(
     return NULL;
 }
 
-static bool is_exact_primary_key_lookup(
-    const TinyDBGenericBooleanExpression* expression) {
-    if (expression->count == 0u || expression->root >= expression->count) {
+static bool is_single_predicate(const TinyDBGenericBooleanExpression* expression,
+                                const TinyDBGenericPredicate** predicate) {
+    if (expression == NULL || expression->count == 0u ||
+        expression->root >= expression->count) {
         return false;
     }
     const TinyDBGenericBooleanNode* root = &expression->nodes[expression->root];
     if (root->kind != TINYDB_GENERIC_BOOLEAN_PREDICATE) return false;
-    return root->predicate.column_index == 0u &&
-           root->predicate.op == TINYDB_GENERIC_COMPARE_EQ;
+    if (predicate != NULL) *predicate = &root->predicate;
+    return true;
+}
+
+static bool is_exact_primary_key_lookup(
+    const TinyDBGenericBooleanExpression* expression) {
+    const TinyDBGenericPredicate* predicate = NULL;
+    return is_single_predicate(expression, &predicate) &&
+           predicate->column_index == 0u &&
+           predicate->op == TINYDB_GENERIC_COMPARE_EQ;
+}
+
+static GenericSecondaryIndex* exact_secondary_index_lookup(
+    Table* table,
+    const TableSchema* schema,
+    const TinyDBGenericBooleanExpression* expression) {
+    const TinyDBGenericPredicate* predicate = NULL;
+    if (!is_single_predicate(expression, &predicate) ||
+        predicate->column_index == 0u ||
+        predicate->column_index >= schema->num_columns ||
+        predicate->op != TINYDB_GENERIC_COMPARE_EQ) {
+        return NULL;
+    }
+    return find_single_column_index(table,
+                                    schema->name,
+                                    schema->columns[predicate->column_index].name);
 }
 
 static void format_filter_value(const TinyDBGenericPredicate* predicate,
@@ -261,9 +301,22 @@ static TinyDBGenericSqlStatus try_build_wide_payload_plan(
     }
 
     plan->has_filter = true;
-    plan->kind = is_exact_primary_key_lookup(&expression)
-        ? TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP
-        : TINYDB_GENERIC_PLAN_FULL_SCAN;
+    if (is_exact_primary_key_lookup(&expression)) {
+        plan->kind = TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP;
+    } else {
+        GenericSecondaryIndex* index =
+            exact_secondary_index_lookup(table, schema, &expression);
+        if (index != NULL) {
+            plan->kind = TINYDB_GENERIC_PLAN_SECONDARY_INDEX_LOOKUP;
+            plan->index_term_count = 1u;
+            snprintf(plan->index_name,
+                     sizeof(plan->index_name),
+                     "%s",
+                     index->name);
+        } else {
+            plan->kind = TINYDB_GENERIC_PLAN_FULL_SCAN;
+        }
+    }
 
     if (!tinydb_generic_boolean_format(&expression,
                                        schema,
