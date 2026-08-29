@@ -168,45 +168,154 @@ static bool is_exact_primary_key_lookup(
            predicate->op == TINYDB_GENERIC_COMPARE_EQ;
 }
 
-static GenericSecondaryIndex* exact_secondary_index_lookup(
+static bool collect_and_predicates_at(
+    const TinyDBGenericBooleanExpression* expression,
+    uint32_t node_index,
+    TinyDBGenericPredicate* predicates,
+    uint32_t* predicate_count) {
+    if (expression == NULL || predicates == NULL || predicate_count == NULL ||
+        node_index >= expression->count) {
+        return false;
+    }
+
+    const TinyDBGenericBooleanNode* node = &expression->nodes[node_index];
+    if (node->kind == TINYDB_GENERIC_BOOLEAN_PREDICATE) {
+        if (*predicate_count >= TINYDB_GENERIC_BOOLEAN_MAX_NODES) return false;
+        predicates[*predicate_count] = node->predicate;
+        (*predicate_count)++;
+        return true;
+    }
+    if (node->kind != TINYDB_GENERIC_BOOLEAN_AND) return false;
+
+    return collect_and_predicates_at(expression,
+                                     node->left,
+                                     predicates,
+                                     predicate_count) &&
+           collect_and_predicates_at(expression,
+                                     node->right,
+                                     predicates,
+                                     predicate_count);
+}
+
+static bool collect_and_predicates(
+    const TinyDBGenericBooleanExpression* expression,
+    TinyDBGenericPredicate* predicates,
+    uint32_t* predicate_count) {
+    if (predicate_count == NULL) return false;
+    *predicate_count = 0u;
+    if (expression == NULL || expression->count == 0u ||
+        expression->root >= expression->count) {
+        return false;
+    }
+    return collect_and_predicates_at(expression,
+                                     expression->root,
+                                     predicates,
+                                     predicate_count);
+}
+
+static bool secondary_index_operator_supported(TinyDBGenericCompareOp op) {
+    return op == TINYDB_GENERIC_COMPARE_EQ ||
+           op == TINYDB_GENERIC_COMPARE_GT ||
+           op == TINYDB_GENERIC_COMPARE_GTE ||
+           op == TINYDB_GENERIC_COMPARE_LT ||
+           op == TINYDB_GENERIC_COMPARE_LTE;
+}
+
+static GenericSecondaryIndex* choose_secondary_index_anchor(
     Table* table,
     const TableSchema* schema,
-    const TinyDBGenericBooleanExpression* expression) {
-    const TinyDBGenericPredicate* predicate = NULL;
-    if (!is_single_predicate(expression, &predicate) ||
-        predicate->column_index == 0u ||
-        predicate->column_index >= schema->num_columns ||
-        predicate->op != TINYDB_GENERIC_COMPARE_EQ) {
+    const TinyDBGenericBooleanExpression* expression,
+    TinyDBGenericPredicate* anchor_predicates,
+    uint32_t* anchor_predicate_count) {
+    TinyDBGenericPredicate predicates[TINYDB_GENERIC_BOOLEAN_MAX_NODES];
+    uint32_t predicate_count = 0u;
+    if (anchor_predicate_count != NULL) *anchor_predicate_count = 0u;
+    if (table == NULL || schema == NULL || anchor_predicates == NULL ||
+        anchor_predicate_count == NULL ||
+        !collect_and_predicates(expression, predicates, &predicate_count)) {
         return NULL;
     }
-    return find_single_column_index(table,
-                                    schema->name,
-                                    schema->columns[predicate->column_index].name);
+
+    GenericSecondaryIndex* best_index = NULL;
+    uint32_t best_column = 0u;
+    uint32_t best_count = 0u;
+
+    for (uint32_t i = 0u; i < predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &predicates[i];
+        if (predicate->column_index == 0u ||
+            predicate->column_index >= schema->num_columns ||
+            !secondary_index_operator_supported(predicate->op)) {
+            continue;
+        }
+
+        GenericSecondaryIndex* index = find_single_column_index(
+            table,
+            schema->name,
+            schema->columns[predicate->column_index].name);
+        if (index == NULL) continue;
+
+        uint32_t same_column_count = 0u;
+        for (uint32_t j = 0u; j < predicate_count; j++) {
+            if (predicates[j].column_index == predicate->column_index &&
+                secondary_index_operator_supported(predicates[j].op)) {
+                same_column_count++;
+            }
+        }
+
+        if (same_column_count > best_count) {
+            best_index = index;
+            best_column = predicate->column_index;
+            best_count = same_column_count;
+        }
+    }
+
+    if (best_index == NULL) return NULL;
+
+    for (uint32_t i = 0u; i < predicate_count; i++) {
+        if (predicates[i].column_index == best_column &&
+            secondary_index_operator_supported(predicates[i].op)) {
+            anchor_predicates[*anchor_predicate_count] = predicates[i];
+            (*anchor_predicate_count)++;
+        }
+    }
+    return best_index;
 }
 
 static void annotate_secondary_index_estimate(
     Table* table,
     const TableSchema* schema,
     GenericSecondaryIndex* index,
-    const TinyDBGenericBooleanExpression* expression,
+    const TinyDBGenericPredicate* predicates,
+    uint32_t predicate_count,
     TinyDBGenericSelectPlan* plan) {
-    const TinyDBGenericPredicate* predicate = NULL;
-    if (table == NULL || schema == NULL || index == NULL || plan == NULL ||
-        !is_single_predicate(expression, &predicate)) {
+    if (table == NULL || schema == NULL || index == NULL || predicates == NULL ||
+        predicate_count == 0u || plan == NULL) {
         return;
     }
 
     TinyDBGenericIndexEstimate estimate;
     char message[TINYDB_RECORD_MESSAGE_MAX] = {0};
-    if (!tinydb_generic_index_estimate_candidates(table,
-                                                  schema,
-                                                  index,
-                                                  predicate,
-                                                  &estimate,
-                                                  message,
-                                                  sizeof(message))) {
-        return;
+    bool estimated = false;
+    if (predicate_count == 1u) {
+        estimated = tinydb_generic_index_estimate_candidates(table,
+                                                              schema,
+                                                              index,
+                                                              &predicates[0],
+                                                              &estimate,
+                                                              message,
+                                                              sizeof(message));
+    } else {
+        estimated = tinydb_generic_index_estimate_conjunctive_candidates(
+            table,
+            schema,
+            index,
+            predicates,
+            predicate_count,
+            &estimate,
+            message,
+            sizeof(message));
     }
+    if (!estimated) return;
 
     plan->has_cost_estimate = true;
     plan->estimated_rows = estimate.candidate_count;
@@ -337,11 +446,17 @@ static TinyDBGenericSqlStatus try_build_wide_payload_plan(
     if (is_exact_primary_key_lookup(&expression)) {
         plan->kind = TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP;
     } else {
-        GenericSecondaryIndex* index =
-            exact_secondary_index_lookup(table, schema, &expression);
-        if (index != NULL) {
+        TinyDBGenericPredicate anchor_predicates[TINYDB_GENERIC_BOOLEAN_MAX_NODES];
+        uint32_t anchor_predicate_count = 0u;
+        GenericSecondaryIndex* index = choose_secondary_index_anchor(
+            table,
+            schema,
+            &expression,
+            anchor_predicates,
+            &anchor_predicate_count);
+        if (index != NULL && anchor_predicate_count > 0u) {
             plan->kind = TINYDB_GENERIC_PLAN_SECONDARY_INDEX_LOOKUP;
-            plan->index_term_count = 1u;
+            plan->index_term_count = anchor_predicate_count;
             snprintf(plan->index_name,
                      sizeof(plan->index_name),
                      "%s",
@@ -349,7 +464,8 @@ static TinyDBGenericSqlStatus try_build_wide_payload_plan(
             annotate_secondary_index_estimate(table,
                                               schema,
                                               index,
-                                              &expression,
+                                              anchor_predicates,
+                                              anchor_predicate_count,
                                               plan);
         } else {
             plan->kind = TINYDB_GENERIC_PLAN_FULL_SCAN;
