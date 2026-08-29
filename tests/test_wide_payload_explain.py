@@ -67,6 +67,7 @@ def main():
                 "INSERT INTO wide_docs VALUES (10, 'left-a', 'right-a');",
                 "INSERT INTO wide_docs VALUES (20, 'left-b', 'right-b');",
                 "INSERT INTO wide_docs VALUES (30, 'left-c', 'right-c');",
+                "CREATE INDEX idx_wide_right ON wide_docs (right_text);",
                 ".exit",
             ],
         )
@@ -85,6 +86,21 @@ def main():
         require(point, "FILTER: id = 20")
         if "left-b" in point:
             raise AssertionError("plain wide EXPLAIN executed the query\n" + point)
+
+        indexed = run_session(
+            executable,
+            db_file,
+            [
+                "EXPLAIN SELECT left_text FROM wide_docs WHERE right_text = 'right-b';",
+                ".exit",
+            ],
+        )
+        reject_fixed_carrier_error(indexed)
+        require(indexed, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
+        require(indexed, "INDEX: idx_wide_right")
+        require(indexed, "FILTER: right_text = 'right-b'")
+        if "left-b" in indexed:
+            raise AssertionError("plain indexed wide EXPLAIN executed the query\n" + indexed)
 
         ranged = run_session(
             executable,
@@ -113,20 +129,21 @@ def main():
             executable,
             db_file,
             [
-                "EXPLAIN ANALYZE SELECT left_text FROM wide_docs WHERE id = 30;",
+                "EXPLAIN ANALYZE SELECT left_text FROM wide_docs WHERE right_text = 'right-c';",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
         )
         reject_fixed_carrier_error(reopened)
-        require(reopened, "PLAN: GENERIC PRIMARY KEY LOOKUP")
+        require(reopened, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
+        require(reopened, "INDEX: idx_wide_right")
         require(reopened, "ACTUAL RESULT")
         require(reopened, "left-c")
         require(reopened, "ok")
 
         print(
-            "PASS: payload-sized tables participate in equality, range, compound, "
-            "and reopened EXPLAIN planning without a fixed-record carrier."
+            "PASS: payload-sized tables participate in primary-key, secondary-index, "
+            "range, compound, and reopened EXPLAIN planning without a fixed-record carrier."
         )
     finally:
         cleanup(db_file)
