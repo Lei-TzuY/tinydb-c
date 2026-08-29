@@ -183,17 +183,24 @@ static bool seed_tree(Table* table,
     *schema = wide_schema(root_page_num);
 
     uint32_t full_parent_page_num = get_unused_page_num(pager);
-    uint32_t full_grandparent_page_num = get_unused_page_num(pager);
-    uint32_t sibling_grandparent_page_num = get_unused_page_num(pager);
-    if (full_parent_page_num == 0u || full_parent_page_num == INVALID_PAGE_NUM ||
-        full_grandparent_page_num == 0u ||
-        full_grandparent_page_num == INVALID_PAGE_NUM ||
-        sibling_grandparent_page_num == 0u ||
-        sibling_grandparent_page_num == INVALID_PAGE_NUM) {
+    if (full_parent_page_num == 0u ||
+        full_parent_page_num == INVALID_PAGE_NUM) {
         return false;
     }
     (void)get_page(pager, full_parent_page_num);
+
+    uint32_t full_grandparent_page_num = get_unused_page_num(pager);
+    if (full_grandparent_page_num == 0u ||
+        full_grandparent_page_num == INVALID_PAGE_NUM) {
+        return false;
+    }
     (void)get_page(pager, full_grandparent_page_num);
+
+    uint32_t sibling_grandparent_page_num = get_unused_page_num(pager);
+    if (sibling_grandparent_page_num == 0u ||
+        sibling_grandparent_page_num == INVALID_PAGE_NUM) {
+        return false;
+    }
     (void)get_page(pager, sibling_grandparent_page_num);
 
     uint32_t minimal_parents[MINIMAL_PARENT_COUNT];
