@@ -1,4 +1,6 @@
 #include "generic_boolean.h"
+#include "generic_index_candidates.h"
+#include "generic_index_cost.h"
 #include "generic_sql.h"
 #include "record_payload.h"
 
@@ -182,6 +184,37 @@ static GenericSecondaryIndex* exact_secondary_index_lookup(
                                     schema->columns[predicate->column_index].name);
 }
 
+static void annotate_secondary_index_estimate(
+    Table* table,
+    const TableSchema* schema,
+    GenericSecondaryIndex* index,
+    const TinyDBGenericBooleanExpression* expression,
+    TinyDBGenericSelectPlan* plan) {
+    const TinyDBGenericPredicate* predicate = NULL;
+    if (table == NULL || schema == NULL || index == NULL || plan == NULL ||
+        !is_single_predicate(expression, &predicate)) {
+        return;
+    }
+
+    TinyDBGenericIndexEstimate estimate;
+    char message[TINYDB_RECORD_MESSAGE_MAX] = {0};
+    if (!tinydb_generic_index_estimate_candidates(table,
+                                                  schema,
+                                                  index,
+                                                  predicate,
+                                                  &estimate,
+                                                  message,
+                                                  sizeof(message))) {
+        return;
+    }
+
+    plan->has_cost_estimate = true;
+    plan->estimated_rows = estimate.candidate_count;
+    plan->estimated_table_rows = estimate.total_count;
+    plan->estimated_cost = tinydb_generic_anchor_cost(estimate.candidate_count);
+    plan->estimated_scan_cost = tinydb_generic_scan_cost(estimate.total_count);
+}
+
 static void format_filter_value(const TinyDBGenericPredicate* predicate,
                                 char* output,
                                 size_t output_size) {
@@ -313,6 +346,11 @@ static TinyDBGenericSqlStatus try_build_wide_payload_plan(
                      sizeof(plan->index_name),
                      "%s",
                      index->name);
+            annotate_secondary_index_estimate(table,
+                                              schema,
+                                              index,
+                                              &expression,
+                                              plan);
         } else {
             plan->kind = TINYDB_GENERIC_PLAN_FULL_SCAN;
         }
