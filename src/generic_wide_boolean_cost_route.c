@@ -436,14 +436,26 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
 }
 
 void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
-    tinydb_generic_sql_print_plan_wide_boolean_index_base(plan);
-    if (plan == NULL || !plan->applicable ||
-        plan->kind != TINYDB_GENERIC_PLAN_FULL_SCAN ||
-        !plan->has_cost_estimate ||
-        !wide_boolean_cost_ci_equal(plan->index_name,
-                                    WIDE_BOOLEAN_COST_SCAN_MARKER)) {
+    bool wide_scan_choice =
+        plan != NULL && plan->applicable &&
+        plan->kind == TINYDB_GENERIC_PLAN_FULL_SCAN &&
+        plan->has_cost_estimate &&
+        wide_boolean_cost_ci_equal(plan->index_name,
+                                   WIDE_BOOLEAN_COST_SCAN_MARKER);
+
+    if (!wide_scan_choice) {
+        tinydb_generic_sql_print_plan_wide_boolean_index_base(plan);
         return;
     }
+
+    TinyDBGenericSelectPlan base_view = *plan;
+    base_view.has_cost_estimate = false;
+    base_view.estimated_rows = 0u;
+    base_view.estimated_table_rows = 0u;
+    base_view.estimated_cost = 0u;
+    base_view.estimated_scan_cost = 0u;
+    base_view.index_name[0] = '\0';
+    tinydb_generic_sql_print_plan_wide_boolean_index_base(&base_view);
 
     printf("  ESTIMATED ROWS: %u / %u\n",
            plan->estimated_rows,
