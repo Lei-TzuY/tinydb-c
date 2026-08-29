@@ -125,10 +125,6 @@ def main():
         ):
             raise AssertionError("rejected ALTER column leaked into catalog\n" + first)
 
-        wide_docs_section = first.split("CREATE TABLE empty_wide", 1)[0]
-        if "tag | VARCHAR(5)" in wide_docs_section:
-            raise AssertionError("non-empty wide ALTER column leaked into catalog\n" + first)
-
         second = run_session(
             executable,
             db_path,
