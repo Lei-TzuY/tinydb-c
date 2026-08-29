@@ -1,3 +1,4 @@
+#include "record_payload_nonroot_internal_split.h"
 #include "record_payload_nonroot_split.h"
 #include "record_payload_root_internal_split.h"
 
@@ -66,13 +67,35 @@ bool tinydb_record_payload_try_nonroot_split(
         return true;
     }
 
-    if (applicable != NULL) {
-        *applicable = base_applicable || root_applicable;
+    bool nonroot_parent_applicable = false;
+    char nonroot_parent_message[TINYDB_RECORD_MESSAGE_MAX];
+    nonroot_parent_message[0] = '\0';
+    if (tinydb_record_payload_try_full_nonroot_parent_split(
+            table,
+            schema,
+            key,
+            envelope,
+            envelope_length,
+            &nonroot_parent_applicable,
+            nonroot_parent_message,
+            sizeof(nonroot_parent_message))) {
+        if (applicable != NULL) *applicable = true;
+        if (message != NULL && message_size > 0u) message[0] = '\0';
+        return true;
     }
-    if (root_applicable && root_message[0] != '\0') {
+
+    if (applicable != NULL) {
+        *applicable = base_applicable || root_applicable ||
+                      nonroot_parent_applicable;
+    }
+    if (nonroot_parent_applicable && nonroot_parent_message[0] != '\0') {
+        set_message(message, message_size, nonroot_parent_message);
+    } else if (root_applicable && root_message[0] != '\0') {
         set_message(message, message_size, root_message);
     } else if (base_message[0] != '\0') {
         set_message(message, message_size, base_message);
+    } else if (nonroot_parent_message[0] != '\0') {
+        set_message(message, message_size, nonroot_parent_message);
     } else if (root_message[0] != '\0') {
         set_message(message, message_size, root_message);
     } else {
