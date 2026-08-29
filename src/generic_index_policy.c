@@ -1,5 +1,5 @@
 #include "multitable.h"
-#include "record.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 
@@ -45,11 +45,15 @@ bool multitable_index_target_supported(Table* table, const char* table_name) {
     /* Preserve the historical users/root-0 path exactly. */
     if (schema->root_page_num == 0) return true;
 
-    /* Non-zero roots are allowed only for the schema-aware generic record
-     * format. Fixed-Row lookalikes remain blocked because their legacy index
-     * maintenance still assumes the primary users root. */
+    /* Non-zero roots are allowed only for schema-aware generic records.
+     * Fixed-Row lookalikes remain blocked because their legacy index
+     * maintenance still assumes the primary users root. Payload-sized V2 rows
+     * are valid index targets now that candidate rebuild and fetch paths stay
+     * on the schema-sized carrier. */
     if (is_legacy_fixed_row_schema(schema)) return false;
 
     char message[TINYDB_RECORD_MESSAGE_MAX];
-    return tinydb_schema_supports_records(schema, message, sizeof(message));
+    return tinydb_record_payload_schema_supported(schema,
+                                                  message,
+                                                  sizeof(message));
 }
