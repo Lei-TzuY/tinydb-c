@@ -3,6 +3,7 @@
 #include "record_payload_nonroot_split.h"
 #include "record_payload_overflow_reservation.h"
 #include "record_payload_page_claim_plan.h"
+#include "record_payload_page_claim_transaction.h"
 #include "record_payload_root_internal_split.h"
 
 #include <stdio.h>
@@ -193,6 +194,40 @@ bool tinydb_record_payload_try_nonroot_split(
             set_message(message,
                         message_size,
                         "payload-native recursive overflow preflight disagrees with the full-grandparent boundary");
+            return false;
+        }
+
+        uint32_t claimed_count = 0u;
+        if (!tinydb_record_payload_claim_prepared_pages(
+                table->pager,
+                &claim_plan,
+                &claimed_count,
+                ancestry_message,
+                sizeof(ancestry_message))) {
+            tinydb_record_payload_page_claim_plan_release(&claim_plan);
+            if (applicable != NULL) *applicable = true;
+            set_message(message,
+                        message_size,
+                        ancestry_message[0] != '\0'
+                            ? ancestry_message
+                            : "payload-native recursive page reservation failed");
+            return false;
+        }
+        if (!tinydb_record_payload_rollback_claimed_pages(
+                table->pager,
+                &claim_plan,
+                claimed_count,
+                ancestry_message,
+                sizeof(ancestry_message)) ||
+            table->pager->num_pages != claim_plan.original_num_pages ||
+            table->pager->free_page_count != claim_plan.original_free_page_count) {
+            tinydb_record_payload_page_claim_plan_release(&claim_plan);
+            if (applicable != NULL) *applicable = true;
+            set_message(message,
+                        message_size,
+                        ancestry_message[0] != '\0'
+                            ? ancestry_message
+                            : "payload-native recursive page reservation rollback failed");
             return false;
         }
         tinydb_record_payload_page_claim_plan_release(&claim_plan);
