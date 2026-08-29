@@ -519,4 +519,8 @@ TinyDBGenericSqlStatus tinydb_generic_sql_build_select_plan(
 
 void tinydb_generic_sql_print_plan(const TinyDBGenericSelectPlan* plan) {
     tinydb_generic_sql_print_plan_wide_base(plan);
+    if (plan != NULL && plan->has_filter && plan->filter_expression[0] != '\0' &&
+        strstr(plan->filter_expression, " AND ") != NULL) {
+        printf("  FILTER EXPRESSION: %s\n", plan->filter_expression);
+    }
 }
