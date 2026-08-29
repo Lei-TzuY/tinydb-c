@@ -1,18 +1,52 @@
-#define main tinydb_height5_nonroot_merge_borrow_probe_main
-#include "v2_recursive_nonroot_merge_borrow_probe.c"
+#define main tinydb_height4_merge_borrow_probe_main
+#include "v2_recursive_internal_merge_borrow_probe.c"
 #undef main
+
+#define H5M_LEAF_COUNT 18u
+#define H5M_PARENT_COUNT 9u
+#define H5M_GRAND_COUNT 4u
+#define H5M_GREAT_COUNT 2u
+#define H5M_BASELINE_ROWS 18u
+
+static bool h5m_allocate_pages(Pager* pager,
+                               uint32_t greats[H5M_GREAT_COUNT],
+                               uint32_t grands[H5M_GRAND_COUNT],
+                               uint32_t parents[H5M_PARENT_COUNT],
+                               uint32_t leaves[H5M_LEAF_COUNT]) {
+    for (uint32_t i = 0u; i < H5M_GREAT_COUNT; i++) {
+        greats[i] = get_unused_page_num(pager);
+        if (greats[i] == 0u || greats[i] == INVALID_PAGE_NUM) return false;
+        (void)get_page(pager, greats[i]);
+    }
+    for (uint32_t i = 0u; i < H5M_GRAND_COUNT; i++) {
+        grands[i] = get_unused_page_num(pager);
+        if (grands[i] == 0u || grands[i] == INVALID_PAGE_NUM) return false;
+        (void)get_page(pager, grands[i]);
+    }
+    for (uint32_t i = 0u; i < H5M_PARENT_COUNT; i++) {
+        parents[i] = get_unused_page_num(pager);
+        if (parents[i] == 0u || parents[i] == INVALID_PAGE_NUM) return false;
+        (void)get_page(pager, parents[i]);
+    }
+    for (uint32_t i = 0u; i < H5M_LEAF_COUNT; i++) {
+        leaves[i] = get_unused_page_num(pager);
+        if (leaves[i] == 0u || leaves[i] == INVALID_PAGE_NUM) return false;
+        (void)get_page(pager, leaves[i]);
+    }
+    return true;
+}
 
 static bool h5m_seed_tree(TinyDB* db,
                           TableSchema* schema,
-                          uint32_t greats[H5_GREAT_COUNT],
-                          uint32_t grands[H5_GRAND_COUNT],
-                          uint32_t parents[H5_PARENT_COUNT],
-                          uint32_t leaves[H5_LEAF_COUNT]) {
+                          uint32_t greats[H5M_GREAT_COUNT],
+                          uint32_t grands[H5M_GRAND_COUNT],
+                          uint32_t parents[H5M_PARENT_COUNT],
+                          uint32_t leaves[H5M_LEAF_COUNT]) {
     Table* table = tinydb_table(db);
     Pager* pager = table->pager;
-    if (!h5_allocate_pages(pager, greats, grands, parents, leaves)) return false;
+    if (!h5m_allocate_pages(pager, greats, grands, parents, leaves)) return false;
 
-    for (uint32_t i = 0u; i < H5_LEAF_COUNT; i++) {
+    for (uint32_t i = 0u; i < H5M_LEAF_COUNT; i++) {
         uint32_t key = 10u * (i + 1u);
         unsigned char* leaf = (unsigned char*)get_page(pager, leaves[i]);
         memset(leaf, 0, PAGE_SIZE);
@@ -24,16 +58,16 @@ static bool h5m_seed_tree(TinyDB* db,
             i == 0u ? 0u : leaves[i - 1u]);
         tinydb_slotted_split_write_u32(
             leaf + TINYDB_SLOTTED_V2_NEXT_LEAF_OFFSET,
-            i + 1u == H5_LEAF_COUNT ? 0u : leaves[i + 1u]);
+            i + 1u == H5M_LEAF_COUNT ? 0u : leaves[i + 1u]);
         if (!raw_insert(schema, leaf, key) ||
             !tinydb_slotted_leaf_v2_validate(leaf, PAGE_SIZE)) return false;
         mark_page_dirty(pager, leaves[i]);
     }
 
-    const uint32_t parent_grand[H5_PARENT_COUNT] = {
+    const uint32_t parent_grand[H5M_PARENT_COUNT] = {
         0u, 0u, 0u, 1u, 1u, 2u, 2u, 3u, 3u
     };
-    for (uint32_t i = 0u; i < H5_PARENT_COUNT; i++) {
+    for (uint32_t i = 0u; i < H5M_PARENT_COUNT; i++) {
         const uint32_t children[2] = {leaves[2u * i], leaves[2u * i + 1u]};
         const uint32_t separators[1] = {10u * (2u * i + 1u)};
         uint32_t grand = grands[parent_grand[i]];
@@ -58,7 +92,7 @@ static bool h5m_seed_tree(TinyDB* db,
                         g2_children, g2_keys, 2u) ||
         !build_internal(pager, grands[3], greats[1], false,
                         g3_children, g3_keys, 2u)) return false;
-    for (uint32_t i = 0u; i < H5_GRAND_COUNT; i++) mark_page_dirty(pager, grands[i]);
+    for (uint32_t i = 0u; i < H5M_GRAND_COUNT; i++) mark_page_dirty(pager, grands[i]);
 
     const uint32_t left_great_children[2] = {grands[0], grands[1]};
     const uint32_t left_great_keys[1] = {60u};
@@ -76,16 +110,16 @@ static bool h5m_seed_tree(TinyDB* db,
     mark_page_dirty(pager, greats[1]);
     mark_page_dirty(pager, schema->root_page_num);
     pager_commit(pager);
-    return tinydb_record_scan(table, schema, NULL, NULL) == H5_BASELINE_ROWS &&
+    return tinydb_record_scan(table, schema, NULL, NULL) == H5M_BASELINE_ROWS &&
            exec_ok(db, "PRAGMA integrity_check;");
 }
 
 static bool h5m_original_state(Table* table,
                                TableSchema* schema,
-                               const uint32_t greats[H5_GREAT_COUNT],
-                               const uint32_t grands[H5_GRAND_COUNT],
-                               const uint32_t parents[H5_PARENT_COUNT],
-                               const uint32_t leaves[H5_LEAF_COUNT],
+                               const uint32_t greats[H5M_GREAT_COUNT],
+                               const uint32_t grands[H5M_GRAND_COUNT],
+                               const uint32_t parents[H5M_PARENT_COUNT],
+                               const uint32_t leaves[H5M_LEAF_COUNT],
                                uint32_t free_before) {
     const uint32_t root_children[2] = {greats[0], greats[1]};
     const uint32_t root_keys[1] = {100u};
@@ -116,13 +150,13 @@ static bool h5m_original_state(Table* table,
         !internal_matches(table, grands[3], greats[1], false,
                           g3_children, g3_keys, 2u) ||
         table->pager->free_page_count != free_before ||
-        tinydb_record_scan(table, schema, NULL, NULL) != H5_BASELINE_ROWS ||
+        tinydb_record_scan(table, schema, NULL, NULL) != H5M_BASELINE_ROWS ||
         !present(table, schema, 80u)) return false;
 
-    for (uint32_t i = 0u; i < H5_LEAF_COUNT; i++) {
+    for (uint32_t i = 0u; i < H5M_LEAF_COUNT; i++) {
         uint32_t expected_prev = i == 0u ? 0u : leaves[i - 1u];
         uint32_t expected_next =
-            i + 1u == H5_LEAF_COUNT ? 0u : leaves[i + 1u];
+            i + 1u == H5M_LEAF_COUNT ? 0u : leaves[i + 1u];
         uint32_t expected_parent = parents[i / 2u];
         if (!leaf_state(table, leaves[i], expected_parent,
                         expected_prev, expected_next) ||
@@ -135,10 +169,10 @@ static bool h5m_original_state(Table* table,
 
 static bool h5m_cascaded_state(Table* table,
                                TableSchema* schema,
-                               const uint32_t greats[H5_GREAT_COUNT],
-                               const uint32_t grands[H5_GRAND_COUNT],
-                               const uint32_t parents[H5_PARENT_COUNT],
-                               const uint32_t leaves[H5_LEAF_COUNT],
+                               const uint32_t greats[H5M_GREAT_COUNT],
+                               const uint32_t grands[H5M_GRAND_COUNT],
+                               const uint32_t parents[H5M_PARENT_COUNT],
+                               const uint32_t leaves[H5M_LEAF_COUNT],
                                uint32_t free_before) {
     const uint32_t root_children[2] = {greats[0], greats[1]};
     const uint32_t root_keys[1] = {100u};
@@ -181,7 +215,7 @@ static bool h5m_cascaded_state(Table* table,
         !free_has(table->pager, leaves[7]) ||
         !free_has(table->pager, parents[3]) ||
         present(table, schema, 80u) ||
-        tinydb_record_scan(table, schema, NULL, NULL) != H5_BASELINE_ROWS - 1u) {
+        tinydb_record_scan(table, schema, NULL, NULL) != H5M_BASELINE_ROWS - 1u) {
         return false;
     }
 
@@ -197,11 +231,11 @@ static bool h5m_cascaded_state(Table* table,
         !leaf_state(table, leaves[9], parents[4], leaves[8], leaves[10])) {
         return false;
     }
-    for (uint32_t i = 10u; i < H5_LEAF_COUNT; i++) {
+    for (uint32_t i = 10u; i < H5M_LEAF_COUNT; i++) {
         uint32_t expected_parent = parents[i / 2u];
         uint32_t expected_prev = i == 10u ? leaves[9] : leaves[i - 1u];
         uint32_t expected_next =
-            i + 1u == H5_LEAF_COUNT ? 0u : leaves[i + 1u];
+            i + 1u == H5M_LEAF_COUNT ? 0u : leaves[i + 1u];
         if (!leaf_state(table, leaves[i], expected_parent,
                         expected_prev, expected_next)) return false;
     }
@@ -218,10 +252,10 @@ static bool h5m_run_case(const char* path) {
     }
     Table* table = tinydb_table(db);
     TableSchema* schema = find_schema(table, "items");
-    uint32_t greats[H5_GREAT_COUNT] = {0u};
-    uint32_t grands[H5_GRAND_COUNT] = {0u};
-    uint32_t parents[H5_PARENT_COUNT] = {0u};
-    uint32_t leaves[H5_LEAF_COUNT] = {0u};
+    uint32_t greats[H5M_GREAT_COUNT] = {0u};
+    uint32_t grands[H5M_GRAND_COUNT] = {0u};
+    uint32_t parents[H5M_PARENT_COUNT] = {0u};
+    uint32_t leaves[H5M_LEAF_COUNT] = {0u};
     if (schema == NULL || schema->row_size != 264u ||
         !h5m_seed_tree(db, schema, greats, grands, parents, leaves)) {
         tinydb_close(db);
