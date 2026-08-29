@@ -1,4 +1,6 @@
 #include "column_type.h"
+#include "record_payload.h"
+#include "slotted_leaf_v2.h"
 #include "table.h"
 
 #include <ctype.h>
@@ -80,6 +82,24 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
+static bool initialize_wide_v2_root(Table* table, const TableSchema* schema) {
+    if (table == NULL || table->pager == NULL || schema == NULL ||
+        schema->root_page_num >= table->pager->num_pages) {
+        return false;
+    }
+
+    unsigned char staged[PAGE_SIZE];
+    memset(staged, 0, sizeof(staged));
+    if (!tinydb_slotted_leaf_v2_init(staged, sizeof(staged))) return false;
+    set_node_root(staged, true);
+    *node_parent(staged) = 0u;
+
+    void* root = get_page(table->pager, schema->root_page_num);
+    memcpy(root, staged, PAGE_USABLE_SIZE);
+    mark_page_dirty(table->pager, schema->root_page_num);
+    return true;
+}
+
 bool table_create_table(Table* table,
                         const char* name,
                         uint32_t num_cols,
@@ -108,17 +128,18 @@ bool table_create_table(Table* table,
         return false;
     }
 
+    uint32_t validated_row_size = 0u;
     if (recognized_all && has_explicit_width &&
         ci_equal(col_names[0], "id") && types[0].type == COL_TYPE_INT &&
         !legacy_column_names(num_cols, col_names)) {
-        uint32_t row_size = 0;
         for (uint32_t i = 0; i < num_cols; i++) {
-            if (row_size > ROW_SIZE ||
-                types[i].storage_size > ROW_SIZE - row_size) {
-                printf("Error: CREATE TABLE row layout exceeds the fixed generic record slot.\n");
+            if (validated_row_size > TINYDB_RECORD_PAYLOAD_MAX ||
+                types[i].storage_size >
+                    TINYDB_RECORD_PAYLOAD_MAX - validated_row_size) {
+                printf("Error: CREATE TABLE row layout exceeds the schema-sized payload limit.\n");
                 return false;
             }
-            row_size += types[i].storage_size;
+            validated_row_size += types[i].storage_size;
         }
     }
 
@@ -150,5 +171,13 @@ bool table_create_table(Table* table,
         offset += schema->columns[i].size;
     }
     schema->row_size = offset;
+
+    if (schema->row_size > ROW_SIZE) {
+        if (!recognized_all || validated_row_size != schema->row_size ||
+            !initialize_wide_v2_root(table, schema)) {
+            printf("Error: unable to initialize the schema-sized V2 table root.\n");
+            return false;
+        }
+    }
     return true;
 }
