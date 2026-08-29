@@ -85,6 +85,14 @@ def main():
                 # decoded payload table scan with projection/filtering.
                 "SELECT * FROM wide_docs WHERE id = 202;",
                 "SELECT left_text FROM wide_docs WHERE right_text = 'right-a';",
+                # Mutation must stay on schema-sized payloads too. Cover a point
+                # UPDATE, a scan-selected UPDATE, and point DELETE before reopen.
+                "UPDATE wide_docs SET right_text = 'right-b-updated' WHERE id = 202;",
+                "UPDATE wide_docs SET left_text = 'left-a-updated' WHERE right_text = 'right-a';",
+                "SELECT right_text FROM wide_docs WHERE id = 202;",
+                "SELECT left_text FROM wide_docs WHERE id = 101;",
+                "DELETE FROM wide_docs WHERE id = 202;",
+                "SELECT COUNT(*) FROM wide_docs WHERE id = 202;",
                 "CREATE TABLE metadata_only (key INT, name VARCHAR);",
                 ".tables",
                 "CREATE TABLE metrics (id INT, name VARCHAR, price INT, stock INT);",
@@ -103,10 +111,12 @@ def main():
         require(first, "metadata_only")
         require(first, "(202, left-b, right-b)")
         require(first, "left-a")
+        require(first, "right-b-updated")
+        require(first, "left-a-updated")
         require(first, "beta")
         require(first, "ok")
-        if scalar_results(first) != [2]:
-            raise AssertionError("valid mixed-layout query returned wrong count\n" + first)
+        if scalar_results(first) != [0, 2]:
+            raise AssertionError("wide mutation or mixed-layout query returned wrong count\n" + first)
 
         reopened = run_session(
             executable,
@@ -115,8 +125,9 @@ def main():
                 ".tables",
                 "PRAGMA table_info(wide_docs);",
                 "SELECT * FROM wide_docs WHERE id = 101;",
+                "SELECT COUNT(*) FROM wide_docs WHERE id = 202;",
                 # A post-reopen INSERT proves both the wide catalog layout and
-                # V2 root format survived durable close/reopen.
+                # V2 root format survived durable mutation/reopen.
                 "INSERT INTO wide_docs VALUES (303, 'left-c', 'right-c');",
                 "SELECT right_text FROM wide_docs WHERE left_text = 'left-c';",
                 "PRAGMA table_info(metrics);",
@@ -132,20 +143,20 @@ def main():
         require(reopened, "metadata_only")
         require(reopened, "left_text")
         require(reopened, "right_text")
-        require(reopened, "(101, left-a, right-a)")
+        require(reopened, "(101, left-a-updated, right-a)")
         require(reopened, "right-c")
         require(reopened, "name")
         require(reopened, "price")
         require(reopened, "stock")
-        if scalar_results(reopened) != [3, 3]:
-            raise AssertionError("valid mixed-layout rows did not survive reopen\n" + reopened)
+        if scalar_results(reopened) != [0, 3, 3]:
+            raise AssertionError("wide mutation or mixed-layout rows did not survive reopen\n" + reopened)
         require(reopened, "ok")
 
         print(
             "PASS: CREATE TABLE admits schema-sized executable generic rows beyond the "
             "legacy TinyDBRecord carrier, initializes their root as V2, persists payload-native "
-            "SQL INSERT, supports PK and decoded scan SELECT before/after reopen, preserves "
-            "metadata-only DDL, and keeps narrow mixed-layout queries durable."
+            "SQL INSERT/SELECT/UPDATE/DELETE before and after reopen, preserves metadata-only "
+            "DDL, and keeps narrow mixed-layout queries durable."
         )
     finally:
         cleanup(db_file)
