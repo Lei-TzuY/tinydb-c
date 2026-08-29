@@ -33,19 +33,6 @@ static bool tinydb_record_payload_claim_page_is_live_ancestor(
     return false;
 }
 
-/*
- * Materialize the exact allocator page-number sequence implied by a validated
- * recursive-overflow reservation without mutating Pager state.  The free-page
- * stack is consumed from its current top, followed by append-only page numbers
- * starting at pager->num_pages.  Keeping this read-only preflight separate from
- * the later claim operation lets the recursive mutator stage and validate every
- * topology image against concrete page identities before it advances the
- * generic-index epoch or changes allocator state.
- *
- * A free-list entry that aliases the selected leaf/internal ancestry is treated
- * as allocator corruption and fails closed before mutation.  Duplicate/sentinel
- * page numbers and append arithmetic overflow are rejected for the same reason.
- */
 static bool tinydb_record_payload_prepare_page_claim_plan(
     const Pager* pager,
     const TinyDBPayloadAncestorChain* chain,
@@ -58,6 +45,7 @@ static bool tinydb_record_payload_prepare_page_claim_plan(
         claim_plan == NULL || chain->internal_pages == NULL ||
         chain->count == 0u || chain->leaf_page_num == INVALID_PAGE_NUM ||
         reservation->total_pages == 0u ||
+        reservation->new_leaf_pages > UINT32_MAX - reservation->new_internal_pages ||
         reservation->total_pages !=
             reservation->new_leaf_pages + reservation->new_internal_pages) {
         tinydb_payload_ancestor_set_message(
