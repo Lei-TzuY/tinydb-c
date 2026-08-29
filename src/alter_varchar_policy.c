@@ -112,6 +112,22 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
             "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented");
     }
 
+    /*
+     * Schema-sized payload rows are self-describing only through the catalog
+     * schema: the on-page payload itself does not carry a historical column
+     * layout. Updating catalog offsets without rewriting every existing row
+     * would therefore make old payloads decode under the new, larger layout.
+     * Keep ALTER fail-closed until ADD COLUMN owns an atomic row backfill / V2
+     * rewrite path. Narrow generic rows retain the proven fixed-carrier policy
+     * below.
+     */
+    if (target->row_size > ROW_SIZE) {
+        return fail_result(
+            result,
+            TINYDB_SQL_POLICY_ERROR,
+            "ALTER TABLE ADD COLUMN is disabled for schema-sized payload tables until physical row migration is implemented");
+    }
+
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
     bool executable_generic = tinydb_schema_supports_records(
         target, schema_message, sizeof(schema_message));
