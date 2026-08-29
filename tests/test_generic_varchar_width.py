@@ -69,8 +69,12 @@ def main():
                 "SELECT COUNT(*) FROM contacts;",
                 "INSERT INTO contacts VALUES (99, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'last99', 'too long');",
                 "SELECT COUNT(*) FROM contacts;",
+                # 4 + (145 + 1) + (145 + 1) = 296 bytes: larger than
+                # TinyDBRecord, but valid for schema-sized payload/V2 storage.
                 "CREATE TABLE oversized (id INT, a VARCHAR(145), b VARCHAR(145));",
                 "PRAGMA table_info(oversized);",
+                "INSERT INTO oversized VALUES (501, 'wide-a', 'wide-b');",
+                "SELECT * FROM oversized WHERE id = 501;",
                 "CREATE TABLE invalid_zero (id INT, a VARCHAR(0));",
                 "CREATE TABLE invalid_large (id INT, a VARCHAR(256));",
                 "CREATE TABLE archive_bad (id INT, username VARCHAR(20), email VARCHAR(40));",
@@ -89,8 +93,11 @@ def main():
         require(first, "(1, first01, last01,")
         if first.count("db > 30\nExecuted.") < 2:
             raise AssertionError("oversized value changed row count\n" + first)
-        require(first, "CREATE TABLE row layout exceeds the fixed generic record slot")
-        require(first, "table 'oversized' not found")
+        require(first, "a | VARCHAR(145)")
+        require(first, "b | VARCHAR(145)")
+        require(first, "(501, wide-a, wide-b)")
+        if "fixed generic record slot" in first or "schema-sized payload limit" in first:
+            raise AssertionError("valid 296-byte V2 schema was rejected\n" + first)
         if first.count("Syntax error. Could not parse statement.") < 2:
             raise AssertionError("VARCHAR(0)/VARCHAR(256) were not rejected\n" + first)
         require(
@@ -107,6 +114,10 @@ def main():
                 "PRAGMA table_info(contacts);",
                 "SELECT COUNT(*) FROM contacts;",
                 "SELECT * FROM contacts WHERE id = 30;",
+                "PRAGMA table_info(oversized);",
+                "SELECT * FROM oversized WHERE id = 501;",
+                "INSERT INTO oversized VALUES (502, 'wide-c', 'wide-d');",
+                "SELECT * FROM oversized WHERE id = 502;",
                 "SELECT * FROM archive_exact WHERE id = 7;",
                 "PRAGMA integrity_check;",
                 ".exit",
@@ -117,13 +128,18 @@ def main():
         require(second, "note | VARCHAR(120)")
         require(second, "db > 30\nExecuted.")
         require(second, "(30, first30, last30,")
+        require(second, "a | VARCHAR(145)")
+        require(second, "b | VARCHAR(145)")
+        require(second, "(501, wide-a, wide-b)")
+        require(second, "(502, wide-c, wide-d)")
         require(second, "(7, archived, archive@example.com)")
         require(second, "ok")
 
         print(
-            "PASS: VARCHAR(n) character capacities drive compact generic fixed-slot "
-            "layouts, survive splits/reopen, reject oversized values without mutating rows, "
-            "enforce layout bounds, and preserve legacy Row routing only for compatible widths."
+            "PASS: VARCHAR(n) capacities drive compact schemas, reject oversized values "
+            "atomically, admit executable rows beyond TinyDBRecord through V2 payload "
+            "storage, survive reopen and continued insertion, and preserve legacy Row "
+            "routing only for compatible widths."
         )
     finally:
         cleanup(db_path)
