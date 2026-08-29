@@ -24,6 +24,11 @@
  * left partition in the merged sequence. It is intentionally not stored in
  * the left internal page because TinyDB stores no separator for a node's own
  * rightmost child.
+ *
+ * Page zero is a valid catalog-stable root and therefore may be the
+ * grandparent of this non-root internal node. Zero remains forbidden only for
+ * newly allocated non-root page identities and child identities where it is
+ * used as a sentinel by the surrounding tree representation.
  */
 static inline bool tinydb_stage_full_nonroot_after_child_split(
     void* full_parent_page,
@@ -53,7 +58,7 @@ static inline bool tinydb_stage_full_nonroot_after_child_split(
     uint32_t grandparent_page_num = tinydb_parent_stage_read_u32(
         original + PARENT_POINTER_OFFSET);
     if (original[NODE_TYPE_OFFSET] != (unsigned char)NODE_INTERNAL ||
-        original[IS_ROOT_OFFSET] != 0u || grandparent_page_num == 0u ||
+        original[IS_ROOT_OFFSET] != 0u ||
         grandparent_page_num == full_parent_page_num ||
         tinydb_parent_stage_read_u32(
             original + INTERNAL_NODE_NUM_KEYS_OFFSET) !=
