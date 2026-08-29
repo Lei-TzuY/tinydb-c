@@ -32,6 +32,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_wide_plan_route.c
     src/generic_wide_boolean_index_route.c
     src/generic_wide_boolean_cost_route.c
+    src/generic_wide_order_route.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_correlation.c
@@ -191,6 +192,11 @@ set_source_files_properties(
     src/generic_wide_boolean_index_route.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_wide_boolean_index_base;tinydb_generic_sql_build_select_plan=tinydb_generic_sql_build_select_plan_wide_boolean_index_base;tinydb_generic_sql_print_plan=tinydb_generic_sql_print_plan_wide_boolean_index_base"
+)
+set_source_files_properties(
+    src/generic_wide_boolean_cost_route.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_wide_order_base"
 )
 set_source_files_properties(
     src/generic_range_plan_sql.c
