@@ -2,22 +2,22 @@
 #define TINYDB_RECORD_DELETE_V2_INTERNAL_MERGE_BORROW_NONROOT_LEFT_H
 
 #include "generic_index_epoch.h"
-#include "internal_merge_borrow_nonroot_cascade_left_stage.h"
+#include "internal_merge_borrow_nonroot_window_stage.h"
 #include "record_delete_v2_internal_merge_root.h"
 #include "slotted_v2_publish_batch.h"
 
 /*
  * Mirrored height-five V2 DELETE repair.
  *
- *   stable root -> non-root great-parent -> [donor grand, target grand]
+ *   stable root -> non-root great-parent -> [... donor grand, target grand ...]
  *               -> bottom leaf-parents -> V2 leaves
  *
  * The target/right grandparent is at minimum occupancy. Its lower merge would
- * leave a single child, so the left/donor grandparent's rightmost complete
- * bottom-parent subtree moves into the target. The non-root great-parent's
- * separator decreases, while its rightmost child and therefore its subtree
- * maximum stay unchanged. The stable root is only ownership-validated and is
- * never part of the publication batch.
+ * leave a single child, so the adjacent left/donor grandparent's rightmost
+ * complete bottom-parent subtree moves into the target. The selected window's
+ * separator decreases while siblings outside the window remain unchanged. The
+ * non-root great-parent's subtree maximum stays unchanged, so the stable root
+ * is only ownership-validated and never part of the publication batch.
  */
 static inline TinyDBInternalMergeRootResult
  tinydb_try_delete_v2_internal_merge_borrow_nonroot_from_left(
@@ -120,12 +120,24 @@ static inline TinyDBInternalMergeRootResult
     unsigned char ancestor_after[PAGE_SIZE];
     memcpy(ancestor_after, get_page(pager, ancestor_num), PAGE_SIZE);
     if (!tinydb_parent_stage_validate(ancestor_after, PAGE_SIZE) ||
-        ancestor_after[IS_ROOT_OFFSET] != 0u ||
-        tinydb_parent_stage_read_u32(
-            ancestor_after + INTERNAL_NODE_NUM_KEYS_OFFSET) != 1u ||
-        tinydb_parent_stage_child_at(ancestor_after, 1u) != right_grand_num) {
+        ancestor_after[IS_ROOT_OFFSET] != 0u) {
         return TINYDB_INTERNAL_MERGE_ROOT_NOT_APPLICABLE;
     }
+    uint32_t ancestor_keys = tinydb_parent_stage_read_u32(
+        ancestor_after + INTERNAL_NODE_NUM_KEYS_OFFSET);
+    uint32_t target_index = UINT32_MAX;
+    for (uint32_t i = 1u; i <= ancestor_keys; i++) {
+        if (tinydb_parent_stage_child_at(ancestor_after, i) == right_grand_num) {
+            if (target_index != UINT32_MAX) {
+                return TINYDB_INTERNAL_MERGE_ROOT_NOT_APPLICABLE;
+            }
+            target_index = i;
+        }
+    }
+    if (target_index == UINT32_MAX) {
+        return TINYDB_INTERNAL_MERGE_ROOT_NOT_APPLICABLE;
+    }
+    uint32_t pair_index = target_index - 1u;
 
     uint32_t root_num = tinydb_internal_borrow_read_u32(
         ancestor_after + PARENT_POINTER_OFFSET);
@@ -152,7 +164,8 @@ static inline TinyDBInternalMergeRootResult
         return TINYDB_INTERNAL_MERGE_ROOT_NOT_APPLICABLE;
     }
 
-    uint32_t left_grand_num = tinydb_parent_stage_child_at(ancestor_after, 0u);
+    uint32_t left_grand_num =
+        tinydb_parent_stage_child_at(ancestor_after, pair_index);
     if (left_grand_num == 0u || left_grand_num == INVALID_PAGE_NUM ||
         left_grand_num >= pager->num_pages ||
         left_grand_num == right_grand_num ||
@@ -258,8 +271,8 @@ static inline TinyDBInternalMergeRootResult
     memcpy(previous_right_before,
            get_page(pager, previous_right_num), PAGE_SIZE);
 
-    if (!tinydb_stage_internal_merge_borrow_from_left_nonroot_ancestor(
-            ancestor_after, PAGE_SIZE, ancestor_num, root_num,
+    if (!tinydb_stage_internal_merge_borrow_window_from_left(
+            ancestor_after, PAGE_SIZE, ancestor_num, root_num, pair_index,
             left_grand_after, PAGE_SIZE, left_grand_num,
             right_grand_after, PAGE_SIZE, right_grand_num,
             donor_after, PAGE_SIZE, donor_parent_num,
