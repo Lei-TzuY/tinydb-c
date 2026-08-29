@@ -166,7 +166,8 @@ static void print_value(const TinyDBValue* value) {
     }
 }
 
-static void print_row(const TinyDBValue* values, uint32_t value_count) {
+static void print_wide_row_values(const TinyDBValue* values,
+                                  uint32_t value_count) {
     printf("(");
     for (uint32_t i = 0u; i < value_count; i++) {
         if (i > 0u) printf(", ");
@@ -221,7 +222,7 @@ static bool visit_compound_payload(const TableSchema* schema,
     if (context->projection_kind == WIDE_PROJECTION_COLUMN) {
         print_value(&values[context->projection_column_index]);
     } else {
-        print_row(values, value_count);
+        print_wide_row_values(values, value_count);
     }
     context->emitted++;
     return true;
