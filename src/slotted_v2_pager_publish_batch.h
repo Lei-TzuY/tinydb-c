@@ -1,7 +1,7 @@
 #ifndef TINYDB_SLOTTED_V2_PAGER_PUBLISH_BATCH_H
 #define TINYDB_SLOTTED_V2_PAGER_PUBLISH_BATCH_H
 
-#include "slotted_v2_publish_batch.h"
+#include "slotted_v2_publish_budget.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,8 +47,8 @@ static void tinydb_v2_pager_restore_dirty_state(Pager* pager,
  * evictions are therefore preserved by the Pager's no-steal spill storage.
  *
  * This is the appropriate publication boundary for recursive tree mutations
- * whose staged page set can exceed MAX_BUFFER_POOL_SIZE. The same rollback
- * byte budget used by tinydb_v2_publish_batch() bounds before-image memory.
+ * whose staged page set can exceed MAX_BUFFER_POOL_SIZE. The shared rollback
+ * byte budget bounds before-image memory independently of buffer-pool size.
  */
 static bool tinydb_v2_pager_publish_batch(
     Pager* pager,
