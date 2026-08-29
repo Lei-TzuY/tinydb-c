@@ -369,8 +369,11 @@ static bool seed_tree(Table* table,
                                                 message,
                                                 sizeof(message));
     *baseline_pages = pager->num_pages;
+    unsigned char* root_after_scan =
+        (unsigned char*)get_page(pager, root_page_num);
     return complete && *baseline_rows != UINT32_MAX &&
-           read_u32(root + INTERNAL_NODE_NUM_KEYS_OFFSET) == 1u;
+           root_after_scan != NULL &&
+           read_u32(root_after_scan + INTERNAL_NODE_NUM_KEYS_OFFSET) == 1u;
 }
 
 static bool candidate_present(Table* table,
