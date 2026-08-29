@@ -3,17 +3,19 @@
 
 #include "record_payload.h"
 
+#include <stdio.h>
+
 /*
  * generic_index_candidates.c historically rebuilds its persistent candidate
- * snapshot through TinyDBRecord.  That carrier is intentionally fixed at
- * ROW_SIZE and therefore cannot represent schema-sized V2 rows.  Keep the
+ * snapshot through TinyDBRecord. That carrier is intentionally fixed at
+ * ROW_SIZE and therefore cannot represent schema-sized V2 rows. Keep the
  * candidate builder itself format-agnostic by adapting just the two record
  * primitives it consumes: scan and decode.
  *
  * The payload visitor is deliberately bridged back to TinyDBRecordVisitor as
- * an opaque pointer.  The pointer is never dereferenced as TinyDBRecord: the
+ * an opaque pointer. The pointer is never dereferenced as TinyDBRecord: the
  * decode shim below converts it straight back to TinyDBRecordPayload before
- * decoding.  This lets the existing candidate-entry construction and ordering
+ * decoding. This lets the existing candidate-entry construction and ordering
  * code remain shared between narrow and wide schemas.
  */
 typedef struct {
@@ -56,7 +58,7 @@ static uint32_t tinydb_generic_index_payload_compatible_scan(
         message,
         sizeof(message));
 
-    /* ensure_snapshot() already treats a visitor/decode failure as fatal.  On
+    /* ensure_snapshot() already treats a visitor/decode failure as fatal. On
      * a traversal failure, feed the existing builder a NULL sentinel so it
      * marks the same failure bit instead of accepting a truncated snapshot as
      * a valid empty/partial index image. */
@@ -103,8 +105,8 @@ static bool tinydb_generic_index_payload_compatible_decode(
 }
 
 /* This header is injected only after generic_index_candidates.h from
- * generic_index_epoch.h.  The macros therefore affect the implementation
- * below the include boundary without changing record.h's public ABI. */
+ * generic_index_epoch.h. The macros therefore affect the implementation below
+ * the include boundary without changing record.h's public ABI. */
 #define tinydb_record_scan tinydb_generic_index_payload_compatible_scan
 #define tinydb_record_decode tinydb_generic_index_payload_compatible_decode
 
