@@ -81,6 +81,7 @@ def main():
             "duplicate_guard=yes",
             "root0=yes",
             "deep_batch=yes",
+            "beyond_legacy_limit=yes",
             "capacity_guard=yes",
         ):
             if marker not in output:
@@ -89,8 +90,9 @@ def main():
     print(
         "PASS: staged slotted V2 page batches prevalidate topology identities, "
         "restore every caller page after deterministic partial publication, "
-        "support page-zero roots and 12-page recursive publication batches, "
-        "reject oversized batches, and leave checksum trailers untouched"
+        "support page-zero roots and 20-page recursive publication batches, "
+        "roll back after crossing the former 16-page ceiling, reject oversized "
+        "batches, and leave checksum trailers untouched"
     )
 
 
