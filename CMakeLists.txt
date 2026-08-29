@@ -82,6 +82,7 @@ set(TINYDB_CORE_SOURCES
     src/record_insert_v2_root_overflow.c
     src/record_payload.c
     src/record_payload_insert.c
+    src/record_payload_nonroot_internal_split.c
     src/record_payload_nonroot_overflow_route.c
     src/record_payload_nonroot_split.c
     src/record_payload_root_internal_split.c
