@@ -152,6 +152,18 @@ static bool h5_original_state(Table* table,
         table->pager->free_page_count != free_before ||
         tinydb_record_scan(table, schema, NULL, NULL) != H5_BASELINE_ROWS ||
         !present(table, schema, 30u)) return false;
+
+    for (uint32_t i = 0u; i < H5_LEAF_COUNT; i++) {
+        uint32_t expected_prev = i == 0u ? 0u : leaves[i - 1u];
+        uint32_t expected_next =
+            i + 1u == H5_LEAF_COUNT ? 0u : leaves[i + 1u];
+        uint32_t expected_parent = parents[i / 2u];
+        if (!leaf_state(table, leaves[i], expected_parent,
+                        expected_prev, expected_next) ||
+            !present(table, schema, 10u * (i + 1u))) {
+            return false;
+        }
+    }
     return true;
 }
 
