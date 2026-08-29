@@ -49,10 +49,12 @@ static bool tinydb_v2_publish_batch_snapshot_size(
     size_t* snapshot_bytes_out) {
     if (snapshot_bytes_out != NULL) *snapshot_bytes_out = 0u;
     if (count == 0u) return false;
+#if SIZE_MAX < UINT32_MAX
     if (PAGE_USABLE_SIZE != 0u &&
         (size_t)count > SIZE_MAX / (size_t)PAGE_USABLE_SIZE) {
         return false;
     }
+#endif
 
     size_t snapshot_bytes = (size_t)count * (size_t)PAGE_USABLE_SIZE;
     if (snapshot_bytes >
