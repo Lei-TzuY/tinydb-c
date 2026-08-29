@@ -25,6 +25,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
     src/generic_error_status.c
+    src/generic_wide_range_route.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_correlation.c
@@ -149,6 +150,11 @@ set_source_files_properties(
     src/generic_predicate_sql.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_range_select"
+)
+set_source_files_properties(
+    src/generic_error_status.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_wide_base"
 )
 set_source_files_properties(
     src/generic_range_plan_sql.c
