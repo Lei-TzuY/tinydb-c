@@ -85,6 +85,8 @@ set(TINYDB_CORE_SOURCES
     src/record_payload_nonroot_internal_split.c
     src/record_payload_nonroot_overflow_route.c
     src/record_payload_nonroot_split.c
+    src/record_payload_recursive_chain.c
+    src/record_payload_recursive_route.c
     src/record_payload_root_internal_split.c
     src/record_payload_root_split.c
     src/record_read_v2.c
@@ -259,6 +261,11 @@ set_source_files_properties(
     src/record_payload_nonroot_split.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_record_payload_try_nonroot_split=tinydb_record_payload_try_nonroot_split_nonfull_base"
+)
+set_source_files_properties(
+    src/record_payload_nonroot_overflow_route.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_record_payload_try_nonroot_split=tinydb_record_payload_try_nonroot_split_recursive_preflight_base"
 )
 
 set_source_files_properties(
