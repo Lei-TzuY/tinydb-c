@@ -18,13 +18,23 @@ def main() -> None:
             "router must classify the explicit full-grandparent capacity boundary")
 
     handler = ROUTE.index("tinydb_record_payload_try_full_nonroot_parent_split")
-    guard = ROUTE.index("tinydb_record_payload_validate_ancestor_chain", handler)
+    collect = ROUTE.index("tinydb_record_payload_collect_ancestor_chain", handler)
+    plan = ROUTE.index("tinydb_record_payload_plan_overflow_chain", collect)
+    release = ROUTE.index("tinydb_record_payload_ancestor_chain_release", plan)
     final_message = ROUTE.rindex("set_message(message, message_size, nonroot_parent_message)")
-    require(handler < guard < final_message,
-            "ancestor validation must run after full-parent routing but before capacity fallback is returned")
+    require(handler < collect < plan < release < final_message,
+            "recursive fallback must collect, preflight, and release ancestry before returning the capacity boundary")
+    require("plan.full_internal_levels < 2u" in ROUTE,
+            "full-grandparent fallback must reject a preflight that does not actually contain two full internal levels")
 
     require("typedef struct {" in ANCESTRY and "TinyDBPayloadAncestorChain" in ANCESTRY,
             "payload overflow ancestry must have a reusable detached chain type")
+    require("TinyDBPayloadOverflowPlan" in ANCESTRY,
+            "recursive overflow must expose a reusable read-only cascade plan")
+    require("full_internal_levels" in ANCESTRY and "stopping_ancestor_index" in ANCESTRY,
+            "cascade preflight must retain full depth and the first non-full ancestor")
+    require("requires_root_growth" in ANCESTRY,
+            "cascade preflight must distinguish ancestor absorption from stable-root growth")
     require("tinydb_record_payload_collect_ancestor_chain" in ANCESTRY,
             "ancestor validation must expose the validated page-number chain for recursive staging")
     require("leaf_page_num" in ANCESTRY and "internal_pages" in ANCESTRY and "count" in ANCESTRY,
@@ -51,13 +61,27 @@ def main() -> None:
     require("memcpy(parent, get_page(table->pager, parent_page_num), PAGE_SIZE)" in ANCESTRY,
             "ancestor validation must use local page images rather than retain Pager pointers across traversal")
 
+    planner = ANCESTRY.index("tinydb_record_payload_plan_overflow_chain")
+    require("keys > INTERNAL_NODE_MAX_KEYS" in ANCESTRY[planner:],
+            "overflow preflight must reject already-overfull internal ancestors")
+    require("keys < INTERNAL_NODE_MAX_KEYS" in ANCESTRY[planner:],
+            "overflow preflight must stop at the first ancestor that can absorb a separator")
+    require("plan->stopping_ancestor_index = i" in ANCESTRY[planner:],
+            "overflow preflight must identify the first non-full ancestor by chain index")
+    require("plan->full_internal_levels++" in ANCESTRY[planner:],
+            "overflow preflight must count consecutive full internal levels bottom-up")
+    require("plan->requires_root_growth = true" in ANCESTRY[planner:],
+            "an all-full chain must explicitly request stable-root growth")
+    require("chain->internal_pages[chain->count - 1u] != schema->root_page_num" in ANCESTRY[planner:],
+            "root-growth classification must still prove that the detached chain terminates at the catalog root")
+
     wrapper = ANCESTRY.index("tinydb_record_payload_validate_ancestor_chain")
-    collect = ANCESTRY.index("tinydb_record_payload_collect_ancestor_chain", wrapper)
-    release = ANCESTRY.index("tinydb_record_payload_ancestor_chain_release", collect)
-    require(wrapper < collect < release,
+    wrapper_collect = ANCESTRY.index("tinydb_record_payload_collect_ancestor_chain", wrapper)
+    wrapper_release = ANCESTRY.index("tinydb_record_payload_ancestor_chain_release", wrapper_collect)
+    require(wrapper < wrapper_collect < wrapper_release,
             "validation-only callers must reuse collection and release the detached chain")
 
 
 if __name__ == "__main__":
     main()
-    print("PASS: payload recursive ancestor guard")
+    print("PASS: payload recursive ancestor guard and overflow preflight")
