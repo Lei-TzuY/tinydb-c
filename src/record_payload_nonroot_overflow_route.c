@@ -1,6 +1,7 @@
 #include "record_payload_ancestor_chain.h"
 #include "record_payload_nonroot_internal_split.h"
 #include "record_payload_nonroot_split.h"
+#include "record_payload_overflow_reservation.h"
 #include "record_payload_root_internal_split.h"
 
 #include <stdio.h>
@@ -136,14 +137,15 @@ bool tinydb_record_payload_try_nonroot_split(
 
     /* A full grandparent is the first still-unimplemented payload-native
      * recursive capacity boundary. Before reporting that limitation, collect
-     * the selected leaf's reciprocal ancestry and convert it into a read-only
-     * cascade preflight. This proves both that the chain reaches the catalog
-     * root and how many consecutive full internal levels must participate in
-     * the eventual split before any durable mutation starts. */
+     * the selected leaf's reciprocal ancestry, convert it into a read-only
+     * cascade preflight, and size the complete allocator reservation. This
+     * proves both how far the separator must propagate and how many pages the
+     * eventual mutation must claim before durable publication begins. */
     if (nonroot_failure_is_recursive_capacity(nonroot_parent_applicable,
                                               nonroot_parent_message)) {
         TinyDBPayloadAncestorChain chain;
         TinyDBPayloadOverflowPlan plan;
+        TinyDBPayloadOverflowReservation reservation;
         char ancestry_message[TINYDB_RECORD_MESSAGE_MAX];
         ancestry_message[0] = '\0';
         if (!tinydb_record_payload_collect_ancestor_chain(
@@ -168,8 +170,14 @@ bool tinydb_record_payload_try_nonroot_split(
             &plan,
             ancestry_message,
             sizeof(ancestry_message));
+        bool sized = planned && tinydb_record_payload_size_overflow_reservation(
+            &chain,
+            &plan,
+            &reservation,
+            ancestry_message,
+            sizeof(ancestry_message));
         tinydb_record_payload_ancestor_chain_release(&chain);
-        if (!planned) {
+        if (!planned || !sized) {
             if (applicable != NULL) *applicable = true;
             set_message(message,
                         message_size,
@@ -178,7 +186,10 @@ bool tinydb_record_payload_try_nonroot_split(
                             : "payload-native recursive overflow preflight failed");
             return false;
         }
-        if (plan.full_internal_levels < 2u) {
+        if (plan.full_internal_levels < 2u ||
+            reservation.new_leaf_pages != 1u ||
+            reservation.new_internal_pages < 2u ||
+            reservation.total_pages < 3u) {
             if (applicable != NULL) *applicable = true;
             set_message(message,
                         message_size,
