@@ -1,4 +1,4 @@
-#include "record.h"
+#include "record_payload.h"
 #include "table.h"
 
 #include <ctype.h>
@@ -56,10 +56,10 @@ bool table_create_index(Table* table,
     }
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_schema_supports_records(schema,
-                                        schema_message,
-                                        sizeof(schema_message))) {
-        printf("Error: generic index target '%s' is not a supported fixed-slot schema.\n",
+    if (!tinydb_record_payload_schema_supported(schema,
+                                                schema_message,
+                                                sizeof(schema_message))) {
+        printf("Error: generic index target '%s' is not a supported schema-sized row layout.\n",
                table_name);
         return false;
     }
