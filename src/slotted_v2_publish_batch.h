@@ -1,36 +1,12 @@
 #ifndef TINYDB_SLOTTED_V2_PUBLISH_BATCH_H
 #define TINYDB_SLOTTED_V2_PUBLISH_BATCH_H
 
-#include "pager.h"
+#include "slotted_v2_publish_budget.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-/*
- * Recursive payload splits can touch both leaf siblings and several internal
- * ancestors in one publication boundary. Bound rollback memory by bytes rather
- * than by an arbitrary tree-height/page-count constant: callers can publish a
- * deeper cascade as long as the complete before-image fits this budget.
- *
- * The default is intentionally conservative and may be raised at build time
- * for workloads that need unusually deep atomic page publication. Rollback
- * images stay on the heap so increasing the budget does not enlarge stack
- * frames.
- */
-#ifndef TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES
-#define TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES (4u * 1024u * 1024u)
-#endif
-
-#if TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES < PAGE_USABLE_SIZE
-#error "TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES must fit at least one page"
-#endif
-
-/* Compatibility/inspection value derived from the byte budget, not a tree cap. */
-#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES \
-    (TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES / PAGE_USABLE_SIZE)
-#define TINYDB_V2_PUBLISH_NO_FAIL UINT32_MAX
 
 typedef struct {
     uint32_t page_num;
@@ -39,42 +15,15 @@ typedef struct {
 } TinyDBV2PublishEntry;
 
 /*
- * Validate the allocation shape before any entry is dereferenced. Keeping this
- * separate makes it possible for recursive callers and regression probes to
- * reject a malformed/over-budget count without fabricating an equally large
- * entry array first.
- */
-static bool tinydb_v2_publish_batch_snapshot_size(
-    uint32_t count,
-    size_t* snapshot_bytes_out) {
-    if (snapshot_bytes_out != NULL) *snapshot_bytes_out = 0u;
-    if (count == 0u) return false;
-#if SIZE_MAX < UINT32_MAX
-    if (PAGE_USABLE_SIZE != 0u &&
-        (size_t)count > SIZE_MAX / (size_t)PAGE_USABLE_SIZE) {
-        return false;
-    }
-#endif
-
-    size_t snapshot_bytes = (size_t)count * (size_t)PAGE_USABLE_SIZE;
-    if (snapshot_bytes >
-        (size_t)TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES) {
-        return false;
-    }
-    if (snapshot_bytes_out != NULL) *snapshot_bytes_out = snapshot_bytes;
-    return true;
-}
-
-/*
  * Publish a validated collection of staged page images as one caller-visible
  * in-memory operation. All target pointers and page identities are validated
  * before the first byte is copied. If publication is interrupted at the
  * deterministic fail_after boundary, every target is restored byte-for-byte.
  *
- * This legacy in-memory helper remains used by the focused publication probe;
- * production recursive publication may instead use the pager-aware publisher.
- * Keep it inline so translation units that only need the shared entry/snapshot
- * definitions do not emit an unused internal function under -Werror.
+ * This legacy in-memory helper remains used by focused publication probes and
+ * by small mutation paths that already own stable page-image pointers. Keep it
+ * inline so translation units that only need its definitions do not emit an
+ * unused internal function under -Werror.
  *
  * Page zero is a valid TinyDB root page. INVALID_PAGE_NUM is the only reserved
  * page identity rejected here; callers that use zero as a topology sentinel
