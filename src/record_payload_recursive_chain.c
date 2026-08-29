@@ -11,7 +11,7 @@
 #include "record_payload_page_claim_transaction.h"
 #include "slotted_leaf_v2.h"
 #include "slotted_leaf_v2_split.h"
-#include "slotted_v2_publish_batch.h"
+#include "slotted_v2_pager_publish_batch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,13 +153,12 @@ static bool child_assignment_preflight(
     for (uint32_t i = 0u; i <= keys; i++) {
         uint32_t child_page_num = tinydb_parent_stage_child_at(parent, i);
         /*
-         * A valid in-range page number is sufficient here. get_page() cannot
-         * return NULL for such a page; calling it only for existence checking
-         * churns the small LRU pool while recursive publication retains target
-         * frame pointers. Deep cascades can then alias two page identities to
-         * one recycled frame and correctly trip the atomic batch guard.
-         * Descendants are fetched later by assign_children(), after the staged
-         * publication pages have been marked dirty and are safe to evict.
+         * A valid in-range page number is sufficient here. Avoid fetching a
+         * child merely to prove existence: staged recursive publication is
+         * deliberately page-number based so validation must not churn the
+         * small LRU pool or create artificial frame-retention requirements.
+         * Descendants are fetched later by assign_children(), after staged
+         * publication pages are dirty and safe to evict through no-steal spill.
          */
         if (child_page_num >= pager->num_pages ||
             child_page_num == parent_page_num) {
@@ -625,8 +624,8 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
         return false;
     }
 
-    TinyDBV2PublishEntry* entries = (TinyDBV2PublishEntry*)calloc(
-        (size_t)publish_count, sizeof(TinyDBV2PublishEntry));
+    TinyDBV2PagerPublishEntry* entries = (TinyDBV2PagerPublishEntry*)calloc(
+        (size_t)publish_count, sizeof(TinyDBV2PagerPublishEntry));
     if (entries == NULL) {
         release_work(&chain,
                      &claim_plan,
@@ -663,32 +662,18 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
         return false;
     }
 
-    unsigned char* left_target =
-        (unsigned char*)get_page(table->pager, left_page_num);
-    unsigned char* right_target =
-        (unsigned char*)get_page(table->pager, right_leaf_page_num);
-    unsigned char* next_target = is_tail
-        ? NULL
-        : (unsigned char*)get_page(table->pager, next_page_num);
-    bool targets_valid = left_target != NULL && right_target != NULL &&
-                         (is_tail || next_target != NULL);
+    bool targets_valid = true;
     for (uint32_t i = 0u; i < participating_ancestors && targets_valid; i++) {
-        ancestor_targets[i] = (unsigned char*)get_page(
-            table->pager, chain.internal_pages[i]);
-        targets_valid = ancestor_targets[i] != NULL &&
-                        child_assignment_preflight(
-                            table->pager,
-                            chain.internal_pages[i],
-                            image_at_const(ancestor_images, i));
+        targets_valid = child_assignment_preflight(
+            table->pager,
+            chain.internal_pages[i],
+            image_at_const(ancestor_images, i));
     }
     for (uint32_t i = 0u; i < reservation.new_internal_pages && targets_valid; i++) {
-        new_internal_targets[i] = (unsigned char*)get_page(
-            table->pager, new_internal_page_nums[i]);
-        targets_valid = new_internal_targets[i] != NULL &&
-                        child_assignment_preflight(
-                            table->pager,
-                            new_internal_page_nums[i],
-                            image_at_const(new_internal_images, i));
+        targets_valid = child_assignment_preflight(
+            table->pager,
+            new_internal_page_nums[i],
+            image_at_const(new_internal_images, i));
     }
     if (!targets_valid) {
         (void)tinydb_record_payload_rollback_claimed_pages(table->pager,
@@ -711,23 +696,21 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
     }
 
     uint32_t entry_count = 0u;
-    entries[entry_count++] = (TinyDBV2PublishEntry){
-        left_page_num, left_target, left_after};
-    entries[entry_count++] = (TinyDBV2PublishEntry){
-        right_leaf_page_num, right_target, right_after};
+    entries[entry_count++] = (TinyDBV2PagerPublishEntry){
+        left_page_num, left_after};
+    entries[entry_count++] = (TinyDBV2PagerPublishEntry){
+        right_leaf_page_num, right_after};
     if (!is_tail) {
-        entries[entry_count++] = (TinyDBV2PublishEntry){
-            next_page_num, next_target, next_after};
+        entries[entry_count++] = (TinyDBV2PagerPublishEntry){
+            next_page_num, next_after};
     }
     for (uint32_t i = 0u; i < participating_ancestors; i++) {
-        entries[entry_count++] = (TinyDBV2PublishEntry){
-            chain.internal_pages[i], ancestor_targets[i], image_at(ancestor_images, i)};
+        entries[entry_count++] = (TinyDBV2PagerPublishEntry){
+            chain.internal_pages[i], image_at(ancestor_images, i)};
     }
     for (uint32_t i = 0u; i < reservation.new_internal_pages; i++) {
-        entries[entry_count++] = (TinyDBV2PublishEntry){
-            new_internal_page_nums[i],
-            new_internal_targets[i],
-            image_at(new_internal_images, i)};
+        entries[entry_count++] = (TinyDBV2PagerPublishEntry){
+            new_internal_page_nums[i], image_at(new_internal_images, i)};
     }
     if (entry_count != publish_count) {
         (void)tinydb_record_payload_rollback_claimed_pages(table->pager,
@@ -769,9 +752,10 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
         return false;
     }
 
-    if (!tinydb_v2_publish_batch(entries,
-                                 entry_count,
-                                 TINYDB_V2_PUBLISH_NO_FAIL)) {
+    if (!tinydb_v2_pager_publish_batch(table->pager,
+                                       entries,
+                                       entry_count,
+                                       TINYDB_V2_PUBLISH_NO_FAIL)) {
         (void)tinydb_record_payload_rollback_claimed_pages(table->pager,
                                                            &claim_plan,
                                                            claimed_count,
@@ -787,20 +771,10 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                      new_internal_targets);
         set_message(message,
                     message_size,
-                    "bounded recursive atomic page publication failed");
+                    "bounded recursive Pager-aware atomic page publication failed");
         return false;
     }
     free(entries);
-
-    mark_page_dirty(table->pager, left_page_num);
-    mark_page_dirty(table->pager, right_leaf_page_num);
-    if (!is_tail) mark_page_dirty(table->pager, next_page_num);
-    for (uint32_t i = 0u; i < participating_ancestors; i++) {
-        mark_page_dirty(table->pager, chain.internal_pages[i]);
-    }
-    for (uint32_t i = 0u; i < reservation.new_internal_pages; i++) {
-        mark_page_dirty(table->pager, new_internal_page_nums[i]);
-    }
 
     bool parents_ok = true;
     for (uint32_t i = 0u; i < participating_ancestors; i++) {
