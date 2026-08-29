@@ -152,9 +152,17 @@ static bool child_assignment_preflight(
         parent + INTERNAL_NODE_NUM_KEYS_OFFSET);
     for (uint32_t i = 0u; i <= keys; i++) {
         uint32_t child_page_num = tinydb_parent_stage_child_at(parent, i);
+        /*
+         * A valid in-range page number is sufficient here. get_page() cannot
+         * return NULL for such a page; calling it only for existence checking
+         * churns the small LRU pool while recursive publication retains target
+         * frame pointers. Deep cascades can then alias two page identities to
+         * one recycled frame and correctly trip the atomic batch guard.
+         * Descendants are fetched later by assign_children(), after the staged
+         * publication pages have been marked dirty and are safe to evict.
+         */
         if (child_page_num >= pager->num_pages ||
-            child_page_num == parent_page_num ||
-            get_page(pager, child_page_num) == NULL) {
+            child_page_num == parent_page_num) {
             return false;
         }
     }
