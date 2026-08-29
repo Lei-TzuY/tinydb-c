@@ -4,6 +4,7 @@
 #include "record_payload_overflow_reservation.h"
 #include "record_payload_page_claim_plan.h"
 #include "record_payload_page_claim_transaction.h"
+#include "slotted_leaf_v2_split.h"
 #include "record_payload_recursive_overflow.h"
 #include "record_payload_root_internal_split.h"
 
