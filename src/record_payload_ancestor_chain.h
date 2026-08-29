@@ -16,6 +16,12 @@ typedef struct {
     uint32_t count;
 } TinyDBPayloadAncestorChain;
 
+typedef struct {
+    uint32_t full_internal_levels;
+    uint32_t stopping_ancestor_index;
+    bool requires_root_growth;
+} TinyDBPayloadOverflowPlan;
+
 static void tinydb_payload_ancestor_set_message(char* message,
                                                  size_t message_size,
                                                  const char* text) {
@@ -185,6 +191,92 @@ static bool tinydb_record_payload_collect_ancestor_chain(
     tinydb_payload_ancestor_set_message(
         message, message_size, "payload overflow ancestry is cyclic or exceeds the page bound");
     return false;
+}
+
+/*
+ * Convert an already validated parent-first ancestry chain into a mutation
+ * preflight. full_internal_levels is the number of consecutive full internal
+ * nodes, starting at the leaf parent, that must split before a separator can
+ * be absorbed. stopping_ancestor_index identifies the first non-full ancestor
+ * when one exists; otherwise requires_root_growth is true and the stable root
+ * must be grown after every listed internal level participates in the cascade.
+ *
+ * This routine is deliberately read-only. Recursive mutation code can reserve
+ * and stage the complete cascade after this plan is known, rather than finding
+ * another full ancestor after durable publication has begun.
+ */
+static bool tinydb_record_payload_plan_overflow_chain(
+    Table* table,
+    const TableSchema* schema,
+    const TinyDBPayloadAncestorChain* chain,
+    TinyDBPayloadOverflowPlan* plan,
+    char* message,
+    size_t message_size) {
+    if (plan != NULL) {
+        plan->full_internal_levels = 0u;
+        plan->stopping_ancestor_index = INVALID_PAGE_NUM;
+        plan->requires_root_growth = false;
+    }
+    if (table == NULL || table->pager == NULL || schema == NULL ||
+        chain == NULL || plan == NULL || chain->internal_pages == NULL ||
+        chain->count == 0u || chain->leaf_page_num == INVALID_PAGE_NUM) {
+        tinydb_payload_ancestor_set_message(
+            message, message_size, "invalid payload overflow planning input");
+        return false;
+    }
+
+    for (uint32_t i = 0u; i < chain->count; i++) {
+        uint32_t page_num = chain->internal_pages[i];
+        if (page_num >= table->pager->num_pages) {
+            tinydb_payload_ancestor_set_message(
+                message, message_size, "payload overflow plan references an invalid ancestor page");
+            return false;
+        }
+
+        unsigned char parent[PAGE_SIZE];
+        memcpy(parent, get_page(table->pager, page_num), PAGE_SIZE);
+        if (get_node_type(parent) != NODE_INTERNAL ||
+            !tinydb_parent_stage_validate(parent, PAGE_SIZE)) {
+            tinydb_payload_ancestor_set_message(
+                message, message_size, "payload overflow plan encountered an invalid internal ancestor");
+            return false;
+        }
+
+        bool is_catalog_root = page_num == schema->root_page_num;
+        if ((parent[IS_ROOT_OFFSET] != 0u) != is_catalog_root) {
+            tinydb_payload_ancestor_set_message(
+                message, message_size, "payload overflow plan observed inconsistent root identity");
+            return false;
+        }
+        if (is_catalog_root && i + 1u != chain->count) {
+            tinydb_payload_ancestor_set_message(
+                message, message_size, "payload overflow plan reaches the catalog root before the end of the chain");
+            return false;
+        }
+
+        uint32_t keys = tinydb_parent_stage_read_u32(
+            parent + INTERNAL_NODE_NUM_KEYS_OFFSET);
+        if (keys > INTERNAL_NODE_MAX_KEYS) {
+            tinydb_payload_ancestor_set_message(
+                message, message_size, "payload overflow plan encountered an overfull internal ancestor");
+            return false;
+        }
+        if (keys < INTERNAL_NODE_MAX_KEYS) {
+            plan->stopping_ancestor_index = i;
+            if (message != NULL && message_size > 0u) message[0] = '\0';
+            return true;
+        }
+        plan->full_internal_levels++;
+    }
+
+    if (chain->internal_pages[chain->count - 1u] != schema->root_page_num) {
+        tinydb_payload_ancestor_set_message(
+            message, message_size, "payload overflow plan does not terminate at the catalog root");
+        return false;
+    }
+    plan->requires_root_growth = true;
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    return true;
 }
 
 /* Read-only compatibility wrapper for callers that only need validation. */
