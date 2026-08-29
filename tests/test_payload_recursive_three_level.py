@@ -16,7 +16,7 @@ def find_core_library(repo_root):
 
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    source = os.path.join(repo_root, "tests", "payload_recursive_three_level_probe.c")
+    source = os.path.join(repo_root, "tests", "payload_recursive_three_level_live_probe.c")
     core_library = find_core_library(repo_root)
     if core_library is None:
         raise AssertionError("could not find built tinydb_core static library")
