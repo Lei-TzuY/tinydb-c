@@ -29,7 +29,9 @@ typedef enum {
 typedef struct {
     TableSchema* schema;
     GenericSecondaryIndex* index;
-    TinyDBGenericPredicate predicate;
+    TinyDBGenericPredicate predicates[MAX_COLUMNS_PER_TABLE];
+    uint32_t predicate_count;
+    uint32_t indexed_column;
     WideIndexProjectionKind projection_kind;
     uint32_t projection_column_index;
     bool has_limit;
@@ -275,16 +277,22 @@ static bool wide_index_parse_select(Table* table,
                                          sizeof(table_name)) ||
         !wide_statement_ci_equal(table_name, schema->name) ||
         !tinydb_generic_consume_word(&parser, "where") ||
-        !tinydb_generic_parse_predicate(&parser, schema, &select->predicate) ||
-        select->predicate.column_index == 0u ||
-        select->predicate.op != TINYDB_GENERIC_COMPARE_EQ) {
+        !tinydb_generic_parse_predicate(&parser,
+                                        schema,
+                                        &select->predicates[0])) {
         return false;
     }
-
-    select->index = wide_statement_find_index(table,
-                                               schema,
-                                               select->predicate.column_index);
-    if (select->index == NULL) return false;
+    select->predicate_count = 1u;
+    while (tinydb_generic_consume_word(&parser, "and")) {
+        if (select->predicate_count >= MAX_COLUMNS_PER_TABLE ||
+            !tinydb_generic_parse_predicate(
+                &parser,
+                schema,
+                &select->predicates[select->predicate_count])) {
+            return false;
+        }
+        select->predicate_count++;
+    }
 
     if (tinydb_generic_consume_word(&parser, "limit")) {
         if (!tinydb_generic_parse_uint32(&parser, &select->limit)) return false;
@@ -296,7 +304,23 @@ static bool wide_index_parse_select(Table* table,
     } else if (tinydb_generic_consume_word(&parser, "offset")) {
         if (!tinydb_generic_parse_uint32(&parser, &select->offset)) return false;
     }
-    return tinydb_generic_consume_end(&parser);
+    if (!tinydb_generic_consume_end(&parser)) return false;
+
+    for (uint32_t i = 0u; i < select->predicate_count; i++) {
+        TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index == 0u ||
+            predicate->op == TINYDB_GENERIC_COMPARE_LIKE) {
+            continue;
+        }
+        GenericSecondaryIndex* index = wide_statement_find_index(
+            table, schema, predicate->column_index);
+        if (index != NULL) {
+            select->index = index;
+            select->indexed_column = predicate->column_index;
+            return true;
+        }
+    }
+    return false;
 }
 
 static void wide_index_print_value(const TinyDBValue* value) {
@@ -321,6 +345,54 @@ static void wide_index_print_row(const TinyDBValue* values,
     printf(")\n");
 }
 
+static bool wide_index_predicates_match(const WideIndexSelect* select,
+                                        const TinyDBValue* values) {
+    for (uint32_t i = 0u; i < select->predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (!tinydb_generic_predicate_matches(
+                predicate, &values[predicate->column_index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool wide_index_collect_candidates(
+    Table* table,
+    const WideIndexSelect* select,
+    TinyDBGenericIndexCandidates* candidates,
+    char* message,
+    size_t message_size) {
+    TinyDBGenericPredicate indexed[MAX_COLUMNS_PER_TABLE];
+    uint32_t indexed_count = 0u;
+    for (uint32_t i = 0u; i < select->predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &select->predicates[i];
+        if (predicate->column_index == select->indexed_column &&
+            predicate->op != TINYDB_GENERIC_COMPARE_LIKE) {
+            indexed[indexed_count++] = *predicate;
+        }
+    }
+    if (indexed_count == 0u) return false;
+    if (indexed_count == 1u) {
+        return tinydb_generic_index_collect_candidates(table,
+                                                       select->schema,
+                                                       select->index,
+                                                       &indexed[0],
+                                                       candidates,
+                                                       message,
+                                                       message_size);
+    }
+    return tinydb_generic_index_collect_conjunctive_candidates(
+        table,
+        select->schema,
+        select->index,
+        indexed,
+        indexed_count,
+        candidates,
+        message,
+        message_size);
+}
+
 static TinyDBGenericSqlStatus wide_index_execute_select(
     Table* table,
     const WideIndexSelect* select,
@@ -335,13 +407,11 @@ static TinyDBGenericSqlStatus wide_index_execute_select(
 
     TinyDBGenericIndexCandidates candidates;
     memset(&candidates, 0, sizeof(candidates));
-    if (!tinydb_generic_index_collect_candidates(table,
-                                                 select->schema,
-                                                 select->index,
-                                                 &select->predicate,
-                                                 &candidates,
-                                                 message,
-                                                 sizeof(message))) {
+    if (!wide_index_collect_candidates(table,
+                                       select,
+                                       &candidates,
+                                       message,
+                                       sizeof(message))) {
         return wide_index_error(
             result,
             message[0] != '\0' ? message : "unable to collect wide index candidates");
@@ -380,11 +450,7 @@ static TinyDBGenericSqlStatus wide_index_execute_select(
                     ? message
                     : "unable to decode schema-sized index candidate");
         }
-        if (!tinydb_generic_predicate_matches(
-                &select->predicate,
-                &values[select->predicate.column_index])) {
-            continue;
-        }
+        if (!wide_index_predicates_match(select, values)) continue;
 
         matched++;
         if (select->projection_kind == WIDE_INDEX_PROJECTION_COUNT ||
