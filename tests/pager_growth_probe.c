@@ -1,17 +1,107 @@
 #include "pager.h"
+#include "slotted_v2_pager_publish_batch.h"
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TARGET_PAGE (TABLE_MAX_PAGES + 32u)
 #define MARKER_BASE 0xC0DE0000u
+#define PUBLISH_MARKER_BASE 0xA7100000u
+#define PUBLISH_PAGE_COUNT 64u
+#define PUBLISH_FAIL_AFTER 33u
 
 static int verify_page(Pager* pager, uint32_t page_num) {
     uint32_t marker = 0;
     void* page = get_page(pager, page_num);
     memcpy(&marker, page, sizeof(marker));
     return marker == (MARKER_BASE ^ page_num) ? 0 : 1;
+}
+
+static int verify_publish_marker(Pager* pager,
+                                 uint32_t page_num,
+                                 uint32_t marker_base) {
+    uint32_t marker = 0;
+    void* page = get_page(pager, page_num);
+    memcpy(&marker, page, sizeof(marker));
+    return marker == (marker_base ^ page_num) ? 0 : 1;
+}
+
+static int exercise_pager_aware_publication(Pager* pager) {
+    unsigned char* staged = (unsigned char*)calloc(
+        PUBLISH_PAGE_COUNT, PAGE_SIZE);
+    TinyDBV2PagerPublishEntry* entries =
+        (TinyDBV2PagerPublishEntry*)calloc(
+            PUBLISH_PAGE_COUNT, sizeof(TinyDBV2PagerPublishEntry));
+    if (staged == NULL || entries == NULL) {
+        free(entries);
+        free(staged);
+        fprintf(stderr, "unable to allocate pager-aware publication probe\n");
+        return 1;
+    }
+
+    for (uint32_t i = 0u; i < PUBLISH_PAGE_COUNT; i++) {
+        unsigned char* staged_page = staged + (size_t)i * PAGE_SIZE;
+        memcpy(staged_page, get_page(pager, i), PAGE_SIZE);
+        uint32_t marker = PUBLISH_MARKER_BASE ^ i;
+        memcpy(staged_page, &marker, sizeof(marker));
+        entries[i].page_num = i;
+        entries[i].staged = staged_page;
+    }
+
+    uint32_t evictions_before = pager->evictions;
+    if (tinydb_v2_pager_publish_batch(pager,
+                                      entries,
+                                      PUBLISH_PAGE_COUNT,
+                                      PUBLISH_FAIL_AFTER)) {
+        fprintf(stderr, "injected pager-aware publication unexpectedly succeeded\n");
+        free(entries);
+        free(staged);
+        return 1;
+    }
+    for (uint32_t i = 0u; i < PUBLISH_PAGE_COUNT; i++) {
+        if (verify_publish_marker(pager, i, MARKER_BASE) != 0 ||
+            tinydb_v2_pager_page_is_dirty(pager, i)) {
+            fprintf(stderr,
+                    "pager-aware rollback failed on page %u\n",
+                    i);
+            free(entries);
+            free(staged);
+            return 1;
+        }
+    }
+    if (pager->evictions <= evictions_before) {
+        fprintf(stderr, "pager-aware publication did not exercise LRU eviction\n");
+        free(entries);
+        free(staged);
+        return 1;
+    }
+
+    if (!tinydb_v2_pager_publish_batch(pager,
+                                       entries,
+                                       PUBLISH_PAGE_COUNT,
+                                       TINYDB_V2_PUBLISH_NO_FAIL)) {
+        fprintf(stderr, "pager-aware publication failed\n");
+        free(entries);
+        free(staged);
+        return 1;
+    }
+    for (uint32_t i = 0u; i < PUBLISH_PAGE_COUNT; i++) {
+        if (verify_publish_marker(pager, i, PUBLISH_MARKER_BASE) != 0 ||
+            !tinydb_v2_pager_page_is_dirty(pager, i)) {
+            fprintf(stderr,
+                    "pager-aware publication mismatch on page %u\n",
+                    i);
+            free(entries);
+            free(staged);
+            return 1;
+        }
+    }
+
+    free(entries);
+    free(staged);
+    return 0;
 }
 
 int main(int argc, char** argv) {
@@ -74,10 +164,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    printf("PAGER_GROWTH_OK pages=%u capacity=%u legacy_ceiling=%u\n",
+    if (exercise_pager_aware_publication(pager) != 0) {
+        pager_close(pager);
+        return 1;
+    }
+
+    printf("PAGER_GROWTH_OK pages=%u capacity=%u legacy_ceiling=%u "
+           "pager_publish_pages=%u buffer_pool=%u eviction_safe=yes "
+           "publish_rollback=yes\n",
            pages_after_growth,
            capacity_after_growth,
-           (unsigned)TABLE_MAX_PAGES);
+           (unsigned)TABLE_MAX_PAGES,
+           (unsigned)PUBLISH_PAGE_COUNT,
+           (unsigned)MAX_BUFFER_POOL_SIZE);
     pager_close(pager);
     return 0;
 }
