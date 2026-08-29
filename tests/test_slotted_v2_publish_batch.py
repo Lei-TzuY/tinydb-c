@@ -80,6 +80,8 @@ def main():
             "checksum_isolated=yes",
             "duplicate_guard=yes",
             "root0=yes",
+            "deep_batch=yes",
+            "capacity_guard=yes",
         ):
             if marker not in output:
                 raise AssertionError(f"missing {marker}\n{output}")
@@ -87,7 +89,8 @@ def main():
     print(
         "PASS: staged slotted V2 page batches prevalidate topology identities, "
         "restore every caller page after deterministic partial publication, "
-        "support page-zero roots, and leave checksum trailers untouched"
+        "support page-zero roots and 12-page recursive publication batches, "
+        "reject oversized batches, and leave checksum trailers untouched"
     )
 
 
