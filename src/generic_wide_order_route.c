@@ -28,6 +28,7 @@ typedef struct {
     TableSchema* schema;
     WideOrderProjectionKind projection_kind;
     uint32_t projection_column_index;
+    uint32_t order_column_index;
     bool has_filter;
     TinyDBGenericBooleanExpression filter;
     bool descending;
@@ -37,8 +38,13 @@ typedef struct {
 } WideOrderSelect;
 
 typedef struct {
+    uint32_t id;
+    TinyDBValue sort_key;
+} WideOrderEntry;
+
+typedef struct {
     const WideOrderSelect* select;
-    uint32_t* ids;
+    WideOrderEntry* entries;
     uint32_t count;
     uint32_t capacity;
     bool allocation_failed;
@@ -243,16 +249,26 @@ static WideOrderParseStatus parse_wide_order(Table* table,
     }
     int order_index = tinydb_generic_find_column_index(select->schema,
                                                        order_column);
-    if (order_index != 0 || select->schema->columns[0].type != COL_TYPE_INT ||
-        !ci_equal(select->schema->columns[0].name, "id")) {
+    if (order_index < 0) {
         if (message != NULL && message_size > 0u) {
             snprintf(message,
                      message_size,
                      "%s",
-                     "wide ORDER BY currently supports only the id primary key");
+                     "wide ORDER BY references an unknown column");
         }
         return WIDE_ORDER_INVALID;
     }
+    if (select->schema->columns[order_index].type != COL_TYPE_INT &&
+        select->schema->columns[order_index].type != COL_TYPE_VARCHAR) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message,
+                     message_size,
+                     "%s",
+                     "wide ORDER BY column type is not sortable");
+        }
+        return WIDE_ORDER_INVALID;
+    }
+    select->order_column_index = (uint32_t)order_index;
 
     if (tinydb_generic_consume_word(&parser, "desc")) {
         select->descending = true;
@@ -276,7 +292,9 @@ static WideOrderParseStatus parse_wide_order(Table* table,
     return WIDE_ORDER_VALID;
 }
 
-static bool append_id(WideOrderCollector* collector, uint32_t id) {
+static bool append_entry(WideOrderCollector* collector,
+                         uint32_t id,
+                         const TinyDBValue* sort_key) {
     if (collector->count == collector->capacity) {
         uint32_t next_capacity = collector->capacity == 0u
             ? 32u
@@ -286,21 +304,24 @@ static bool append_id(WideOrderCollector* collector, uint32_t id) {
             return false;
         }
 #if SIZE_MAX < UINT32_MAX
-        if ((size_t)next_capacity > SIZE_MAX / sizeof(uint32_t)) {
+        if ((size_t)next_capacity > SIZE_MAX / sizeof(WideOrderEntry)) {
             collector->allocation_failed = true;
             return false;
         }
 #endif
-        uint32_t* grown = (uint32_t*)realloc(
-            collector->ids, (size_t)next_capacity * sizeof(uint32_t));
+        WideOrderEntry* grown = (WideOrderEntry*)realloc(
+            collector->entries,
+            (size_t)next_capacity * sizeof(WideOrderEntry));
         if (grown == NULL) {
             collector->allocation_failed = true;
             return false;
         }
-        collector->ids = grown;
+        collector->entries = grown;
         collector->capacity = next_capacity;
     }
-    collector->ids[collector->count++] = id;
+    collector->entries[collector->count].id = id;
+    collector->entries[collector->count].sort_key = *sort_key;
+    collector->count++;
     return true;
 }
 
@@ -319,7 +340,8 @@ static bool collect_ordered_payload(const TableSchema* schema,
                                              message,
                                              sizeof(message)) ||
         value_count != schema->num_columns ||
-        values[0].type != COL_TYPE_INT) {
+        values[0].type != COL_TYPE_INT ||
+        collector->select->order_column_index >= value_count) {
         collector->decode_failed = true;
         return false;
     }
@@ -329,13 +351,28 @@ static bool collect_ordered_payload(const TableSchema* schema,
                                         value_count)) {
         return true;
     }
-    return append_id(collector, values[0].int_value);
+    return append_entry(
+        collector,
+        values[0].int_value,
+        &values[collector->select->order_column_index]);
 }
 
-static int compare_uint32(const void* left, const void* right) {
-    uint32_t a = *(const uint32_t*)left;
-    uint32_t b = *(const uint32_t*)right;
-    return a < b ? -1 : (a > b ? 1 : 0);
+static int compare_entries(const void* left, const void* right) {
+    const WideOrderEntry* a = (const WideOrderEntry*)left;
+    const WideOrderEntry* b = (const WideOrderEntry*)right;
+    int result = 0;
+    if (a->sort_key.type == COL_TYPE_INT && b->sort_key.type == COL_TYPE_INT) {
+        result = a->sort_key.int_value < b->sort_key.int_value
+            ? -1
+            : (a->sort_key.int_value > b->sort_key.int_value ? 1 : 0);
+    } else if (a->sort_key.type == COL_TYPE_VARCHAR &&
+               b->sort_key.type == COL_TYPE_VARCHAR) {
+        result = strcmp(a->sort_key.text, b->sort_key.text);
+    } else {
+        result = (int)a->sort_key.type - (int)b->sort_key.type;
+    }
+    if (result != 0) return result;
+    return a->id < b->id ? -1 : (a->id > b->id ? 1 : 0);
 }
 
 static void wide_order_print_value(const TinyDBValue* value) {
@@ -418,7 +455,7 @@ static TinyDBGenericSqlStatus execute_wide_order(Table* table,
                                     message,
                                     sizeof(message));
     if (!complete || collector.decode_failed || collector.allocation_failed) {
-        free(collector.ids);
+        free(collector.entries);
         return result_error(
             result,
             TINYDB_GENERIC_SQL_EXECUTE_ERROR,
@@ -428,10 +465,10 @@ static TinyDBGenericSqlStatus execute_wide_order(Table* table,
     }
 
     if (collector.count > 1u) {
-        qsort(collector.ids,
+        qsort(collector.entries,
               collector.count,
-              sizeof(collector.ids[0]),
-              compare_uint32);
+              sizeof(collector.entries[0]),
+              compare_entries);
     }
 
     uint32_t emitted = 0u;
@@ -442,10 +479,10 @@ static TinyDBGenericSqlStatus execute_wide_order(Table* table,
             : logical;
         if (!emit_id(table,
                      select,
-                     collector.ids[index],
+                     collector.entries[index].id,
                      message,
                      sizeof(message))) {
-            free(collector.ids);
+            free(collector.entries);
             return result_error(
                 result,
                 TINYDB_GENERIC_SQL_EXECUTE_ERROR,
@@ -456,7 +493,7 @@ static TinyDBGenericSqlStatus execute_wide_order(Table* table,
         emitted++;
     }
 
-    free(collector.ids);
+    free(collector.entries);
     return result_success(result);
 }
 
