@@ -2,6 +2,7 @@
 #include "record_payload_nonroot_internal_split.h"
 #include "record_payload_nonroot_split.h"
 #include "record_payload_overflow_reservation.h"
+#include "record_payload_page_claim_plan.h"
 #include "record_payload_root_internal_split.h"
 
 #include <stdio.h>
@@ -70,11 +71,6 @@ bool tinydb_record_payload_try_nonroot_split(
         return true;
     }
 
-    /* Once the topology-neutral/non-full split path has positively matched a
-     * request, preserve its fail-closed result unless the only reason it
-     * stopped is the explicit full-parent capacity boundary. Corruption,
-     * sibling-boundary failures, and other applicable errors must not be
-     * masked by probing unrelated parent-growth handlers. */
     if (base_applicable &&
         !base_failure_allows_parent_escalation(base_applicable,
                                                base_message)) {
@@ -104,10 +100,6 @@ bool tinydb_record_payload_try_nonroot_split(
         return true;
     }
 
-    /* A full-root handler only sets applicable after proving that the leaf is
-     * actually beneath the full catalog-stable root. If it then fails, that
-     * error is authoritative; trying the non-root-parent handler would both
-     * repeat pager traversal and risk hiding a real root-topology failure. */
     if (root_applicable) {
         if (applicable != NULL) *applicable = true;
         set_message(message,
@@ -135,17 +127,12 @@ bool tinydb_record_payload_try_nonroot_split(
         return true;
     }
 
-    /* A full grandparent is the first still-unimplemented payload-native
-     * recursive capacity boundary. Before reporting that limitation, collect
-     * the selected leaf's reciprocal ancestry, convert it into a read-only
-     * cascade preflight, and size the complete allocator reservation. This
-     * proves both how far the separator must propagate and how many pages the
-     * eventual mutation must claim before durable publication begins. */
     if (nonroot_failure_is_recursive_capacity(nonroot_parent_applicable,
                                               nonroot_parent_message)) {
         TinyDBPayloadAncestorChain chain;
         TinyDBPayloadOverflowPlan plan;
         TinyDBPayloadOverflowReservation reservation = {0};
+        TinyDBPayloadPageClaimPlan claim_plan = {0};
         char ancestry_message[TINYDB_RECORD_MESSAGE_MAX];
         ancestry_message[0] = '\0';
         if (!tinydb_record_payload_collect_ancestor_chain(
@@ -176,8 +163,16 @@ bool tinydb_record_payload_try_nonroot_split(
             &reservation,
             ancestry_message,
             sizeof(ancestry_message));
+        bool mapped = sized && tinydb_record_payload_prepare_page_claim_plan(
+            table->pager,
+            &chain,
+            &reservation,
+            &claim_plan,
+            ancestry_message,
+            sizeof(ancestry_message));
         tinydb_record_payload_ancestor_chain_release(&chain);
-        if (!planned || !sized) {
+        if (!planned || !sized || !mapped) {
+            tinydb_record_payload_page_claim_plan_release(&claim_plan);
             if (applicable != NULL) *applicable = true;
             set_message(message,
                         message_size,
@@ -189,13 +184,18 @@ bool tinydb_record_payload_try_nonroot_split(
         if (plan.full_internal_levels < 2u ||
             reservation.new_leaf_pages != 1u ||
             reservation.new_internal_pages < 2u ||
-            reservation.total_pages < 3u) {
+            reservation.total_pages < 3u ||
+            claim_plan.count != reservation.total_pages ||
+            claim_plan.original_num_pages != table->pager->num_pages ||
+            claim_plan.original_free_page_count != table->pager->free_page_count) {
+            tinydb_record_payload_page_claim_plan_release(&claim_plan);
             if (applicable != NULL) *applicable = true;
             set_message(message,
                         message_size,
                         "payload-native recursive overflow preflight disagrees with the full-grandparent boundary");
             return false;
         }
+        tinydb_record_payload_page_claim_plan_release(&claim_plan);
     }
 
     if (applicable != NULL) {
