@@ -10,12 +10,26 @@
 
 /*
  * Recursive payload splits can touch both leaf siblings and several internal
- * ancestors in one publication boundary. Keep a bounded entry count so a
- * malformed topology cannot request unbounded work, but keep rollback page
- * images off the thread stack so deeper cascades do not consume a large fixed
- * stack frame.
+ * ancestors in one publication boundary. Bound rollback memory by bytes rather
+ * than by an arbitrary tree-height/page-count constant: callers can publish a
+ * deeper cascade as long as the complete before-image fits this budget.
+ *
+ * The default is intentionally conservative and may be raised at build time
+ * for workloads that need unusually deep atomic page publication. Rollback
+ * images stay on the heap so increasing the budget does not enlarge stack
+ * frames.
  */
-#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES 32u
+#ifndef TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES
+#define TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES (4u * 1024u * 1024u)
+#endif
+
+#if TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES < PAGE_USABLE_SIZE
+#error "TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES must fit at least one page"
+#endif
+
+/* Compatibility/inspection value derived from the byte budget, not a tree cap. */
+#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES \
+    (TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES / PAGE_USABLE_SIZE)
 #define TINYDB_V2_PUBLISH_NO_FAIL UINT32_MAX
 
 typedef struct {
@@ -23,6 +37,31 @@ typedef struct {
     unsigned char* target;
     const unsigned char* staged;
 } TinyDBV2PublishEntry;
+
+/*
+ * Validate the allocation shape before any entry is dereferenced. Keeping this
+ * separate makes it possible for recursive callers and regression probes to
+ * reject a malformed/over-budget count without fabricating an equally large
+ * entry array first.
+ */
+static bool tinydb_v2_publish_batch_snapshot_size(
+    uint32_t count,
+    size_t* snapshot_bytes_out) {
+    if (snapshot_bytes_out != NULL) *snapshot_bytes_out = 0u;
+    if (count == 0u) return false;
+    if (PAGE_USABLE_SIZE != 0u &&
+        (size_t)count > SIZE_MAX / (size_t)PAGE_USABLE_SIZE) {
+        return false;
+    }
+
+    size_t snapshot_bytes = (size_t)count * (size_t)PAGE_USABLE_SIZE;
+    if (snapshot_bytes >
+        (size_t)TINYDB_V2_PUBLISH_BATCH_MAX_ROLLBACK_BYTES) {
+        return false;
+    }
+    if (snapshot_bytes_out != NULL) *snapshot_bytes_out = snapshot_bytes;
+    return true;
+}
 
 /*
  * Publish a validated collection of staged page images as one caller-visible
@@ -45,8 +84,10 @@ static bool tinydb_v2_publish_batch(
     const TinyDBV2PublishEntry* entries,
     uint32_t count,
     uint32_t fail_after) {
-    if (entries == NULL || count == 0u ||
-        count > TINYDB_V2_PUBLISH_BATCH_MAX_PAGES || fail_after == 0u) {
+    if (entries == NULL || fail_after == 0u) return false;
+
+    size_t snapshot_bytes = 0u;
+    if (!tinydb_v2_publish_batch_snapshot_size(count, &snapshot_bytes)) {
         return false;
     }
 
@@ -67,12 +108,6 @@ static bool tinydb_v2_publish_batch(
                 return false;
             }
         }
-    }
-
-    size_t snapshot_bytes = (size_t)count * (size_t)PAGE_USABLE_SIZE;
-    if (PAGE_USABLE_SIZE != 0u &&
-        snapshot_bytes / (size_t)PAGE_USABLE_SIZE != (size_t)count) {
-        return false;
     }
 
     unsigned char* before = (unsigned char*)malloc(snapshot_bytes);
