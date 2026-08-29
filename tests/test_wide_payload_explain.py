@@ -104,14 +104,45 @@ def main():
         if "left-b" in indexed:
             raise AssertionError("plain indexed wide EXPLAIN executed the query\n" + indexed)
 
-        ranged = run_session(
+        primary_range = run_session(
             executable,
             db_file,
             ["EXPLAIN SELECT * FROM wide_docs WHERE id >= 20;", ".exit"],
         )
-        reject_fixed_carrier_error(ranged)
-        require(ranged, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
-        require(ranged, "FILTER: id >= 20")
+        reject_fixed_carrier_error(primary_range)
+        require(primary_range, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(primary_range, "FILTER: id >= 20")
+
+        indexed_range = run_session(
+            executable,
+            db_file,
+            [
+                "EXPLAIN SELECT left_text FROM wide_docs WHERE right_text >= 'right-b';",
+                ".exit",
+            ],
+        )
+        reject_fixed_carrier_error(indexed_range)
+        require(indexed_range, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
+        require(indexed_range, "INDEX: idx_wide_right")
+        require(indexed_range, "FILTER: right_text >= 'right-b'")
+        require(indexed_range, "ESTIMATED ROWS: 2 / 3")
+        require(indexed_range, "ESTIMATED COST:")
+
+        fused_range = run_session(
+            executable,
+            db_file,
+            [
+                "EXPLAIN SELECT COUNT(*) FROM wide_docs WHERE right_text >= 'right-a' AND right_text < 'right-c';",
+                ".exit",
+            ],
+        )
+        reject_fixed_carrier_error(fused_range)
+        require(fused_range, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
+        require(fused_range, "INDEX: idx_wide_right")
+        require(fused_range, "right_text >= 'right-a'")
+        require(fused_range, "right_text < 'right-c'")
+        require(fused_range, "ESTIMATED ROWS: 2 / 3")
+        require(fused_range, "ESTIMATED COST:")
 
         compound = run_session(
             executable,
@@ -122,16 +153,18 @@ def main():
             ],
         )
         reject_fixed_carrier_error(compound)
-        require(compound, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
+        require(compound, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
+        require(compound, "INDEX: idx_wide_right")
         require(compound, "PROJECTION: right_text")
         require(compound, "id >= 10")
         require(compound, "right_text = 'right-b'")
+        require(compound, "ESTIMATED ROWS: 1 / 3")
 
         reopened = run_session(
             executable,
             db_file,
             [
-                "EXPLAIN ANALYZE SELECT left_text FROM wide_docs WHERE right_text = 'right-c';",
+                "EXPLAIN ANALYZE SELECT left_text FROM wide_docs WHERE right_text >= 'right-b' AND id >= 20;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
@@ -139,15 +172,16 @@ def main():
         reject_fixed_carrier_error(reopened)
         require(reopened, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
         require(reopened, "INDEX: idx_wide_right")
-        require(reopened, "ESTIMATED ROWS: 1 / 3")
+        require(reopened, "ESTIMATED ROWS: 2 / 3")
         require(reopened, "ESTIMATED COST:")
         require(reopened, "ACTUAL RESULT")
+        require(reopened, "left-b")
         require(reopened, "left-c")
         require(reopened, "ok")
 
         print(
-            "PASS: payload-sized tables participate in primary-key, secondary-index, "
-            "costed index, range, compound, and reopened EXPLAIN planning without a fixed-record carrier."
+            "PASS: payload-sized tables participate in primary-key, secondary-index equality/range, "
+            "fused-bound, residual, costed, and reopened EXPLAIN planning without a fixed-record carrier."
         )
     finally:
         cleanup(db_file)
