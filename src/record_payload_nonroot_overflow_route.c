@@ -145,7 +145,7 @@ bool tinydb_record_payload_try_nonroot_split(
                                               nonroot_parent_message)) {
         TinyDBPayloadAncestorChain chain;
         TinyDBPayloadOverflowPlan plan;
-        TinyDBPayloadOverflowReservation reservation;
+        TinyDBPayloadOverflowReservation reservation = {0};
         char ancestry_message[TINYDB_RECORD_MESSAGE_MAX];
         ancestry_message[0] = '\0';
         if (!tinydb_record_payload_collect_ancestor_chain(
