@@ -1,3 +1,4 @@
+#include "record_payload_ancestor_chain.h"
 #include "record_payload_nonroot_internal_split.h"
 #include "record_payload_nonroot_split.h"
 #include "record_payload_root_internal_split.h"
@@ -7,6 +8,8 @@
 
 #define TINYDB_PAYLOAD_FULL_PARENT_ESCALATION \
     "payload-native INSERT reached a full internal parent; recursive parent overflow is not implemented yet"
+#define TINYDB_PAYLOAD_FULL_GRANDPARENT_ESCALATION \
+    "payload-native recursive internal overflow beyond the grandparent remains fail-closed"
 
 bool tinydb_record_payload_try_nonroot_split_nonfull_base(
     Table* table,
@@ -30,6 +33,12 @@ static bool base_failure_allows_parent_escalation(bool applicable,
                                                   const char* message) {
     return applicable && message != NULL &&
            strcmp(message, TINYDB_PAYLOAD_FULL_PARENT_ESCALATION) == 0;
+}
+
+static bool nonroot_failure_is_recursive_capacity(bool applicable,
+                                                  const char* message) {
+    return applicable && message != NULL &&
+           strcmp(message, TINYDB_PAYLOAD_FULL_GRANDPARENT_ESCALATION) == 0;
 }
 
 bool tinydb_record_payload_try_nonroot_split(
@@ -123,6 +132,31 @@ bool tinydb_record_payload_try_nonroot_split(
         if (applicable != NULL) *applicable = true;
         if (message != NULL && message_size > 0u) message[0] = '\0';
         return true;
+    }
+
+    /* A full grandparent is the first still-unimplemented payload-native
+     * recursive capacity boundary. Before reporting that limitation, prove
+     * the selected leaf's reciprocal parent chain actually reaches the
+     * catalog-stable root. Otherwise a broken/cyclic ancestry could be
+     * misclassified as a harmless unsupported depth and hide corruption. */
+    if (nonroot_failure_is_recursive_capacity(nonroot_parent_applicable,
+                                              nonroot_parent_message)) {
+        char ancestry_message[TINYDB_RECORD_MESSAGE_MAX];
+        ancestry_message[0] = '\0';
+        if (!tinydb_record_payload_validate_ancestor_chain(
+                table,
+                schema,
+                key,
+                ancestry_message,
+                sizeof(ancestry_message))) {
+            if (applicable != NULL) *applicable = true;
+            set_message(message,
+                        message_size,
+                        ancestry_message[0] != '\0'
+                            ? ancestry_message
+                            : "payload-native recursive overflow ancestry validation failed");
+            return false;
+        }
     }
 
     if (applicable != NULL) {
