@@ -1,3 +1,4 @@
+#include "generic_boolean.h"
 #include "generic_sql.h"
 
 #include <ctype.h>
