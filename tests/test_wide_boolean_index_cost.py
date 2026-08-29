@@ -115,6 +115,7 @@ def main():
         )
         reject(first, "fixed B+ tree value slot")
         reject(first, "unable to decode")
+        reject(first, "COST CHOICE: table scan cheaper than single secondary index")
         require(first, "PLAN: GENERIC SCHEMA-AWARE TABLE SCAN")
         require(first, "COST CHOICE: table scan cheaper than wide boolean candidate plan")
         require(first, "PLAN: GENERIC INDEX UNION")
@@ -135,6 +136,7 @@ def main():
                 ".exit",
             ],
         )
+        reject(reopened, "COST CHOICE: table scan cheaper than single secondary index")
         require(reopened, "COST CHOICE: table scan cheaper than wide boolean candidate plan")
         require(reopened, "PLAN: GENERIC INDEX UNION")
         require_scalars(reopened, [40, 4])
@@ -143,7 +145,8 @@ def main():
         print(
             "PASS: wide boolean candidate routing applies the shared cost model, "
             "falls back to scans for broad OR predicates, keeps selective unions, "
-            "preserves LIMIT early-stop routing, and survives reopen."
+            "preserves LIMIT early-stop routing, emits one unambiguous scan-choice "
+            "diagnostic, and survives reopen."
         )
     finally:
         cleanup(db_file)
