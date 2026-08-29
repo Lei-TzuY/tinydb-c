@@ -81,8 +81,14 @@ def main():
                 "EXECUTE archive_lookup USING 1;",
                 "PREPARE blocked_vacuum FROM VACUUM;",
                 "EXECUTE blocked_vacuum;",
-                "PREPARE blocked_create FROM CREATE TABLE too_wide (id INT, a VARCHAR, b VARCHAR);",
-                "EXECUTE blocked_create;",
+                # Bare VARCHAR makes this a 516-byte executable generic schema.
+                # Prepared execution must re-enter the current public CREATE TABLE
+                # policy and initialize a payload-native V2 root, not preserve the
+                # obsolete fixed TinyDBRecord rejection.
+                "PREPARE wide_create FROM CREATE TABLE wide_prepared (id INT, a VARCHAR, b VARCHAR);",
+                "EXECUTE wide_create;",
+                "INSERT INTO wide_prepared VALUES (77, 'prepared-left', 'prepared-right');",
+                "SELECT * FROM wide_prepared WHERE id = 77;",
                 "PREPARE recur FROM EXECUTE recur USING ?;",
                 "EXECUTE recur USING 1;",
                 "PRAGMA integrity_check;",
@@ -103,7 +109,10 @@ def main():
             output,
             "VACUUM/VACUUM INTO is disabled for multi-table databases",
         )
-        require(output, "CREATE TABLE row layout exceeds the fixed generic record slot")
+        require(output, "Statement 'wide_create' prepared.")
+        require(output, "(77, prepared-left, prepared-right)")
+        if "fixed generic record slot" in output or "schema-sized payload limit" in output:
+            raise AssertionError("prepared wide CREATE hit an obsolete storage guard\n" + output)
         require(output, "prepared statement nesting exceeds the safe execution limit")
         require(output, "ok")
 
@@ -113,8 +122,9 @@ def main():
         print(
             "PASS: prepared SQL is rebound through the public engine pipeline, routes to "
             "non-zero fixed-row and generic roots, reuses generic indexed EXPLAIN/execution, "
-            "participates in transaction rollback, reapplies DDL/VACUUM policy guards, and "
-            "rejects recursive EXECUTE chains safely."
+            "participates in transaction rollback, keeps VACUUM policy enforcement, admits "
+            "schema-sized prepared CREATE through V2 payload storage, and rejects recursive "
+            "EXECUTE chains safely."
         )
     finally:
         cleanup(db_file)
