@@ -11,6 +11,7 @@
 #define PUBLISH_MARKER_BASE 0xA7100000u
 #define PREEXISTING_DIRTY_MARKER_BASE 0xD17A0000u
 #define PREEXISTING_DIRTY_PAGE 7u
+#define PINNED_TEST_PAGE 0u
 #define PUBLISH_PAGE_COUNT 64u
 #define PUBLISH_FAIL_AFTER 33u
 #define EVICTION_CHURN_START 128u
@@ -40,6 +41,66 @@ static void force_eviction_churn(Pager* pager) {
     }
 }
 
+static int exercise_pinned_page_handle(Pager* pager) {
+    PagerPageHandle handle;
+    if (!pager_pin_page_handle(pager, PINNED_TEST_PAGE, &handle) ||
+        !handle.pinned || handle.data == NULL || handle.frame_idx < 0) {
+        fprintf(stderr, "unable to pin page handle\n");
+        return 1;
+    }
+
+    uint32_t marker = 0u;
+    if (!pager_page_handle_acquire_read(&handle)) {
+        fprintf(stderr, "unable to acquire pinned read lock\n");
+        return 1;
+    }
+    memcpy(&marker, handle.data, sizeof(marker));
+    if (!pager_page_handle_release_read(&handle) ||
+        marker != (MARKER_BASE ^ PINNED_TEST_PAGE)) {
+        fprintf(stderr, "pinned read handle returned the wrong page image\n");
+        return 1;
+    }
+
+    if (!pager_page_handle_acquire_write(&handle) ||
+        !pager_page_handle_release_write(&handle)) {
+        fprintf(stderr, "pinned write lock lifecycle failed\n");
+        return 1;
+    }
+
+    int pinned_frame = handle.frame_idx;
+    void* pinned_data = handle.data;
+    uint32_t evictions_before = pager->evictions;
+    force_eviction_churn(pager);
+
+    marker = 0u;
+    memcpy(&marker, handle.data, sizeof(marker));
+    if (pager->evictions <= evictions_before ||
+        pager->page_table[PINNED_TEST_PAGE] != pinned_frame ||
+        pager->frames[pinned_frame].page_num != PINNED_TEST_PAGE ||
+        pager->frames[pinned_frame].data != pinned_data ||
+        pager->frames[pinned_frame].pin_count == 0u ||
+        marker != (MARKER_BASE ^ PINNED_TEST_PAGE)) {
+        fprintf(stderr, "LRU evicted or corrupted a pinned page handle\n");
+        return 1;
+    }
+
+    if (!pager_release_page_handle(&handle) || handle.pinned) {
+        fprintf(stderr, "unable to release pinned page handle\n");
+        return 1;
+    }
+
+    evictions_before = pager->evictions;
+    force_eviction_churn(pager);
+    if (pager->evictions <= evictions_before ||
+        pager->page_table[PINNED_TEST_PAGE] != -1 ||
+        verify_page(pager, PINNED_TEST_PAGE) != 0) {
+        fprintf(stderr, "released page did not return to the eviction set\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 static int exercise_pager_aware_publication(Pager* pager) {
     unsigned char* staged = (unsigned char*)calloc(
         PUBLISH_PAGE_COUNT, PAGE_SIZE);
@@ -62,9 +123,9 @@ static int exercise_pager_aware_publication(Pager* pager) {
     {
         unsigned char* page =
             (unsigned char*)get_page(pager, PREEXISTING_DIRTY_PAGE);
-        uint32_t marker =
+        uint32_t dirty_marker =
             PREEXISTING_DIRTY_MARKER_BASE ^ PREEXISTING_DIRTY_PAGE;
-        memcpy(page, &marker, sizeof(marker));
+        memcpy(page, &dirty_marker, sizeof(dirty_marker));
         mark_page_dirty(pager, PREEXISTING_DIRTY_PAGE);
         pager_unpin_page(pager, PREEXISTING_DIRTY_PAGE);
     }
@@ -87,8 +148,8 @@ static int exercise_pager_aware_publication(Pager* pager) {
     for (uint32_t i = 0u; i < PUBLISH_PAGE_COUNT; i++) {
         unsigned char* staged_page = staged + (size_t)i * PAGE_SIZE;
         memcpy(staged_page, get_page(pager, i), PAGE_SIZE);
-        uint32_t marker = PUBLISH_MARKER_BASE ^ i;
-        memcpy(staged_page, &marker, sizeof(marker));
+        uint32_t publish_marker = PUBLISH_MARKER_BASE ^ i;
+        memcpy(staged_page, &publish_marker, sizeof(publish_marker));
         entries[i].page_num = i;
         entries[i].staged = staged_page;
     }
@@ -226,14 +287,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (exercise_pager_aware_publication(pager) != 0) {
+    if (exercise_pinned_page_handle(pager) != 0 ||
+        exercise_pager_aware_publication(pager) != 0) {
         pager_close(pager);
         return 1;
     }
 
     printf("PAGER_GROWTH_OK pages=%u capacity=%u legacy_ceiling=%u "
            "pager_publish_pages=%u buffer_pool=%u eviction_safe=yes "
-           "publish_rollback=yes preexisting_dirty_rollback=yes\n",
+           "publish_rollback=yes preexisting_dirty_rollback=yes "
+           "pin_eviction_guard=yes pinned_rwlock=yes\n",
            pages_after_growth,
            capacity_after_growth,
            (unsigned)TABLE_MAX_PAGES,
