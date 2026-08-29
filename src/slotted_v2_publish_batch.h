@@ -5,15 +5,17 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
  * Recursive payload splits can touch both leaf siblings and several internal
- * ancestors in one publication boundary. Keep enough fixed, allocation-free
- * headroom for deeper cascades while preserving deterministic stack storage
- * and fail-closed capacity checks.
+ * ancestors in one publication boundary. Keep a bounded entry count so a
+ * malformed topology cannot request unbounded work, but keep rollback page
+ * images off the thread stack so deeper cascades do not consume a large fixed
+ * stack frame.
  */
-#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES 16u
+#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES 32u
 #define TINYDB_V2_PUBLISH_NO_FAIL UINT32_MAX
 
 typedef struct {
@@ -44,12 +46,16 @@ static bool tinydb_v2_publish_batch(
     uint32_t count,
     uint32_t fail_after) {
     if (entries == NULL || count == 0u ||
-        count > TINYDB_V2_PUBLISH_BATCH_MAX_PAGES) {
+        count > TINYDB_V2_PUBLISH_BATCH_MAX_PAGES || fail_after == 0u) {
         return false;
     }
 
-    unsigned char before[TINYDB_V2_PUBLISH_BATCH_MAX_PAGES][PAGE_USABLE_SIZE];
-
+    /*
+     * Finish every topology check before allocating rollback storage or
+     * touching a caller page. This preserves the original all-or-nothing
+     * preflight contract while moving the potentially large rollback image
+     * out of the thread stack.
+     */
     for (uint32_t i = 0u; i < count; i++) {
         if (entries[i].page_num == INVALID_PAGE_NUM ||
             entries[i].target == NULL || entries[i].staged == NULL) {
@@ -61,21 +67,37 @@ static bool tinydb_v2_publish_batch(
                 return false;
             }
         }
-        memcpy(before[i], entries[i].target, PAGE_USABLE_SIZE);
     }
 
-    if (fail_after == 0u) return false;
+    size_t snapshot_bytes = (size_t)count * (size_t)PAGE_USABLE_SIZE;
+    if (PAGE_USABLE_SIZE != 0u &&
+        snapshot_bytes / (size_t)PAGE_USABLE_SIZE != (size_t)count) {
+        return false;
+    }
+
+    unsigned char* before = (unsigned char*)malloc(snapshot_bytes);
+    if (before == NULL) return false;
+
+    for (uint32_t i = 0u; i < count; i++) {
+        memcpy(before + (size_t)i * (size_t)PAGE_USABLE_SIZE,
+               entries[i].target,
+               PAGE_USABLE_SIZE);
+    }
 
     for (uint32_t i = 0u; i < count; i++) {
         memcpy(entries[i].target, entries[i].staged, PAGE_USABLE_SIZE);
         if (fail_after != TINYDB_V2_PUBLISH_NO_FAIL && i + 1u == fail_after) {
             for (uint32_t j = 0u; j < count; j++) {
-                memcpy(entries[j].target, before[j], PAGE_USABLE_SIZE);
+                memcpy(entries[j].target,
+                       before + (size_t)j * (size_t)PAGE_USABLE_SIZE,
+                       PAGE_USABLE_SIZE);
             }
+            free(before);
             return false;
         }
     }
 
+    free(before);
     return true;
 }
 
