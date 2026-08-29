@@ -126,15 +126,71 @@ static Cursor* leaf_find(Table* table, uint32_t page_num, uint32_t key) {
     if (get_node_type(page) != NODE_LEAF) return NULL;
     uint32_t cell_index = 0u;
     bool exact_match = false;
-    if (!tinydb_leaf_page_lower_bound(page,
+    uint32_t count = 0u;
+    if (!tinydb_leaf_page_count(page, PAGE_SIZE, &count) ||
+        !tinydb_leaf_page_lower_bound(page,
                                       PAGE_SIZE,
                                       key,
                                       &cell_index,
-                                      &exact_match)) {
+                                      &exact_match) ||
+        cell_index > count) {
         return NULL;
     }
     (void)exact_match;
-    return make_cursor(table, page_num, cell_index, false);
+
+    Cursor* cursor = make_cursor(table, page_num, cell_index, false);
+    if (cursor == NULL || cell_index < count) return cursor;
+
+    /* lower_bound may legitimately return count when the sought key is above
+     * this leaf's current maximum (for example after deleting that maximum).
+     * Normalize that insertion position to the first row of the next non-empty
+     * sibling, or to a clean end-of-table cursor when this is the tail leaf.
+     * Treat broken sibling reciprocity/order as corruption rather than letting
+     * range readers later misclassify the out-of-range cell index. */
+    uint32_t current_page = page_num;
+    uint32_t current_count = count;
+    uint32_t traversed = 0u;
+    while (true) {
+        uint32_t next_page = 0u;
+        page = get_page(table->pager, current_page);
+        if (!tinydb_leaf_page_next(page, PAGE_SIZE, &next_page)) {
+            free(cursor);
+            return NULL;
+        }
+        if (next_page == 0u) {
+            cursor->page_num = current_page;
+            cursor->cell_num = current_count;
+            cursor->end_of_table = true;
+            return cursor;
+        }
+        if (!valid_page_number(table, next_page) ||
+            next_page == current_page || traversed++ >= table->pager->num_pages) {
+            free(cursor);
+            return NULL;
+        }
+
+        void* next = get_page(table->pager, next_page);
+        uint32_t next_count = 0u;
+        if (get_node_type(next) != NODE_LEAF ||
+            !tinydb_leaf_page_count(next, PAGE_SIZE, &next_count) ||
+            !reciprocal_forward_transition(table, current_page, next) ||
+            !ordered_forward_transition(table,
+                                        current_page,
+                                        current_count,
+                                        next_page,
+                                        next_count)) {
+            free(cursor);
+            return NULL;
+        }
+
+        cursor->page_num = next_page;
+        if (next_count > 0u) {
+            cursor->cell_num = 0u;
+            return cursor;
+        }
+        current_page = next_page;
+        current_count = next_count;
+    }
 }
 
 static Cursor* internal_find(Table* table,
@@ -180,6 +236,7 @@ Cursor* tinydb_leaf_read_find(Table* table, uint32_t key) {
 Cursor* tinydb_leaf_read_start(Table* table) {
     Cursor* cursor = tinydb_leaf_read_find(table, 0u);
     if (cursor == NULL) return NULL;
+    if (cursor->end_of_table) return cursor;
     void* page = get_page(table->pager, cursor->page_num);
     uint32_t count = 0u;
     if (!tinydb_leaf_page_count(page, PAGE_SIZE, &count)) {
