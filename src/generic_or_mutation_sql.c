@@ -1,5 +1,6 @@
 #include "generic_predicate.h"
 #include "generic_sql.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -112,6 +113,10 @@ static bool is_legacy_fixed_row_schema(const TableSchema* schema) {
            schema->columns[2].type == COL_TYPE_VARCHAR;
 }
 
+static bool payload_native_schema(const TableSchema* schema) {
+    return schema != NULL && schema->row_size > ROW_SIZE;
+}
+
 static bool decode_values(const TableSchema* schema,
                           const TinyDBRecord* record,
                           TinyDBValue* values) {
@@ -124,6 +129,21 @@ static bool decode_values(const TableSchema* schema,
                                 &value_count,
                                 message,
                                 sizeof(message)) &&
+           value_count == schema->num_columns;
+}
+
+static bool decode_payload_values(const TableSchema* schema,
+                                  const TinyDBRecordPayload* payload,
+                                  TinyDBValue* values) {
+    uint32_t value_count = 0u;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    return tinydb_record_payload_decode_values(schema,
+                                               payload,
+                                               values,
+                                               MAX_COLUMNS_PER_TABLE,
+                                               &value_count,
+                                               message,
+                                               sizeof(message)) &&
            value_count == schema->num_columns;
 }
 
@@ -186,10 +206,16 @@ static bool append_id(GenericOrMutationCollector* collector, uint32_t id) {
         uint32_t new_capacity = collector->capacity == 0
             ? 16u
             : collector->capacity * 2u;
-        if (new_capacity < collector->capacity) {
+        if (new_capacity <= collector->capacity) {
             collector->allocation_failed = true;
             return false;
         }
+#if SIZE_MAX < UINT32_MAX
+        if ((size_t)new_capacity > SIZE_MAX / sizeof(uint32_t)) {
+            collector->allocation_failed = true;
+            return false;
+        }
+#endif
         uint32_t* grown = (uint32_t*)realloc(
             collector->ids, (size_t)new_capacity * sizeof(uint32_t));
         if (grown == NULL) {
@@ -217,6 +243,20 @@ static bool visit_collect_record(const TableSchema* schema,
     return append_id(collector, values[0].int_value);
 }
 
+static bool visit_collect_payload(const TableSchema* schema,
+                                  const TinyDBRecordPayload* payload,
+                                  void* raw_context) {
+    GenericOrMutationCollector* collector =
+        (GenericOrMutationCollector*)raw_context;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    if (!decode_payload_values(schema, payload, values)) {
+        collector->decode_failed = true;
+        return false;
+    }
+    if (!expression_matches(collector->expression, values)) return true;
+    return append_id(collector, values[0].int_value);
+}
+
 static bool collect_matching_ids(
     Table* table,
     const TableSchema* schema,
@@ -224,6 +264,22 @@ static bool collect_matching_ids(
     GenericOrMutationCollector* collector) {
     memset(collector, 0, sizeof(*collector));
     collector->expression = expression;
+
+    if (payload_native_schema(schema)) {
+        bool scan_complete = false;
+        char message[TINYDB_RECORD_MESSAGE_MAX];
+        message[0] = '\0';
+        (void)tinydb_record_payload_scan(table,
+                                        schema,
+                                        visit_collect_payload,
+                                        collector,
+                                        &scan_complete,
+                                        message,
+                                        sizeof(message));
+        return scan_complete && !collector->allocation_failed &&
+               !collector->decode_failed;
+    }
+
     (void)tinydb_record_scan(table, schema, visit_collect_record, collector);
     return !collector->allocation_failed && !collector->decode_failed;
 }
@@ -278,6 +334,75 @@ static bool parse_assignments(TinyDBGenericParser* parser,
     return false;
 }
 
+static bool load_row_values(Table* table,
+                            const TableSchema* schema,
+                            uint32_t id,
+                            TinyDBValue* values,
+                            uint32_t* value_count,
+                            char* message,
+                            size_t message_size) {
+    *value_count = 0u;
+    if (payload_native_schema(schema)) {
+        TinyDBRecordPayload payload;
+        return tinydb_record_payload_find(table,
+                                          schema,
+                                          id,
+                                          &payload,
+                                          message,
+                                          message_size) &&
+               tinydb_record_payload_decode_values(schema,
+                                                   &payload,
+                                                   values,
+                                                   MAX_COLUMNS_PER_TABLE,
+                                                   value_count,
+                                                   message,
+                                                   message_size) &&
+               *value_count == schema->num_columns;
+    }
+
+    TinyDBRecord record;
+    return tinydb_record_find(table, schema, id, &record) &&
+           tinydb_record_decode(schema,
+                                &record,
+                                values,
+                                MAX_COLUMNS_PER_TABLE,
+                                value_count,
+                                message,
+                                message_size) &&
+           *value_count == schema->num_columns;
+}
+
+static bool store_row_values(Table* table,
+                             const TableSchema* schema,
+                             uint32_t id,
+                             const TinyDBValue* values,
+                             uint32_t value_count,
+                             char* message,
+                             size_t message_size) {
+    if (payload_native_schema(schema)) {
+        TinyDBRecordPayload replacement;
+        return tinydb_record_payload_encode_values(schema,
+                                                   values,
+                                                   value_count,
+                                                   &replacement,
+                                                   message,
+                                                   message_size) &&
+               tinydb_record_payload_update(table,
+                                            schema,
+                                            id,
+                                            &replacement,
+                                            message,
+                                            message_size);
+    }
+    return tinydb_record_update(table,
+                                schema,
+                                id,
+                                values,
+                                value_count,
+                                message,
+                                message_size);
+}
+
 static TinyDBGenericSqlStatus apply_or_update(
     Table* table,
     TableSchema* schema,
@@ -304,18 +429,15 @@ static TinyDBGenericSqlStatus apply_or_update(
 
     for (uint32_t i = 0; i < collector.count; i++) {
         uint32_t id = collector.ids[i];
-        TinyDBRecord record;
         TinyDBValue values[MAX_COLUMNS_PER_TABLE];
-        uint32_t value_count = 0;
-        if (!tinydb_record_find(table, schema, id, &record) ||
-            !tinydb_record_decode(schema,
-                                  &record,
-                                  values,
-                                  MAX_COLUMNS_PER_TABLE,
-                                  &value_count,
-                                  message,
-                                  sizeof(message)) ||
-            value_count != schema->num_columns) {
+        uint32_t value_count = 0u;
+        if (!load_row_values(table,
+                             schema,
+                             id,
+                             values,
+                             &value_count,
+                             message,
+                             sizeof(message))) {
             mutation_succeeded = false;
             break;
         }
@@ -326,13 +448,13 @@ static TinyDBGenericSqlStatus apply_or_update(
             values[assignments[assignment_index].column_index] =
                 assignments[assignment_index].value;
         }
-        if (!tinydb_record_update(table,
-                                  schema,
-                                  id,
-                                  values,
-                                  value_count,
-                                  message,
-                                  sizeof(message))) {
+        if (!store_row_values(table,
+                              schema,
+                              id,
+                              values,
+                              value_count,
+                              message,
+                              sizeof(message))) {
             mutation_succeeded = false;
             break;
         }
@@ -371,9 +493,15 @@ static TinyDBGenericSqlStatus try_or_update(Table* table,
     }
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_schema_supports_records(schema,
-                                        schema_message,
-                                        sizeof(schema_message))) {
+    if (payload_native_schema(schema)) {
+        if (!tinydb_record_payload_schema_supported(schema,
+                                                    schema_message,
+                                                    sizeof(schema_message))) {
+            return execute_error(result, STATEMENT_UPDATE, schema_message);
+        }
+    } else if (!tinydb_schema_supports_records(schema,
+                                               schema_message,
+                                               sizeof(schema_message))) {
         return execute_error(result, STATEMENT_UPDATE, schema_message);
     }
     if (!tinydb_generic_consume_word(&parser, "set")) {
@@ -439,11 +567,18 @@ static TinyDBGenericSqlStatus apply_or_delete(
     char message[TINYDB_RECORD_MESSAGE_MAX];
     message[0] = '\0';
     for (uint32_t i = 0; i < collector.count; i++) {
-        if (!tinydb_record_delete(table,
-                                  schema,
-                                  collector.ids[i],
-                                  message,
-                                  sizeof(message))) {
+        bool deleted = payload_native_schema(schema)
+            ? tinydb_record_payload_delete(table,
+                                           schema,
+                                           collector.ids[i],
+                                           message,
+                                           sizeof(message))
+            : tinydb_record_delete(table,
+                                   schema,
+                                   collector.ids[i],
+                                   message,
+                                   sizeof(message));
+        if (!deleted) {
             mutation_succeeded = false;
             break;
         }
@@ -483,9 +618,15 @@ static TinyDBGenericSqlStatus try_or_delete(Table* table,
     }
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_schema_supports_records(schema,
-                                        schema_message,
-                                        sizeof(schema_message))) {
+    if (payload_native_schema(schema)) {
+        if (!tinydb_record_payload_schema_supported(schema,
+                                                    schema_message,
+                                                    sizeof(schema_message))) {
+            return execute_error(result, STATEMENT_DELETE, schema_message);
+        }
+    } else if (!tinydb_schema_supports_records(schema,
+                                               schema_message,
+                                               sizeof(schema_message))) {
         return execute_error(result, STATEMENT_DELETE, schema_message);
     }
     if (!tinydb_generic_consume_word(&parser, "where")) {
