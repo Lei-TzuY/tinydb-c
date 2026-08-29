@@ -51,6 +51,7 @@ def require(output, marker):
 def reject_unexpected_storage_error(output):
     for marker in (
         "fixed generic record slot",
+        "fixed B+ tree value slot",
         "schema-sized payload limit",
         "requires a V2 slotted leaf",
         "unable to initialize the schema-sized V2 table root",
@@ -80,6 +81,10 @@ def main():
                 "CREATE TABLE wide_docs (id INT, left_text VARCHAR, right_text VARCHAR);",
                 "INSERT INTO wide_docs VALUES (101, 'left-a', 'right-a');",
                 "INSERT INTO wide_docs VALUES (202, 'left-b', 'right-b');",
+                # Exercise both the payload range-seek primary-key path and a
+                # decoded payload table scan with projection/filtering.
+                "SELECT * FROM wide_docs WHERE id = 202;",
+                "SELECT left_text FROM wide_docs WHERE right_text = 'right-a';",
                 "CREATE TABLE metadata_only (key INT, name VARCHAR);",
                 ".tables",
                 "CREATE TABLE metrics (id INT, name VARCHAR, price INT, stock INT);",
@@ -96,6 +101,8 @@ def main():
         reject_unexpected_storage_error(first)
         require(first, "wide_docs")
         require(first, "metadata_only")
+        require(first, "(202, left-b, right-b)")
+        require(first, "left-a")
         require(first, "beta")
         require(first, "ok")
         if scalar_results(first) != [2]:
@@ -107,9 +114,11 @@ def main():
             [
                 ".tables",
                 "PRAGMA table_info(wide_docs);",
+                "SELECT * FROM wide_docs WHERE id = 101;",
                 # A post-reopen INSERT proves both the wide catalog layout and
                 # V2 root format survived durable close/reopen.
                 "INSERT INTO wide_docs VALUES (303, 'left-c', 'right-c');",
+                "SELECT right_text FROM wide_docs WHERE left_text = 'left-c';",
                 "PRAGMA table_info(metrics);",
                 "SELECT COUNT(*) FROM metrics WHERE stock >= 0;",
                 "SELECT COUNT(*) FROM metrics WHERE name LIKE '%a';",
@@ -123,6 +132,8 @@ def main():
         require(reopened, "metadata_only")
         require(reopened, "left_text")
         require(reopened, "right_text")
+        require(reopened, "(101, left-a, right-a)")
+        require(reopened, "right-c")
         require(reopened, "name")
         require(reopened, "price")
         require(reopened, "stock")
@@ -132,9 +143,9 @@ def main():
 
         print(
             "PASS: CREATE TABLE admits schema-sized executable generic rows beyond the "
-            "legacy TinyDBRecord carrier, initializes their root as V2, accepts payload-native "
-            "SQL INSERT before and after reopen, preserves metadata-only DDL, and keeps narrow "
-            "mixed-layout queries durable."
+            "legacy TinyDBRecord carrier, initializes their root as V2, persists payload-native "
+            "SQL INSERT, supports PK and decoded scan SELECT before/after reopen, preserves "
+            "metadata-only DDL, and keeps narrow mixed-layout queries durable."
         )
     finally:
         cleanup(db_file)
