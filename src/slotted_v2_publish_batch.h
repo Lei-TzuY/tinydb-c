@@ -7,7 +7,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES 8u
+/*
+ * Recursive payload splits can touch both leaf siblings and several internal
+ * ancestors in one publication boundary. Keep enough fixed, allocation-free
+ * headroom for deeper cascades while preserving deterministic stack storage
+ * and fail-closed capacity checks.
+ */
+#define TINYDB_V2_PUBLISH_BATCH_MAX_PAGES 16u
 #define TINYDB_V2_PUBLISH_NO_FAIL UINT32_MAX
 
 typedef struct {
