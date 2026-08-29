@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 TinyDBGenericSqlStatus tinydb_generic_sql_try_execute_wide_base(
@@ -35,6 +36,22 @@ typedef struct {
     bool has_limit;
     bool decode_failed;
 } WideCompoundContext;
+
+typedef struct {
+    uint32_t column_index;
+    TinyDBValue value;
+} WideMutationAssignment;
+
+typedef struct {
+    const TableSchema* schema;
+    TinyDBGenericPredicate predicates[MAX_COLUMNS_PER_TABLE];
+    uint32_t predicate_count;
+    uint32_t* ids;
+    uint32_t count;
+    uint32_t capacity;
+    bool allocation_failed;
+    bool decode_failed;
+} WideMutationCollector;
 
 static int ci_char(int value) {
     return tolower((unsigned char)value);
@@ -68,6 +85,11 @@ static bool legacy_fixed_row_shape(const TableSchema* schema) {
            schema->columns[0].type == COL_TYPE_INT &&
            schema->columns[1].type == COL_TYPE_VARCHAR &&
            schema->columns[2].type == COL_TYPE_VARCHAR;
+}
+
+static bool wide_schema_owned(const TableSchema* schema) {
+    return schema != NULL && schema->row_size > ROW_SIZE &&
+           !legacy_fixed_row_shape(schema);
 }
 
 static bool parse_projection(TinyDBGenericParser* parser,
@@ -158,6 +180,34 @@ static TinyDBGenericSqlStatus result_success(TinyDBGenericSqlResult* result) {
     return result->status;
 }
 
+static TinyDBGenericSqlStatus mutation_error(TinyDBGenericSqlResult* result,
+                                             StatementType type,
+                                             TinyDBGenericSqlStatus status,
+                                             ExecuteResult execute_result,
+                                             const char* message) {
+    result->status = status;
+    result->statement_type = type;
+    result->statement_type_valid = true;
+    result->execute_result = execute_result;
+    result->executed = false;
+    snprintf(result->message,
+             sizeof(result->message),
+             "%s",
+             message != NULL ? message : "wide predicate mutation failed");
+    return status;
+}
+
+static TinyDBGenericSqlStatus mutation_success(TinyDBGenericSqlResult* result,
+                                               StatementType type) {
+    result->status = TINYDB_GENERIC_SQL_SUCCESS;
+    result->statement_type = type;
+    result->statement_type_valid = true;
+    result->execute_result = EXECUTE_SUCCESS;
+    result->executed = true;
+    result->message[0] = '\0';
+    return result->status;
+}
+
 static void print_value(const TinyDBValue* value) {
     if (value->type == COL_TYPE_INT) {
         printf("%u\n", value->int_value);
@@ -180,16 +230,24 @@ static void print_wide_row_values(const TinyDBValue* values,
     printf(")\n");
 }
 
-static bool compound_matches(const WideCompoundContext* context,
+static bool predicates_match(const TinyDBGenericPredicate* predicates,
+                             uint32_t predicate_count,
                              const TinyDBValue* values) {
-    for (uint32_t i = 0u; i < context->predicate_count; i++) {
-        const TinyDBGenericPredicate* predicate = &context->predicates[i];
+    for (uint32_t i = 0u; i < predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &predicates[i];
         if (!tinydb_generic_predicate_matches(
                 predicate, &values[predicate->column_index])) {
             return false;
         }
     }
     return true;
+}
+
+static bool compound_matches(const WideCompoundContext* context,
+                             const TinyDBValue* values) {
+    return predicates_match(context->predicates,
+                            context->predicate_count,
+                            values);
 }
 
 static bool visit_compound_payload(const TableSchema* schema,
@@ -236,18 +294,20 @@ static void intersect_upper(uint32_t candidate, uint32_t* max_id) {
     if (candidate < *max_id) *max_id = candidate;
 }
 
-static bool derive_primary_bounds(const WideCompoundContext* context,
-                                  uint32_t* min_id,
-                                  uint32_t* max_id,
-                                  bool* has_bound,
-                                  bool* empty) {
+static bool derive_primary_bounds_from_predicates(
+    const TinyDBGenericPredicate* predicates,
+    uint32_t predicate_count,
+    uint32_t* min_id,
+    uint32_t* max_id,
+    bool* has_bound,
+    bool* empty) {
     *min_id = 0u;
     *max_id = UINT32_MAX;
     *has_bound = false;
     *empty = false;
 
-    for (uint32_t i = 0u; i < context->predicate_count; i++) {
-        const TinyDBGenericPredicate* predicate = &context->predicates[i];
+    for (uint32_t i = 0u; i < predicate_count; i++) {
+        const TinyDBGenericPredicate* predicate = &predicates[i];
         if (predicate->column_index != 0u ||
             predicate->value.type != COL_TYPE_INT) {
             continue;
@@ -293,6 +353,500 @@ static bool derive_primary_bounds(const WideCompoundContext* context,
     return true;
 }
 
+static bool derive_primary_bounds(const WideCompoundContext* context,
+                                  uint32_t* min_id,
+                                  uint32_t* max_id,
+                                  bool* has_bound,
+                                  bool* empty) {
+    return derive_primary_bounds_from_predicates(context->predicates,
+                                                 context->predicate_count,
+                                                 min_id,
+                                                 max_id,
+                                                 has_bound,
+                                                 empty);
+}
+
+static bool parse_predicate_list(TinyDBGenericParser* parser,
+                                 const TableSchema* schema,
+                                 TinyDBGenericPredicate* predicates,
+                                 uint32_t* predicate_count) {
+    *predicate_count = 0u;
+    if (!tinydb_generic_parse_predicate(parser, schema, &predicates[0])) {
+        return false;
+    }
+    *predicate_count = 1u;
+    while (tinydb_generic_consume_word(parser, "and")) {
+        if (*predicate_count >= MAX_COLUMNS_PER_TABLE ||
+            !tinydb_generic_parse_predicate(
+                parser, schema, &predicates[*predicate_count])) {
+            return false;
+        }
+        (*predicate_count)++;
+    }
+    return true;
+}
+
+static bool predicates_require_wide_route(
+    const TinyDBGenericPredicate* predicates,
+    uint32_t predicate_count) {
+    return predicate_count > 1u ||
+           (predicate_count == 1u &&
+            predicates[0].op != TINYDB_GENERIC_COMPARE_EQ);
+}
+
+static bool has_primary_equality(const TinyDBGenericPredicate* predicates,
+                                 uint32_t predicate_count) {
+    for (uint32_t i = 0u; i < predicate_count; i++) {
+        if (predicates[i].column_index == 0u &&
+            predicates[i].op == TINYDB_GENERIC_COMPARE_EQ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool append_mutation_id(WideMutationCollector* collector,
+                               uint32_t id) {
+    if (collector->count == collector->capacity) {
+        uint32_t new_capacity = collector->capacity == 0u
+            ? 16u
+            : collector->capacity * 2u;
+        if (new_capacity <= collector->capacity) {
+            collector->allocation_failed = true;
+            return false;
+        }
+#if SIZE_MAX < UINT32_MAX
+        if ((size_t)new_capacity > SIZE_MAX / sizeof(uint32_t)) {
+            collector->allocation_failed = true;
+            return false;
+        }
+#endif
+        uint32_t* grown = (uint32_t*)realloc(
+            collector->ids, (size_t)new_capacity * sizeof(uint32_t));
+        if (grown == NULL) {
+            collector->allocation_failed = true;
+            return false;
+        }
+        collector->ids = grown;
+        collector->capacity = new_capacity;
+    }
+    collector->ids[collector->count++] = id;
+    return true;
+}
+
+static bool visit_mutation_payload(const TableSchema* schema,
+                                   const TinyDBRecordPayload* payload,
+                                   void* raw_context) {
+    WideMutationCollector* collector = (WideMutationCollector*)raw_context;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    uint32_t value_count = 0u;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_payload_decode_values(schema,
+                                             payload,
+                                             values,
+                                             MAX_COLUMNS_PER_TABLE,
+                                             &value_count,
+                                             message,
+                                             sizeof(message)) ||
+        value_count != schema->num_columns ||
+        schema->columns[0].type != COL_TYPE_INT) {
+        collector->decode_failed = true;
+        return false;
+    }
+    if (!predicates_match(collector->predicates,
+                          collector->predicate_count,
+                          values)) {
+        return true;
+    }
+    return append_mutation_id(collector, values[0].int_value);
+}
+
+static bool collect_mutation_ids(Table* table,
+                                 const TableSchema* schema,
+                                 const TinyDBGenericPredicate* predicates,
+                                 uint32_t predicate_count,
+                                 WideMutationCollector* collector,
+                                 char* message,
+                                 size_t message_size) {
+    memset(collector, 0, sizeof(*collector));
+    collector->schema = schema;
+    collector->predicate_count = predicate_count;
+    memcpy(collector->predicates,
+           predicates,
+           (size_t)predicate_count * sizeof(predicates[0]));
+
+    uint32_t min_id = 0u;
+    uint32_t max_id = UINT32_MAX;
+    bool has_primary_bound = false;
+    bool empty = false;
+    if (!derive_primary_bounds_from_predicates(predicates,
+                                               predicate_count,
+                                               &min_id,
+                                               &max_id,
+                                               &has_primary_bound,
+                                               &empty)) {
+        snprintf(message,
+                 message_size,
+                 "%s",
+                 "unable to derive wide mutation primary-key bounds");
+        return false;
+    }
+    if (empty) return true;
+
+    bool scan_complete = false;
+    if (has_primary_bound) {
+        (void)tinydb_record_payload_scan_range(table,
+                                               schema,
+                                               min_id,
+                                               max_id,
+                                               visit_mutation_payload,
+                                               collector,
+                                               &scan_complete,
+                                               message,
+                                               message_size);
+    } else {
+        (void)tinydb_record_payload_scan(table,
+                                        schema,
+                                        visit_mutation_payload,
+                                        collector,
+                                        &scan_complete,
+                                        message,
+                                        message_size);
+    }
+    return scan_complete && !collector->allocation_failed &&
+           !collector->decode_failed;
+}
+
+static bool begin_statement_transaction(Table* table) {
+    if (table->in_transaction) return false;
+    pager_begin_transaction(table->pager);
+    table->in_transaction = true;
+    return true;
+}
+
+static void finish_statement_transaction(Table* table,
+                                         bool started,
+                                         bool success) {
+    if (!started) return;
+    if (success) {
+        pager_commit(table->pager);
+    } else {
+        pager_rollback(table->pager);
+    }
+    table->in_transaction = false;
+}
+
+static bool parse_update_assignments(
+    TinyDBGenericParser* parser,
+    const TableSchema* schema,
+    WideMutationAssignment* assignments,
+    uint32_t* assignment_count) {
+    *assignment_count = 0u;
+    while (*assignment_count < MAX_COLUMNS_PER_TABLE) {
+        char column_name[MAX_NAME_SIZE];
+        if (!tinydb_generic_parse_identifier(parser,
+                                             column_name,
+                                             sizeof(column_name))) {
+            return false;
+        }
+        int column_index = tinydb_generic_find_column_index(schema, column_name);
+        if (column_index <= 0 || !tinydb_generic_consume_char(parser, '=')) {
+            return false;
+        }
+        WideMutationAssignment* assignment = &assignments[*assignment_count];
+        assignment->column_index = (uint32_t)column_index;
+        if (!tinydb_generic_parse_value_for_column(
+                parser,
+                &schema->columns[column_index],
+                &assignment->value)) {
+            return false;
+        }
+        (*assignment_count)++;
+        if (tinydb_generic_consume_word(parser, "where")) return true;
+        if (!tinydb_generic_consume_char(parser, ',')) return false;
+    }
+    return false;
+}
+
+static TinyDBGenericSqlStatus try_wide_predicate_update(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSqlResult* result,
+    bool* applicable) {
+    *applicable = false;
+    TinyDBGenericParser parser;
+    tinydb_generic_parser_init(&parser, sql);
+    if (!tinydb_generic_consume_word(&parser, "update")) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+
+    char table_name[MAX_NAME_SIZE];
+    if (!tinydb_generic_parse_identifier(&parser,
+                                         table_name,
+                                         sizeof(table_name))) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+    TableSchema* schema = find_schema(table, table_name);
+    if (!wide_schema_owned(schema) ||
+        !tinydb_generic_consume_word(&parser, "set")) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+
+    WideMutationAssignment assignments[MAX_COLUMNS_PER_TABLE];
+    uint32_t assignment_count = 0u;
+    if (!parse_update_assignments(&parser,
+                                  schema,
+                                  assignments,
+                                  &assignment_count) ||
+        assignment_count == 0u) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+
+    TinyDBGenericPredicate predicates[MAX_COLUMNS_PER_TABLE];
+    uint32_t predicate_count = 0u;
+    if (!parse_predicate_list(&parser,
+                              schema,
+                              predicates,
+                              &predicate_count)) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+    if (!predicates_require_wide_route(predicates, predicate_count)) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+    *applicable = true;
+
+    if (!tinydb_generic_consume_end(&parser)) {
+        return mutation_error(
+            result,
+            STATEMENT_UPDATE,
+            TINYDB_GENERIC_SQL_SYNTAX_ERROR,
+            EXECUTE_SUCCESS,
+            "wide UPDATE contains an unsupported clause after its predicates");
+    }
+
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    message[0] = '\0';
+    if (!tinydb_record_payload_schema_supported(schema,
+                                                message,
+                                                sizeof(message))) {
+        return mutation_error(result,
+                              STATEMENT_UPDATE,
+                              TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+                              EXECUTE_SUCCESS,
+                              message);
+    }
+
+    WideMutationCollector collector;
+    if (!collect_mutation_ids(table,
+                              schema,
+                              predicates,
+                              predicate_count,
+                              &collector,
+                              message,
+                              sizeof(message))) {
+        free(collector.ids);
+        return mutation_error(
+            result,
+            STATEMENT_UPDATE,
+            TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+            EXECUTE_SUCCESS,
+            message[0] != '\0'
+                ? message
+                : "unable to collect schema-sized UPDATE predicate targets");
+    }
+    if (has_primary_equality(predicates, predicate_count) &&
+        collector.count == 0u) {
+        free(collector.ids);
+        return mutation_error(result,
+                              STATEMENT_UPDATE,
+                              TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+                              EXECUTE_KEY_NOT_FOUND,
+                              "primary key not found");
+    }
+    if (collector.count == 0u) {
+        free(collector.ids);
+        return mutation_success(result, STATEMENT_UPDATE);
+    }
+
+    bool started = begin_statement_transaction(table);
+    bool success = true;
+    message[0] = '\0';
+    for (uint32_t i = 0u; i < collector.count; i++) {
+        uint32_t id = collector.ids[i];
+        TinyDBRecordPayload existing;
+        TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+        uint32_t value_count = 0u;
+        if (!tinydb_record_payload_find(table,
+                                        schema,
+                                        id,
+                                        &existing,
+                                        message,
+                                        sizeof(message)) ||
+            !tinydb_record_payload_decode_values(schema,
+                                                 &existing,
+                                                 values,
+                                                 MAX_COLUMNS_PER_TABLE,
+                                                 &value_count,
+                                                 message,
+                                                 sizeof(message)) ||
+            value_count != schema->num_columns) {
+            success = false;
+            break;
+        }
+        for (uint32_t j = 0u; j < assignment_count; j++) {
+            values[assignments[j].column_index] = assignments[j].value;
+        }
+        TinyDBRecordPayload replacement;
+        if (!tinydb_record_payload_encode_values(schema,
+                                                 values,
+                                                 value_count,
+                                                 &replacement,
+                                                 message,
+                                                 sizeof(message)) ||
+            !tinydb_record_payload_update(table,
+                                          schema,
+                                          id,
+                                          &replacement,
+                                          message,
+                                          sizeof(message))) {
+            success = false;
+            break;
+        }
+    }
+    finish_statement_transaction(table, started, success);
+    free(collector.ids);
+
+    if (!success) {
+        return mutation_error(
+            result,
+            STATEMENT_UPDATE,
+            TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+            EXECUTE_SUCCESS,
+            message[0] != '\0'
+                ? message
+                : "schema-sized predicate UPDATE failed");
+    }
+    return mutation_success(result, STATEMENT_UPDATE);
+}
+
+static TinyDBGenericSqlStatus try_wide_predicate_delete(
+    Table* table,
+    const char* sql,
+    TinyDBGenericSqlResult* result,
+    bool* applicable) {
+    *applicable = false;
+    TinyDBGenericParser parser;
+    tinydb_generic_parser_init(&parser, sql);
+    if (!tinydb_generic_consume_word(&parser, "delete") ||
+        !tinydb_generic_consume_word(&parser, "from")) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+
+    char table_name[MAX_NAME_SIZE];
+    if (!tinydb_generic_parse_identifier(&parser,
+                                         table_name,
+                                         sizeof(table_name))) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+    TableSchema* schema = find_schema(table, table_name);
+    if (!wide_schema_owned(schema) ||
+        !tinydb_generic_consume_word(&parser, "where")) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+
+    TinyDBGenericPredicate predicates[MAX_COLUMNS_PER_TABLE];
+    uint32_t predicate_count = 0u;
+    if (!parse_predicate_list(&parser,
+                              schema,
+                              predicates,
+                              &predicate_count) ||
+        !predicates_require_wide_route(predicates, predicate_count)) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
+    *applicable = true;
+
+    if (!tinydb_generic_consume_end(&parser)) {
+        return mutation_error(
+            result,
+            STATEMENT_DELETE,
+            TINYDB_GENERIC_SQL_SYNTAX_ERROR,
+            EXECUTE_SUCCESS,
+            "wide DELETE contains an unsupported clause after its predicates");
+    }
+
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    message[0] = '\0';
+    if (!tinydb_record_payload_schema_supported(schema,
+                                                message,
+                                                sizeof(message))) {
+        return mutation_error(result,
+                              STATEMENT_DELETE,
+                              TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+                              EXECUTE_SUCCESS,
+                              message);
+    }
+
+    WideMutationCollector collector;
+    if (!collect_mutation_ids(table,
+                              schema,
+                              predicates,
+                              predicate_count,
+                              &collector,
+                              message,
+                              sizeof(message))) {
+        free(collector.ids);
+        return mutation_error(
+            result,
+            STATEMENT_DELETE,
+            TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+            EXECUTE_SUCCESS,
+            message[0] != '\0'
+                ? message
+                : "unable to collect schema-sized DELETE predicate targets");
+    }
+    if (has_primary_equality(predicates, predicate_count) &&
+        collector.count == 0u) {
+        free(collector.ids);
+        return mutation_error(result,
+                              STATEMENT_DELETE,
+                              TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+                              EXECUTE_KEY_NOT_FOUND,
+                              "primary key not found");
+    }
+    if (collector.count == 0u) {
+        free(collector.ids);
+        return mutation_success(result, STATEMENT_DELETE);
+    }
+
+    bool started = begin_statement_transaction(table);
+    bool success = true;
+    message[0] = '\0';
+    for (uint32_t i = 0u; i < collector.count; i++) {
+        if (!tinydb_record_payload_delete(table,
+                                          schema,
+                                          collector.ids[i],
+                                          message,
+                                          sizeof(message))) {
+            success = false;
+            break;
+        }
+    }
+    finish_statement_transaction(table, started, success);
+    free(collector.ids);
+
+    if (!success) {
+        return mutation_error(
+            result,
+            STATEMENT_DELETE,
+            TINYDB_GENERIC_SQL_EXECUTE_ERROR,
+            EXECUTE_SUCCESS,
+            message[0] != '\0'
+                ? message
+                : "schema-sized predicate DELETE failed");
+    }
+    return mutation_success(result, STATEMENT_DELETE);
+}
+
 static TinyDBGenericSqlStatus try_wide_compound_select(
     Table* table,
     const char* sql,
@@ -322,8 +876,7 @@ static TinyDBGenericSqlStatus try_wide_compound_select(
         return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
     }
     TableSchema* schema = find_schema(table, table_name);
-    if (schema == NULL || schema->row_size <= ROW_SIZE ||
-        legacy_fixed_row_shape(schema) ||
+    if (!wide_schema_owned(schema) ||
         !tinydb_generic_consume_word(&parser, "where")) {
         return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
     }
@@ -469,8 +1022,7 @@ static bool is_wide_single_range_select(Table* table, const char* sql) {
         return false;
     }
     TableSchema* schema = find_schema(table, table_name);
-    if (schema == NULL || schema->row_size <= ROW_SIZE ||
-        legacy_fixed_row_shape(schema) ||
+    if (!wide_schema_owned(schema) ||
         !tinydb_generic_consume_word(&parser, "where")) {
         return false;
     }
@@ -496,6 +1048,24 @@ TinyDBGenericSqlStatus tinydb_generic_sql_try_execute(
     initialize_result(output);
 
     if (table != NULL && sql != NULL) {
+        bool update_applicable = false;
+        TinyDBGenericSqlStatus update_status =
+            try_wide_predicate_update(table,
+                                      sql,
+                                      output,
+                                      &update_applicable);
+        if (update_applicable) return update_status;
+
+        initialize_result(output);
+        bool delete_applicable = false;
+        TinyDBGenericSqlStatus delete_status =
+            try_wide_predicate_delete(table,
+                                      sql,
+                                      output,
+                                      &delete_applicable);
+        if (delete_applicable) return delete_status;
+
+        initialize_result(output);
         bool compound_applicable = false;
         TinyDBGenericSqlStatus compound_status =
             try_wide_compound_select(table,
