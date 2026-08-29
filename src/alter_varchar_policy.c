@@ -2,6 +2,7 @@
 #include "engine.h"
 #include "multitable.h"
 #include "record.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -69,6 +70,21 @@ static TinyDBSqlStatus fail_result(TinyDBSqlResult* result,
     return status;
 }
 
+static bool wide_table_is_provably_empty(Table* table,
+                                         const TableSchema* schema,
+                                         char* message,
+                                         size_t message_size) {
+    bool scan_complete = false;
+    uint32_t row_count = tinydb_record_payload_scan(table,
+                                                    schema,
+                                                    NULL,
+                                                    NULL,
+                                                    &scan_complete,
+                                                    message,
+                                                    message_size);
+    return scan_complete && row_count == 0u;
+}
+
 TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     TinyDB* database,
     const char* sql,
@@ -112,28 +128,41 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
             "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented");
     }
 
-    /*
-     * Schema-sized payload rows are self-describing only through the catalog
-     * schema: the on-page payload itself does not carry a historical column
-     * layout. Updating catalog offsets without rewriting every existing row
-     * would therefore make old payloads decode under the new, larger layout.
-     * Keep ALTER fail-closed until ADD COLUMN owns an atomic row backfill / V2
-     * rewrite path. Narrow generic rows retain the proven fixed-carrier policy
-     * below.
-     */
-    if (target->row_size > ROW_SIZE) {
+    if (target->row_size > TINYDB_RECORD_PAYLOAD_MAX ||
+        type.storage_size > TINYDB_RECORD_PAYLOAD_MAX - target->row_size) {
         return fail_result(
             result,
             TINYDB_SQL_POLICY_ERROR,
-            "ALTER TABLE ADD COLUMN is disabled for schema-sized payload tables until physical row migration is implemented");
+            "ALTER TABLE ADD COLUMN would exceed the schema-sized payload limit");
+    }
+
+    /*
+     * Existing schema-sized payload rows depend on the catalog for their
+     * physical offsets. Changing those offsets without rewriting every row
+     * would decode old payloads under the new layout, so non-empty wide tables
+     * remain fail-closed. An empty wide table has no physical row images to
+     * migrate: prove emptiness with the payload-native, corruption-aware scan
+     * before permitting a metadata-only ADD COLUMN. Any incomplete scan is
+     * deliberately treated the same as a non-empty table.
+     */
+    if (target->row_size > ROW_SIZE) {
+        char scan_message[TINYDB_RECORD_MESSAGE_MAX];
+        if (!wide_table_is_provably_empty(table,
+                                          target,
+                                          scan_message,
+                                          sizeof(scan_message))) {
+            return fail_result(
+                result,
+                TINYDB_SQL_POLICY_ERROR,
+                "ALTER TABLE ADD COLUMN is disabled for non-empty schema-sized payload tables until physical row migration is implemented");
+        }
     }
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
     bool executable_generic = tinydb_schema_supports_records(
         target, schema_message, sizeof(schema_message));
-    if (executable_generic &&
-        (target->row_size > ROW_SIZE ||
-         type.storage_size > ROW_SIZE - target->row_size)) {
+    if (executable_generic && target->row_size <= ROW_SIZE &&
+        type.storage_size > ROW_SIZE - target->row_size) {
         return fail_result(
             result,
             TINYDB_SQL_POLICY_ERROR,
