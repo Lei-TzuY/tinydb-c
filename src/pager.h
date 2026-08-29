@@ -90,6 +90,21 @@ typedef struct {
     uint32_t savepoint_count;
 } Pager;
 
+typedef enum {
+    PAGER_PAGE_LOCK_NONE = 0,
+    PAGER_PAGE_LOCK_READ,
+    PAGER_PAGE_LOCK_WRITE
+} PagerPageLockMode;
+
+typedef struct {
+    Pager* pager;
+    uint32_t page_num;
+    int frame_idx;
+    void* data;
+    bool pinned;
+    PagerPageLockMode lock_mode;
+} PagerPageHandle;
+
 Pager* pager_open(const char* filename);
 void pager_close(Pager* pager);
 void* get_page(Pager* pager, uint32_t page_num);
@@ -110,6 +125,121 @@ void pager_checkpoint(Pager* pager);
 bool pager_savepoint(Pager* pager, const char* name);
 bool pager_rollback_to_savepoint(Pager* pager, const char* name);
 bool pager_release_savepoint(Pager* pager, const char* name);
+
+/*
+ * Stable pinned-page handles for callers that retain a page pointer across
+ * other Pager activity. get_page() alone returns an unpinned frame pointer;
+ * the frame may be recycled by a later cache miss. This handle revalidates the
+ * page/frame identity while holding pager_lock, then increments pin_count so
+ * lru_evict() must skip the frame until the handle is released.
+ */
+static inline bool pager_pin_page_handle(Pager* pager,
+                                         uint32_t page_num,
+                                         PagerPageHandle* handle) {
+    if (handle == NULL) return false;
+    memset(handle, 0, sizeof(*handle));
+    handle->page_num = INVALID_PAGE_NUM;
+    handle->frame_idx = -1;
+    if (pager == NULL || page_num == INVALID_PAGE_NUM) return false;
+
+    for (uint32_t attempt = 0u; attempt < 64u; attempt++) {
+        void* data = get_page(pager, page_num);
+
+        db_rwlock_wrlock(&pager->pager_lock);
+        int frame_idx = page_num < pager->page_capacity
+            ? pager->page_table[page_num]
+            : -1;
+        if (frame_idx >= 0 && frame_idx < MAX_BUFFER_POOL_SIZE &&
+            pager->frames[frame_idx].page_num == page_num &&
+            pager->frames[frame_idx].data == data &&
+            pager->frames[frame_idx].pin_count != UINT32_MAX) {
+            pager->frames[frame_idx].pin_count++;
+            handle->pager = pager;
+            handle->page_num = page_num;
+            handle->frame_idx = frame_idx;
+            handle->data = data;
+            handle->pinned = true;
+            handle->lock_mode = PAGER_PAGE_LOCK_NONE;
+            db_rwlock_wrunlock(&pager->pager_lock);
+            return true;
+        }
+        db_rwlock_wrunlock(&pager->pager_lock);
+    }
+    return false;
+}
+
+static inline bool pager_release_page_handle(PagerPageHandle* handle) {
+    if (handle == NULL || !handle->pinned || handle->pager == NULL ||
+        handle->lock_mode != PAGER_PAGE_LOCK_NONE) {
+        return false;
+    }
+
+    Pager* pager = handle->pager;
+    bool released = false;
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (handle->frame_idx >= 0 &&
+        handle->frame_idx < MAX_BUFFER_POOL_SIZE &&
+        pager->frames[handle->frame_idx].page_num == handle->page_num &&
+        pager->frames[handle->frame_idx].data == handle->data &&
+        pager->frames[handle->frame_idx].pin_count > 0u) {
+        pager->frames[handle->frame_idx].pin_count--;
+        released = true;
+    }
+    db_rwlock_wrunlock(&pager->pager_lock);
+
+    if (released) {
+        handle->pager = NULL;
+        handle->page_num = INVALID_PAGE_NUM;
+        handle->frame_idx = -1;
+        handle->data = NULL;
+        handle->pinned = false;
+    }
+    return released;
+}
+
+static inline bool pager_page_handle_acquire_read(PagerPageHandle* handle) {
+    if (handle == NULL || !handle->pinned || handle->pager == NULL ||
+        handle->lock_mode != PAGER_PAGE_LOCK_NONE ||
+        handle->frame_idx < 0 || handle->frame_idx >= MAX_BUFFER_POOL_SIZE) {
+        return false;
+    }
+    db_rwlock_rdlock(&handle->pager->frames[handle->frame_idx].rwlock);
+    handle->lock_mode = PAGER_PAGE_LOCK_READ;
+    return true;
+}
+
+static inline bool pager_page_handle_release_read(PagerPageHandle* handle) {
+    if (handle == NULL || !handle->pinned || handle->pager == NULL ||
+        handle->lock_mode != PAGER_PAGE_LOCK_READ ||
+        handle->frame_idx < 0 || handle->frame_idx >= MAX_BUFFER_POOL_SIZE) {
+        return false;
+    }
+    db_rwlock_rdunlock(&handle->pager->frames[handle->frame_idx].rwlock);
+    handle->lock_mode = PAGER_PAGE_LOCK_NONE;
+    return true;
+}
+
+static inline bool pager_page_handle_acquire_write(PagerPageHandle* handle) {
+    if (handle == NULL || !handle->pinned || handle->pager == NULL ||
+        handle->lock_mode != PAGER_PAGE_LOCK_NONE ||
+        handle->frame_idx < 0 || handle->frame_idx >= MAX_BUFFER_POOL_SIZE) {
+        return false;
+    }
+    db_rwlock_wrlock(&handle->pager->frames[handle->frame_idx].rwlock);
+    handle->lock_mode = PAGER_PAGE_LOCK_WRITE;
+    return true;
+}
+
+static inline bool pager_page_handle_release_write(PagerPageHandle* handle) {
+    if (handle == NULL || !handle->pinned || handle->pager == NULL ||
+        handle->lock_mode != PAGER_PAGE_LOCK_WRITE ||
+        handle->frame_idx < 0 || handle->frame_idx >= MAX_BUFFER_POOL_SIZE) {
+        return false;
+    }
+    db_rwlock_wrunlock(&handle->pager->frames[handle->frame_idx].rwlock);
+    handle->lock_mode = PAGER_PAGE_LOCK_NONE;
+    return true;
+}
 
 /*
  * Lightweight page-state API for staged mutation helpers.
@@ -144,7 +274,11 @@ static inline void pager_restore_page_dirty_state(Pager* pager,
     db_rwlock_wrunlock(&pager->pager_lock);
 }
 
-/* Multi-threaded Page RW Lock API */
+/*
+ * Legacy page-number lock API. New code that retains page pointers across
+ * cache activity should prefer PagerPageHandle so the frame is pinned for the
+ * entire lock lifetime.
+ */
 void pager_acquire_read_lock(Pager* pager, uint32_t page_num);
 void pager_release_read_lock(Pager* pager, uint32_t page_num);
 void pager_acquire_write_lock(Pager* pager, uint32_t page_num);
