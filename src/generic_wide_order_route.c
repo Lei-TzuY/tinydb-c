@@ -166,8 +166,6 @@ static WideOrderParseStatus parse_wide_order(Table* table,
                          "%s",
                          "wide ORDER BY currently supports * or a single column projection, not COUNT(*)");
             }
-            /* Keep parsing far enough to distinguish a real ORDER BY query
-             * from an ordinary aggregate that belongs to the existing route. */
             snprintf(projection, sizeof(projection), "%s", "__count__");
         } else {
             parser = count_backup;
@@ -197,7 +195,6 @@ static WideOrderParseStatus parse_wide_order(Table* table,
     if (projection_star) {
         select->projection_kind = WIDE_ORDER_PROJECTION_STAR;
     } else if (strcmp(projection, "__count__") == 0) {
-        /* Delay the syntax error until ORDER BY itself is confirmed below. */
         select->projection_kind = WIDE_ORDER_PROJECTION_STAR;
     } else {
         int projection_index =
@@ -341,7 +338,7 @@ static int compare_uint32(const void* left, const void* right) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
-static void print_value(const TinyDBValue* value) {
+static void wide_order_print_value(const TinyDBValue* value) {
     if (value->type == COL_TYPE_INT) {
         printf("%u\n", value->int_value);
     } else {
@@ -349,7 +346,8 @@ static void print_value(const TinyDBValue* value) {
     }
 }
 
-static void print_row(const TinyDBValue* values, uint32_t value_count) {
+static void wide_order_print_row(const TinyDBValue* values,
+                                 uint32_t value_count) {
     printf("(");
     for (uint32_t i = 0u; i < value_count; i++) {
         if (i > 0u) printf(", ");
@@ -388,9 +386,9 @@ static bool emit_id(Table* table,
     }
 
     if (select->projection_kind == WIDE_ORDER_PROJECTION_COLUMN) {
-        print_value(&values[select->projection_column_index]);
+        wide_order_print_value(&values[select->projection_column_index]);
     } else {
-        print_row(values, value_count);
+        wide_order_print_row(values, value_count);
     }
     return true;
 }
