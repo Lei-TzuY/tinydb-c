@@ -74,12 +74,8 @@ def main() -> None:
             "an all-full chain must explicitly request stable-root growth")
     require("chain->internal_pages[chain->count - 1u] != schema->root_page_num" in ANCESTRY[planner:],
             "root-growth classification must still prove that the detached chain terminates at the catalog root")
-
-    wrapper = ANCESTRY.index("tinydb_record_payload_validate_ancestor_chain")
-    wrapper_collect = ANCESTRY.index("tinydb_record_payload_collect_ancestor_chain", wrapper)
-    wrapper_release = ANCESTRY.index("tinydb_record_payload_ancestor_chain_release", wrapper_collect)
-    require(wrapper < wrapper_collect < wrapper_release,
-            "validation-only callers must reuse collection and release the detached chain")
+    require("tinydb_record_payload_validate_ancestor_chain" not in ANCESTRY,
+            "the obsolete validation-only static wrapper must not remain after the router consumes collected ancestry directly")
 
 
 if __name__ == "__main__":
