@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define DEEP_BATCH_PAGES 12u
+
 static int page_equals(const unsigned char* page,
                        unsigned char value,
                        unsigned char checksum_value) {
@@ -13,6 +15,68 @@ static int page_equals(const unsigned char* page,
         if (page[i] != checksum_value) return 0;
     }
     return 1;
+}
+
+static int exercise_deep_batch(void) {
+    unsigned char pages[DEEP_BATCH_PAGES][PAGE_SIZE];
+    unsigned char staged[DEEP_BATCH_PAGES][PAGE_SIZE];
+    TinyDBV2PublishEntry entries[DEEP_BATCH_PAGES];
+
+    if (TINYDB_V2_PUBLISH_BATCH_MAX_PAGES < DEEP_BATCH_PAGES) {
+        fprintf(stderr, "publish batch capacity does not cover deep cascade\n");
+        return 10;
+    }
+
+    for (uint32_t i = 0u; i < DEEP_BATCH_PAGES; i++) {
+        unsigned char before_value = (unsigned char)(0x20u + i);
+        unsigned char staged_value = (unsigned char)(0x60u + i);
+        unsigned char checksum_value = (unsigned char)(0xD0u + i);
+        memset(pages[i], before_value, PAGE_USABLE_SIZE);
+        memset(pages[i] + PAGE_USABLE_SIZE,
+               checksum_value,
+               PAGE_CHECKSUM_SIZE);
+        memset(staged[i], staged_value, PAGE_SIZE);
+        entries[i].page_num = 100u + i;
+        entries[i].target = pages[i];
+        entries[i].staged = staged[i];
+    }
+
+    if (tinydb_v2_publish_batch(entries, DEEP_BATCH_PAGES, 9u)) {
+        fprintf(stderr, "deep injected publication unexpectedly succeeded\n");
+        return 11;
+    }
+    for (uint32_t i = 0u; i < DEEP_BATCH_PAGES; i++) {
+        if (!page_equals(pages[i],
+                         (unsigned char)(0x20u + i),
+                         (unsigned char)(0xD0u + i))) {
+            fprintf(stderr, "deep rollback did not restore page %u\n", i);
+            return 12;
+        }
+    }
+
+    if (!tinydb_v2_publish_batch(entries,
+                                 DEEP_BATCH_PAGES,
+                                 TINYDB_V2_PUBLISH_NO_FAIL)) {
+        fprintf(stderr, "deep atomic publication failed\n");
+        return 13;
+    }
+    for (uint32_t i = 0u; i < DEEP_BATCH_PAGES; i++) {
+        if (!page_equals(pages[i],
+                         (unsigned char)(0x60u + i),
+                         (unsigned char)(0xD0u + i))) {
+            fprintf(stderr, "deep publication mismatch on page %u\n", i);
+            return 14;
+        }
+    }
+
+    if (tinydb_v2_publish_batch(entries,
+                                TINYDB_V2_PUBLISH_BATCH_MAX_PAGES + 1u,
+                                TINYDB_V2_PUBLISH_NO_FAIL)) {
+        fprintf(stderr, "oversized publication batch was accepted\n");
+        return 15;
+    }
+
+    return 0;
 }
 
 int main(void) {
@@ -112,7 +176,11 @@ int main(void) {
         return 9;
     }
 
+    int deep_result = exercise_deep_batch();
+    if (deep_result != 0) return deep_result;
+
     printf("SLOTTED_V2_PUBLISH_BATCH_OK atomic=yes rollback=yes "
-           "checksum_isolated=yes duplicate_guard=yes root0=yes\n");
+           "checksum_isolated=yes duplicate_guard=yes root0=yes "
+           "deep_batch=yes capacity_guard=yes\n");
     return 0;
 }
