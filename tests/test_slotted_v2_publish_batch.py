@@ -82,7 +82,9 @@ def main():
             "root0=yes",
             "deep_batch=yes",
             "beyond_legacy_limit=yes",
+            "beyond_previous_limit=yes",
             "capacity_guard=yes",
+            "budget_guard=yes",
         ):
             if marker not in output:
                 raise AssertionError(f"missing {marker}\n{output}")
@@ -90,9 +92,9 @@ def main():
     print(
         "PASS: staged slotted V2 page batches prevalidate topology identities, "
         "restore every caller page after deterministic partial publication, "
-        "support page-zero roots and 20-page recursive publication batches, "
-        "roll back after crossing the former 16-page ceiling, reject oversized "
-        "batches, and leave checksum trailers untouched"
+        "support page-zero roots and 64-page recursive publication batches, "
+        "roll back after crossing the former 32-page ceiling, enforce a "
+        "configurable rollback-byte budget, and leave checksum trailers untouched"
     )
 
 
