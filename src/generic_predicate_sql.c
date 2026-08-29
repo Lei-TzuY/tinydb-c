@@ -364,6 +364,12 @@ static TinyDBGenericSqlStatus execute_predicate_select(
     if (schema == NULL || is_legacy_fixed_row_schema(schema)) {
         return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
     }
+    /* Wide rows must not enter the TinyDBRecord predicate executor. Delegate
+     * them to the schema-sized range/equality wrappers further down the chain,
+     * which can preserve payload-native V2 storage without narrowing. */
+    if (schema->row_size > ROW_SIZE) {
+        return TINYDB_GENERIC_SQL_NOT_APPLICABLE;
+    }
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
     if (!tinydb_schema_supports_records(schema,
