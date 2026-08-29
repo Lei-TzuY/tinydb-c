@@ -28,6 +28,7 @@ set(TINYDB_CORE_SOURCES
     src/generic_wide_range_route.c
     src/generic_wide_or_route.c
     src/generic_wide_grouped_route.c
+    src/generic_wide_statement_atomicity.c
     src/generic_index_anchor_v2_sql.c
     src/generic_index_candidates.c
     src/generic_index_correlation.c
@@ -167,6 +168,11 @@ set_source_files_properties(
     src/generic_wide_or_route.c
     PROPERTIES COMPILE_DEFINITIONS
     "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_wide_or_base"
+)
+set_source_files_properties(
+    src/generic_wide_grouped_route.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "tinydb_generic_sql_try_execute=tinydb_generic_sql_try_execute_wide_grouped_base"
 )
 set_source_files_properties(
     src/generic_range_plan_sql.c
