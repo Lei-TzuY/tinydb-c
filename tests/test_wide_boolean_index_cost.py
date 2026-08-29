@@ -119,7 +119,7 @@ def main():
         require(first, "COST CHOICE: table scan cheaper than wide boolean candidate plan")
         require(first, "PLAN: GENERIC INDEX UNION")
         require(first, "ESTIMATED COST:")
-        require_scalars(first, [40, 4, 4])
+        require_scalars(first, [40, 4, 4, 1])
         require(first, "db > 1\nExecuted.")
         require(first, "ok")
 
