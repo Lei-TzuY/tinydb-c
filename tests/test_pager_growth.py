@@ -36,12 +36,14 @@ def main():
         assert 'buffer_pool=16' in result.stdout, result.stdout
         assert 'eviction_safe=yes' in result.stdout, result.stdout
         assert 'publish_rollback=yes' in result.stdout, result.stdout
+        assert 'preexisting_dirty_rollback=yes' in result.stdout, result.stdout
 
         # The probe writes pages 0..4128 inclusive, proving that the old
         # TABLE_MAX_PAGES boundary is no longer a Pager allocation limit. It
         # then publishes and rolls back 64 staged page images through a 16-frame
-        # LRU pool, proving recursive staged publication need not retain every
-        # target frame simultaneously.
+        # LRU pool. One target is already dirty and spilled before publication,
+        # so rollback must restore both its older transactional image and dirty
+        # state across a second eviction rather than resurrecting staged bytes.
         expected_pages = 4096 + 32 + 1
         assert os.path.getsize(db_path) == expected_pages * 4096
     finally:
