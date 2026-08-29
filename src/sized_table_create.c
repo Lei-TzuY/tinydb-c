@@ -128,10 +128,12 @@ bool table_create_table(Table* table,
         return false;
     }
 
+    const bool executable_generic =
+        recognized_all && ci_equal(col_names[0], "id") &&
+        types[0].type == COL_TYPE_INT &&
+        !legacy_column_names(num_cols, col_names);
     uint32_t validated_row_size = 0u;
-    if (recognized_all && has_explicit_width &&
-        ci_equal(col_names[0], "id") && types[0].type == COL_TYPE_INT &&
-        !legacy_column_names(num_cols, col_names)) {
+    if (executable_generic) {
         for (uint32_t i = 0; i < num_cols; i++) {
             if (validated_row_size > TINYDB_RECORD_PAYLOAD_MAX ||
                 types[i].storage_size >
@@ -156,24 +158,24 @@ bool table_create_table(Table* table,
         return false;
     }
 
-    if (!has_explicit_width) return true;
-
     TableSchema* schema = find_schema(table, name);
     if (schema == NULL) return false;
 
-    uint32_t offset = 0;
-    for (uint32_t i = 0; i < num_cols; i++) {
-        if (recognized_all || types[i].storage_size != 0u) {
-            schema->columns[i].type = types[i].type;
-            schema->columns[i].size = types[i].storage_size;
+    if (has_explicit_width) {
+        uint32_t offset = 0;
+        for (uint32_t i = 0; i < num_cols; i++) {
+            if (recognized_all || types[i].storage_size != 0u) {
+                schema->columns[i].type = types[i].type;
+                schema->columns[i].size = types[i].storage_size;
+            }
+            schema->columns[i].offset = offset;
+            offset += schema->columns[i].size;
         }
-        schema->columns[i].offset = offset;
-        offset += schema->columns[i].size;
+        schema->row_size = offset;
     }
-    schema->row_size = offset;
 
-    if (schema->row_size > ROW_SIZE) {
-        if (!recognized_all || validated_row_size != schema->row_size ||
+    if (executable_generic && schema->row_size > ROW_SIZE) {
+        if (validated_row_size != schema->row_size ||
             !initialize_wide_v2_root(table, schema)) {
             printf("Error: unable to initialize the schema-sized V2 table root.\n");
             return false;
