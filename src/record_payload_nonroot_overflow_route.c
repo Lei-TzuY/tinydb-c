@@ -4,6 +4,7 @@
 #include "record_payload_overflow_reservation.h"
 #include "record_payload_page_claim_plan.h"
 #include "record_payload_page_claim_transaction.h"
+#include "record_payload_recursive_overflow.h"
 #include "record_payload_root_internal_split.h"
 
 #include <stdio.h>
@@ -130,6 +131,32 @@ bool tinydb_record_payload_try_nonroot_split(
 
     if (nonroot_failure_is_recursive_capacity(nonroot_parent_applicable,
                                               nonroot_parent_message)) {
+        bool recursive_applicable = false;
+        char recursive_message[TINYDB_RECORD_MESSAGE_MAX];
+        recursive_message[0] = '\0';
+        if (tinydb_record_payload_try_two_level_recursive_overflow(
+                table,
+                schema,
+                key,
+                envelope,
+                envelope_length,
+                &recursive_applicable,
+                recursive_message,
+                sizeof(recursive_message))) {
+            if (applicable != NULL) *applicable = true;
+            if (message != NULL && message_size > 0u) message[0] = '\0';
+            return true;
+        }
+        if (recursive_applicable) {
+            if (applicable != NULL) *applicable = true;
+            set_message(message,
+                        message_size,
+                        recursive_message[0] != '\0'
+                            ? recursive_message
+                            : "payload-native two-level recursive overflow failed after matching the target topology");
+            return false;
+        }
+
         TinyDBPayloadAncestorChain chain;
         TinyDBPayloadOverflowPlan plan;
         TinyDBPayloadOverflowReservation reservation = {0};
