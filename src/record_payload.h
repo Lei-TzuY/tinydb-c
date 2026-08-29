@@ -82,15 +82,15 @@ uint32_t tinydb_record_payload_scan_range(Table* table,
  * paths include an empty/single root leaf, atomic root-leaf split, non-root
  * leaf split under a parent with space, one-level growth when that parent is
  * the full stable root (including root page zero), splitting a full non-root
- * parent into a non-full grandparent, and a bounded recursive cascade through
- * two consecutive full non-root internal ancestors into a non-full third
- * ancestor. Tail leaves may grow their global maximum; non-tail separators,
- * reciprocal sibling links, ancestor identity, allocator claims, and mutation
- * epoch ordering are validated before publication. Deeper recursive cascades
- * remain fail-closed until the atomic publication transaction is generalized
- * beyond the current eight-page batch; the live bounded recursive helper also
- * still retains a temporary guard when its stopping ancestor itself is root
- * page zero even though the underlying cascade staging primitive supports it. */
+ * parent into a non-full grandparent, and bounded recursive cascades through
+ * consecutive full non-root internal ancestors into an available ancestor.
+ * Tail leaves may grow their global maximum; non-tail separators, reciprocal
+ * sibling links, ancestor identity, allocator claims, and mutation epoch
+ * ordering are validated before publication. Stable root page zero is valid in
+ * the bounded recursive path, including the two- and three-full-level cases
+ * covered by live rollback/commit/reopen regressions. Recursive growth remains
+ * deliberately bounded by the current 16-page atomic publication capacity;
+ * topologies whose complete staged page set exceeds that limit fail closed. */
 bool tinydb_record_payload_insert(Table* table,
                                   const TableSchema* schema,
                                   const TinyDBRecordPayload* payload,
