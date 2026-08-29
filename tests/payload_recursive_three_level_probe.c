@@ -304,7 +304,7 @@ static bool seed_tree(Table* table,
         set_internal_cell(p1,
                           i,
                           parent1_dummies[i],
-                          (i + 1u) * 1500u);
+                          (i + 1u) * 100u);
     }
     write_u32(p1 + INTERNAL_NODE_RIGHT_CHILD_OFFSET, parent0);
     mark_page_dirty(pager, parent1);
@@ -315,7 +315,7 @@ static bool seed_tree(Table* table,
         set_internal_cell(p2,
                           i,
                           parent2_dummies[i],
-                          (i + 1u) * 1700u);
+                          (i + 1u) * 10u);
     }
     write_u32(p2 + INTERNAL_NODE_RIGHT_CHILD_OFFSET, parent1);
     mark_page_dirty(pager, parent2);
