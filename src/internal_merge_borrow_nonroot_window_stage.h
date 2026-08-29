@@ -64,7 +64,7 @@ static inline bool tinydb_nonroot_window_validate_ancestor_pair(
     }
     uint32_t keys = tinydb_parent_stage_read_u32(
         ancestor + INTERNAL_NODE_NUM_KEYS_OFFSET);
-    return keys >= 2u && pair_index < keys &&
+    return keys >= 1u && pair_index < keys &&
            tinydb_parent_stage_child_at(ancestor, pair_index) ==
                left_grand_page_num &&
            tinydb_parent_stage_child_at(ancestor, pair_index + 1u) ==
