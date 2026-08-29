@@ -143,8 +143,19 @@ static inline bool tinydb_stage_internal_split_cascade(
         memcpy(scratch_ancestors + (size_t)i * PAGE_SIZE,
                source,
                PAGE_SIZE);
-        if (ancestor_page_nums[i] == 0u ||
-            ancestor_page_nums[i] == INVALID_PAGE_NUM) {
+        /* Page zero is TinyDB's normal catalog-stable root identity. It is
+         * therefore valid only for the final ancestor when that image is the
+         * root internal node itself. Zero remains forbidden for all other
+         * ancestor identities and for newly allocated pages. */
+        bool page_zero_root = ancestor_page_nums[i] == 0u &&
+                              i + 1u == ancestor_count &&
+                              source[NODE_TYPE_OFFSET] ==
+                                  (unsigned char)NODE_INTERNAL &&
+                              source[IS_ROOT_OFFSET] != 0u &&
+                              tinydb_parent_stage_read_u32(
+                                  source + PARENT_POINTER_OFFSET) == 0u;
+        if (ancestor_page_nums[i] == INVALID_PAGE_NUM ||
+            (ancestor_page_nums[i] == 0u && !page_zero_root)) {
             free(scratch_ancestors);
             free(scratch_new);
             return false;
