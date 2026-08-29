@@ -436,12 +436,56 @@ static bool insert_non_split_slotted_v2(Table* table,
     return true;
 }
 
+static bool insert_schema_sized_payload(Table* table,
+                                        const TableSchema* schema,
+                                        const TinyDBValue* values,
+                                        uint32_t value_count,
+                                        char* message,
+                                        size_t message_size) {
+    if (table == NULL || schema == NULL) {
+        set_message(message,
+                    message_size,
+                    "table and schema are required before generic mutation");
+        return false;
+    }
+    if (schema->row_size <= ROW_SIZE) return false;
+
+    TinyDBRecordPayload payload;
+    if (!tinydb_record_payload_encode_values(schema,
+                                             values,
+                                             value_count,
+                                             &payload,
+                                             message,
+                                             message_size)) {
+        return false;
+    }
+    return tinydb_record_payload_insert(table,
+                                        schema,
+                                        &payload,
+                                        message,
+                                        message_size);
+}
+
 bool tinydb_record_insert(Table* table,
                           const TableSchema* schema,
                           const TinyDBValue* values,
                           uint32_t value_count,
                           char* message,
                           size_t message_size) {
+    /* The legacy TinyDBRecord carrier remains exactly ROW_SIZE bytes. Do not
+     * make wide generic SQL rows detour through that compatibility object:
+     * encode their declared schema layout directly into a sized payload and
+     * hand it to the payload-native V2 INSERT path. Narrow schemas retain the
+     * established V1/mixed-leaf routing below. */
+    if (schema != NULL && schema->row_size > ROW_SIZE) {
+        return insert_schema_sized_payload(table,
+                                           schema,
+                                           values,
+                                           value_count,
+                                           message,
+                                           message_size);
+    }
+
     char policy_message[TINYDB_RECORD_MESSAGE_MAX];
     if (mutation_tree_is_fixed_v1(table,
                                   schema,
