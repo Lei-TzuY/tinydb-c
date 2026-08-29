@@ -360,14 +360,30 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
         return false;
     }
 
-    uint32_t publish_count = 2u + (is_tail ? 0u : 1u) +
-                             participating_ancestors +
-                             reservation.new_internal_pages;
-    if (publish_count > TINYDB_V2_PUBLISH_BATCH_MAX_PAGES) {
+    uint32_t base_publish_count = is_tail ? 2u : 3u;
+    if (participating_ancestors >
+            UINT32_MAX - reservation.new_internal_pages) {
         release_work(&chain, &claim_plan, NULL, NULL, NULL, NULL, NULL);
         set_message(message,
                     message_size,
-                    "payload-native recursive overflow exceeds the bounded atomic publication capacity");
+                    "payload-native recursive publication count overflowed");
+        return false;
+    }
+    uint32_t publish_count =
+        participating_ancestors + reservation.new_internal_pages;
+    if (publish_count > UINT32_MAX - base_publish_count) {
+        release_work(&chain, &claim_plan, NULL, NULL, NULL, NULL, NULL);
+        set_message(message,
+                    message_size,
+                    "payload-native recursive publication count overflowed");
+        return false;
+    }
+    publish_count += base_publish_count;
+    if (!tinydb_v2_publish_batch_snapshot_size(publish_count, NULL)) {
+        release_work(&chain, &claim_plan, NULL, NULL, NULL, NULL, NULL);
+        set_message(message,
+                    message_size,
+                    "payload-native recursive overflow exceeds the atomic rollback-byte budget");
         return false;
     }
 
@@ -609,12 +625,29 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
         return false;
     }
 
+    TinyDBV2PublishEntry* entries = (TinyDBV2PublishEntry*)calloc(
+        (size_t)publish_count, sizeof(TinyDBV2PublishEntry));
+    if (entries == NULL) {
+        release_work(&chain,
+                     &claim_plan,
+                     ancestor_images,
+                     old_maxes,
+                     new_internal_images,
+                     ancestor_targets,
+                     new_internal_targets);
+        set_message(message,
+                    message_size,
+                    "unable to allocate recursive publication metadata");
+        return false;
+    }
+
     uint32_t claimed_count = 0u;
     if (!tinydb_record_payload_claim_prepared_pages(table->pager,
                                                     &claim_plan,
                                                     &claimed_count,
                                                     local_message,
                                                     sizeof(local_message))) {
+        free(entries);
         release_work(&chain,
                      &claim_plan,
                      ancestor_images,
@@ -663,6 +696,7 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                                                            claimed_count,
                                                            local_message,
                                                            sizeof(local_message));
+        free(entries);
         release_work(&chain,
                      &claim_plan,
                      ancestor_images,
@@ -676,7 +710,6 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
         return false;
     }
 
-    TinyDBV2PublishEntry entries[TINYDB_V2_PUBLISH_BATCH_MAX_PAGES];
     uint32_t entry_count = 0u;
     entries[entry_count++] = (TinyDBV2PublishEntry){
         left_page_num, left_target, left_after};
@@ -696,13 +729,13 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
             new_internal_targets[i],
             image_at(new_internal_images, i)};
     }
-    if (entry_count != publish_count ||
-        entry_count > TINYDB_V2_PUBLISH_BATCH_MAX_PAGES) {
+    if (entry_count != publish_count) {
         (void)tinydb_record_payload_rollback_claimed_pages(table->pager,
                                                            &claim_plan,
                                                            claimed_count,
                                                            local_message,
                                                            sizeof(local_message));
+        free(entries);
         release_work(&chain,
                      &claim_plan,
                      ancestor_images,
@@ -722,6 +755,7 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                                                            claimed_count,
                                                            local_message,
                                                            sizeof(local_message));
+        free(entries);
         release_work(&chain,
                      &claim_plan,
                      ancestor_images,
@@ -743,6 +777,7 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                                                            claimed_count,
                                                            local_message,
                                                            sizeof(local_message));
+        free(entries);
         release_work(&chain,
                      &claim_plan,
                      ancestor_images,
@@ -755,6 +790,7 @@ bool tinydb_record_payload_try_bounded_recursive_overflow(
                     "bounded recursive atomic page publication failed");
         return false;
     }
+    free(entries);
 
     mark_page_dirty(table->pager, left_page_num);
     mark_page_dirty(table->pager, right_leaf_page_num);
