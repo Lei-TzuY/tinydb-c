@@ -62,11 +62,13 @@ static bool tinydb_record_payload_prepare_page_claim_plan(
             message, message_size, "recursive payload page-claim plan overflows the pager address space");
         return false;
     }
+#if SIZE_MAX < UINT32_MAX
     if ((size_t)reservation->total_pages > SIZE_MAX / sizeof(uint32_t)) {
         tinydb_payload_ancestor_set_message(
             message, message_size, "recursive payload page-claim allocation overflows");
         return false;
     }
+#endif
 
     uint32_t* page_nums = (uint32_t*)calloc(
         (size_t)reservation->total_pages, sizeof(uint32_t));
