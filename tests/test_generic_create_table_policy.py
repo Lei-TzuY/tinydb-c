@@ -48,6 +48,17 @@ def require(output, marker):
         raise AssertionError(f"missing marker {marker!r}\n{output}")
 
 
+def reject_unexpected_storage_error(output):
+    for marker in (
+        "fixed generic record slot",
+        "schema-sized payload limit",
+        "requires a V2 slotted leaf",
+        "unable to initialize the schema-sized V2 table root",
+    ):
+        if marker in output:
+            raise AssertionError(f"unexpected wide-table storage failure {marker!r}\n{output}")
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     executable = find_tinydb(repo_root)
@@ -63,7 +74,12 @@ def main():
             executable,
             db_file,
             [
-                "CREATE TABLE too_wide (id INT, left_text VARCHAR, right_text VARCHAR);",
+                # Bare VARCHAR reserves the historical 256-byte generic width,
+                # so this executable schema is 516 bytes and must use payload/V2
+                # storage instead of the 293-byte TinyDBRecord carrier.
+                "CREATE TABLE wide_docs (id INT, left_text VARCHAR, right_text VARCHAR);",
+                "INSERT INTO wide_docs VALUES (101, 'left-a', 'right-a');",
+                "INSERT INTO wide_docs VALUES (202, 'left-b', 'right-b');",
                 "CREATE TABLE metadata_only (key INT, name VARCHAR);",
                 ".tables",
                 "CREATE TABLE metrics (id INT, name VARCHAR, price INT, stock INT);",
@@ -77,14 +93,8 @@ def main():
             ],
         )
 
-        require(
-            first,
-            "CREATE TABLE row layout exceeds the fixed generic record slot; variable-size/slotted-page rows are not implemented",
-        )
-        if "too_wide" in re.sub(
-            r"Error: CREATE TABLE row layout exceeds[^\n]*\n", "", first
-        ):
-            raise AssertionError("too-wide executable table leaked into catalog output\n" + first)
+        reject_unexpected_storage_error(first)
+        require(first, "wide_docs")
         require(first, "metadata_only")
         require(first, "beta")
         require(first, "ok")
@@ -96,6 +106,10 @@ def main():
             db_file,
             [
                 ".tables",
+                "PRAGMA table_info(wide_docs);",
+                # A post-reopen INSERT proves both the wide catalog layout and
+                # V2 root format survived durable close/reopen.
+                "INSERT INTO wide_docs VALUES (303, 'left-c', 'right-c');",
                 "PRAGMA table_info(metrics);",
                 "SELECT COUNT(*) FROM metrics WHERE stock >= 0;",
                 "SELECT COUNT(*) FROM metrics WHERE name LIKE '%a';",
@@ -103,21 +117,24 @@ def main():
                 ".exit",
             ],
         )
+        reject_unexpected_storage_error(reopened)
+        require(reopened, "wide_docs")
         require(reopened, "metrics")
         require(reopened, "metadata_only")
+        require(reopened, "left_text")
+        require(reopened, "right_text")
         require(reopened, "name")
         require(reopened, "price")
         require(reopened, "stock")
-        if "too_wide" in reopened:
-            raise AssertionError("rejected executable schema was persisted across reopen\n" + reopened)
         if scalar_results(reopened) != [3, 3]:
             raise AssertionError("valid mixed-layout rows did not survive reopen\n" + reopened)
         require(reopened, "ok")
 
         print(
-            "PASS: CREATE TABLE rejects id-INT generic schemas that exceed the fixed record "
-            "slot before catalog persistence, preserves historical metadata-only schema "
-            "DDL, and keeps a mixed VARCHAR/INT executable layout durable after reopen."
+            "PASS: CREATE TABLE admits schema-sized executable generic rows beyond the "
+            "legacy TinyDBRecord carrier, initializes their root as V2, accepts payload-native "
+            "SQL INSERT before and after reopen, preserves metadata-only DDL, and keeps narrow "
+            "mixed-layout queries durable."
         )
     finally:
         cleanup(db_file)
