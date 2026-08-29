@@ -1,5 +1,5 @@
-#define main tinydb_height5_left_boundary_probe_main
-#include "v2_recursive_nonroot_merge_borrow_left_probe.c"
+#define main tinydb_height4_merge_borrow_window_probe_main
+#include "v2_recursive_internal_merge_borrow_probe.c"
 #undef main
 
 #define H5W_LEAF_COUNT 26u
