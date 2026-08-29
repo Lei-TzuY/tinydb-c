@@ -1,5 +1,6 @@
 #include "column_type.h"
 #include "engine.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -80,10 +81,11 @@ static bool validate_generic_layout(const CreateTableStatement* create,
             return true;
         }
 
-        if (row_size > ROW_SIZE || type.storage_size > ROW_SIZE - row_size) {
+        if (row_size > TINYDB_RECORD_PAYLOAD_MAX ||
+            type.storage_size > TINYDB_RECORD_PAYLOAD_MAX - row_size) {
             snprintf(message,
                      message_size,
-                     "CREATE TABLE row layout exceeds the fixed generic record slot; variable-size/slotted-page rows are not implemented");
+                     "CREATE TABLE row layout exceeds the schema-sized payload limit");
             return false;
         }
         row_size += type.storage_size;
