@@ -13,32 +13,6 @@ typedef struct {
     const unsigned char* staged;
 } TinyDBV2PagerPublishEntry;
 
-static bool tinydb_v2_pager_page_is_dirty(Pager* pager, uint32_t page_num) {
-    if (pager == NULL || page_num >= pager->page_capacity) return false;
-    db_rwlock_rdlock(&pager->pager_lock);
-    bool dirty = pager->is_dirty[page_num];
-    db_rwlock_rdunlock(&pager->pager_lock);
-    return dirty;
-}
-
-static void tinydb_v2_pager_restore_dirty_state(Pager* pager,
-                                                uint32_t page_num,
-                                                bool was_dirty) {
-    if (was_dirty) {
-        mark_page_dirty(pager, page_num);
-        return;
-    }
-    if (pager == NULL || page_num >= pager->page_capacity) return;
-
-    db_rwlock_wrlock(&pager->pager_lock);
-    pager->is_dirty[page_num] = false;
-    free(pager->dirty_page_spills[page_num]);
-    pager->dirty_page_spills[page_num] = NULL;
-    int frame_idx = pager->page_table[page_num];
-    if (frame_idx != -1) pager->frames[frame_idx].is_dirty = false;
-    db_rwlock_wrunlock(&pager->pager_lock);
-}
-
 /*
  * Pager-aware variant of staged V2 publication. Unlike the pointer-based
  * helper, this routine never requires every target page to remain resident in
@@ -82,8 +56,7 @@ static bool tinydb_v2_pager_publish_batch(
     }
 
     for (uint32_t i = 0u; i < count; i++) {
-        before_dirty[i] = tinydb_v2_pager_page_is_dirty(pager,
-                                                        entries[i].page_num);
+        before_dirty[i] = pager_page_is_dirty(pager, entries[i].page_num);
         unsigned char* target =
             (unsigned char*)get_page(pager, entries[i].page_num);
         memcpy(before + (size_t)i * (size_t)PAGE_USABLE_SIZE,
@@ -106,9 +79,9 @@ static bool tinydb_v2_pager_publish_batch(
                 memcpy(rollback_target,
                        before + (size_t)j * (size_t)PAGE_USABLE_SIZE,
                        PAGE_USABLE_SIZE);
-                tinydb_v2_pager_restore_dirty_state(pager,
-                                                    entries[j].page_num,
-                                                    before_dirty[j]);
+                pager_restore_page_dirty_state(pager,
+                                               entries[j].page_num,
+                                               before_dirty[j]);
                 pager_unpin_page(pager, entries[j].page_num);
             }
             free(before_dirty);
