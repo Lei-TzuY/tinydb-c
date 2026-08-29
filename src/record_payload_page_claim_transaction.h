@@ -59,6 +59,22 @@ static bool tinydb_record_payload_rollback_claimed_pages(
     return true;
 }
 
+static bool tinydb_record_payload_next_prepared_claim_matches(
+    const Pager* pager,
+    const TinyDBPayloadPageClaimPlan* claim_plan,
+    uint32_t claim_index) {
+    if (pager == NULL || claim_plan == NULL || claim_plan->page_nums == NULL ||
+        claim_index >= claim_plan->count ||
+        (pager->free_page_count > 0u && pager->free_pages == NULL)) {
+        return false;
+    }
+
+    uint32_t next_page_num = pager->free_page_count > 0u
+        ? pager->free_pages[pager->free_page_count - 1u]
+        : pager->num_pages;
+    return next_page_num == claim_plan->page_nums[claim_index];
+}
+
 static bool tinydb_record_payload_claim_prepared_pages(
     Pager* pager,
     const TinyDBPayloadPageClaimPlan* claim_plan,
@@ -77,6 +93,22 @@ static bool tinydb_record_payload_claim_prepared_pages(
 
     uint32_t claimed_count = 0u;
     for (uint32_t i = 0u; i < claim_plan->count; i++) {
+        if (!tinydb_record_payload_next_prepared_claim_matches(
+                pager, claim_plan, i)) {
+            if (!tinydb_record_payload_rollback_claimed_pages(
+                    pager,
+                    claim_plan,
+                    claimed_count,
+                    message,
+                    message_size)) {
+                return false;
+            }
+            *claimed_count_out = 0u;
+            tinydb_payload_ancestor_set_message(
+                message, message_size, "recursive payload allocator no longer matches the prepared page claims");
+            return false;
+        }
+
         uint32_t claimed = get_unused_page_num(pager);
         if (claimed != claim_plan->page_nums[i]) {
             if (!tinydb_record_payload_rollback_claimed_pages(
@@ -87,8 +119,9 @@ static bool tinydb_record_payload_claim_prepared_pages(
                     message_size)) {
                 return false;
             }
+            *claimed_count_out = 0u;
             tinydb_payload_ancestor_set_message(
-                message, message_size, "recursive payload allocator no longer matches the prepared page claims");
+                message, message_size, "recursive payload allocator changed during a prepared page claim");
             return false;
         }
 
