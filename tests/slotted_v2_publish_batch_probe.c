@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DEEP_BATCH_PAGES 12u
+#define DEEP_BATCH_PAGES 20u
 
 static int page_equals(const unsigned char* page,
                        unsigned char value,
@@ -41,7 +41,8 @@ static int exercise_deep_batch(void) {
         entries[i].staged = staged[i];
     }
 
-    if (tinydb_v2_publish_batch(entries, DEEP_BATCH_PAGES, 9u)) {
+    /* Fail after crossing the former 16-page publication ceiling. */
+    if (tinydb_v2_publish_batch(entries, DEEP_BATCH_PAGES, 17u)) {
         fprintf(stderr, "deep injected publication unexpectedly succeeded\n");
         return 11;
     }
@@ -181,6 +182,6 @@ int main(void) {
 
     printf("SLOTTED_V2_PUBLISH_BATCH_OK atomic=yes rollback=yes "
            "checksum_isolated=yes duplicate_guard=yes root0=yes "
-           "deep_batch=yes capacity_guard=yes\n");
+           "deep_batch=yes beyond_legacy_limit=yes capacity_guard=yes\n");
     return 0;
 }
