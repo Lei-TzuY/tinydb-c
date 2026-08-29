@@ -99,6 +99,8 @@ def main():
         require(indexed, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
         require(indexed, "INDEX: idx_wide_right")
         require(indexed, "FILTER: right_text = 'right-b'")
+        require(indexed, "ESTIMATED ROWS: 1 / 3")
+        require(indexed, "ESTIMATED COST:")
         if "left-b" in indexed:
             raise AssertionError("plain indexed wide EXPLAIN executed the query\n" + indexed)
 
@@ -137,13 +139,15 @@ def main():
         reject_fixed_carrier_error(reopened)
         require(reopened, "PLAN: GENERIC SECONDARY INDEX LOOKUP")
         require(reopened, "INDEX: idx_wide_right")
+        require(reopened, "ESTIMATED ROWS: 1 / 3")
+        require(reopened, "ESTIMATED COST:")
         require(reopened, "ACTUAL RESULT")
         require(reopened, "left-c")
         require(reopened, "ok")
 
         print(
             "PASS: payload-sized tables participate in primary-key, secondary-index, "
-            "range, compound, and reopened EXPLAIN planning without a fixed-record carrier."
+            "costed index, range, compound, and reopened EXPLAIN planning without a fixed-record carrier."
         )
     finally:
         cleanup(db_file)
