@@ -23,6 +23,21 @@ def main() -> None:
     require(handler < guard < final_message,
             "ancestor validation must run after full-parent routing but before capacity fallback is returned")
 
+    require("typedef struct {" in ANCESTRY and "TinyDBPayloadAncestorChain" in ANCESTRY,
+            "payload overflow ancestry must have a reusable detached chain type")
+    require("tinydb_record_payload_collect_ancestor_chain" in ANCESTRY,
+            "ancestor validation must expose the validated page-number chain for recursive staging")
+    require("leaf_page_num" in ANCESTRY and "internal_pages" in ANCESTRY and "count" in ANCESTRY,
+            "collected ancestry must retain the leaf identity and parent-first internal page numbers")
+    require("capacity > SIZE_MAX / sizeof(uint32_t)" in ANCESTRY,
+            "ancestor-chain allocation must reject size_t overflow")
+    require("internal_pages[count++] = parent_page_num" in ANCESTRY,
+            "ancestor collection must record each validated internal parent")
+    require("chain->internal_pages = internal_pages" in ANCESTRY,
+            "validated ancestry must transfer detached page-number ownership to the caller")
+    require("tinydb_record_payload_ancestor_chain_release" in ANCESTRY,
+            "collected ancestry must have an explicit release helper")
+
     require("depth < table->pager->num_pages" in ANCESTRY,
             "ancestor walk must be bounded by the database page count")
     require("tinydb_payload_parent_references_child(parent, current_page_num)" in ANCESTRY,
@@ -35,6 +50,12 @@ def main() -> None:
             "foreign roots encountered below the catalog root must fail closed")
     require("memcpy(parent, get_page(table->pager, parent_page_num), PAGE_SIZE)" in ANCESTRY,
             "ancestor validation must use local page images rather than retain Pager pointers across traversal")
+
+    wrapper = ANCESTRY.index("tinydb_record_payload_validate_ancestor_chain")
+    collect = ANCESTRY.index("tinydb_record_payload_collect_ancestor_chain", wrapper)
+    release = ANCESTRY.index("tinydb_record_payload_ancestor_chain_release", collect)
+    require(wrapper < collect < release,
+            "validation-only callers must reuse collection and release the detached chain")
 
 
 if __name__ == "__main__":
