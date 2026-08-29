@@ -52,6 +52,12 @@ static bool tinydb_record_payload_prepare_page_claim_plan(
             message, message_size, "invalid recursive payload page-claim plan input");
         return false;
     }
+    if (pager->free_page_count > pager->num_pages ||
+        (pager->free_page_count > 0u && pager->free_pages == NULL)) {
+        tinydb_payload_ancestor_set_message(
+            message, message_size, "recursive payload page-claim plan found an invalid allocator snapshot");
+        return false;
+    }
 
     uint32_t free_count = pager->free_page_count;
     uint32_t appended = reservation->total_pages > free_count
@@ -79,14 +85,16 @@ static bool tinydb_record_payload_prepare_page_claim_plan(
     }
 
     for (uint32_t i = 0u; i < reservation->total_pages; i++) {
-        uint32_t page_num = i < free_count
+        bool reuses_free_page = i < free_count;
+        uint32_t page_num = reuses_free_page
             ? pager->free_pages[free_count - 1u - i]
             : pager->num_pages + (i - free_count);
         if (page_num == 0u || page_num == INVALID_PAGE_NUM ||
+            (reuses_free_page && page_num >= pager->num_pages) ||
             tinydb_record_payload_claim_page_is_live_ancestor(chain, page_num)) {
             free(page_nums);
             tinydb_payload_ancestor_set_message(
-                message, message_size, "recursive payload page reservation aliases live topology");
+                message, message_size, "recursive payload page reservation aliases or escapes live topology");
             return false;
         }
         for (uint32_t j = 0u; j < i; j++) {
