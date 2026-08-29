@@ -1,4 +1,5 @@
 #include "generic_sql.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -326,6 +327,42 @@ static void print_value(const TinyDBValue* value) {
     }
 }
 
+static void print_payload_row(const TinyDBValue* values,
+                              uint32_t value_count) {
+    printf("(");
+    for (uint32_t i = 0u; i < value_count; i++) {
+        if (i > 0u) printf(", ");
+        if (values[i].type == COL_TYPE_INT) {
+            printf("%u", values[i].int_value);
+        } else {
+            printf("%s", values[i].text);
+        }
+    }
+    printf(")\n");
+}
+
+static bool visit_range_values(SelectRangeContext* context,
+                               const TinyDBValue* values,
+                               uint32_t value_count) {
+    if (!predicate_matches(&context->predicate,
+                           &values[context->predicate.column_index])) {
+        return true;
+    }
+
+    context->matched++;
+    if (context->count_only) return true;
+    if (context->matched <= context->offset) return true;
+    if (context->has_limit && context->emitted >= context->limit) return true;
+
+    if (context->project_column) {
+        print_value(&values[context->projection_column_index]);
+    } else {
+        print_payload_row(values, value_count);
+    }
+    context->emitted++;
+    return true;
+}
+
 static bool visit_range_record(const TableSchema* schema,
                                const TinyDBRecord* record,
                                void* raw_context) {
@@ -362,6 +399,71 @@ static bool visit_range_record(const TableSchema* schema,
     }
     context->emitted++;
     return true;
+}
+
+static bool visit_range_payload(const TableSchema* schema,
+                                const TinyDBRecordPayload* payload,
+                                void* raw_context) {
+    SelectRangeContext* context = (SelectRangeContext*)raw_context;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    uint32_t value_count = 0u;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_payload_decode_values(schema,
+                                             payload,
+                                             values,
+                                             MAX_COLUMNS_PER_TABLE,
+                                             &value_count,
+                                             message,
+                                             sizeof(message)) ||
+        value_count != schema->num_columns) {
+        context->decode_failed = true;
+        return false;
+    }
+    return visit_range_values(context, values, value_count);
+}
+
+static bool payload_primary_range(const SelectRangePredicate* predicate,
+                                  uint32_t* min_id,
+                                  uint32_t* max_id,
+                                  bool* empty) {
+    if (predicate == NULL || min_id == NULL || max_id == NULL || empty == NULL ||
+        predicate->column_index != 0u || predicate->value.type != COL_TYPE_INT) {
+        return false;
+    }
+
+    uint32_t value = predicate->value.int_value;
+    *empty = false;
+    switch (predicate->op) {
+        case SELECT_RANGE_GT:
+            if (value == UINT32_MAX) {
+                *empty = true;
+                return true;
+            }
+            *min_id = value + 1u;
+            *max_id = UINT32_MAX;
+            return true;
+        case SELECT_RANGE_GTE:
+            *min_id = value;
+            *max_id = UINT32_MAX;
+            return true;
+        case SELECT_RANGE_LT:
+            if (value == 0u) {
+                *empty = true;
+                return true;
+            }
+            *min_id = 0u;
+            *max_id = value - 1u;
+            return true;
+        case SELECT_RANGE_LTE:
+            *min_id = 0u;
+            *max_id = value;
+            return true;
+        case SELECT_RANGE_EQ:
+            *min_id = value;
+            *max_id = value;
+            return true;
+    }
+    return false;
 }
 
 static TinyDBGenericSqlStatus try_range_select(Table* table,
@@ -413,9 +515,16 @@ static TinyDBGenericSqlStatus try_range_select(Table* table,
     }
 
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_schema_supports_records(schema,
-                                        schema_message,
-                                        sizeof(schema_message))) {
+    bool payload_native = schema->row_size > ROW_SIZE;
+    if (payload_native) {
+        if (!tinydb_record_payload_schema_supported(schema,
+                                                    schema_message,
+                                                    sizeof(schema_message))) {
+            return execute_error(result, schema_message);
+        }
+    } else if (!tinydb_schema_supports_records(schema,
+                                               schema_message,
+                                               sizeof(schema_message))) {
         return execute_error(result, schema_message);
     }
 
@@ -486,9 +595,49 @@ static TinyDBGenericSqlStatus try_range_select(Table* table,
     context.limit = limit;
     context.has_limit = has_limit;
 
-    (void)tinydb_record_scan(table, schema, visit_range_record, &context);
-    if (context.decode_failed) {
-        return execute_error(result, "unable to decode generic record during range SELECT");
+    if (payload_native) {
+        bool scan_complete = true;
+        char scan_message[TINYDB_RECORD_MESSAGE_MAX];
+        scan_message[0] = '\0';
+        uint32_t min_id = 0u;
+        uint32_t max_id = UINT32_MAX;
+        bool empty_range = false;
+        bool has_primary_range = payload_primary_range(&predicate,
+                                                       &min_id,
+                                                       &max_id,
+                                                       &empty_range);
+        if (!empty_range) {
+            if (has_primary_range) {
+                (void)tinydb_record_payload_scan_range(table,
+                                                       schema,
+                                                       min_id,
+                                                       max_id,
+                                                       visit_range_payload,
+                                                       &context,
+                                                       &scan_complete,
+                                                       scan_message,
+                                                       sizeof(scan_message));
+            } else {
+                (void)tinydb_record_payload_scan(table,
+                                                schema,
+                                                visit_range_payload,
+                                                &context,
+                                                &scan_complete,
+                                                scan_message,
+                                                sizeof(scan_message));
+            }
+        }
+        if (!scan_complete || context.decode_failed) {
+            return execute_error(result,
+                                 scan_message[0] != '\0'
+                                     ? scan_message
+                                     : "unable to decode schema-sized payload during range SELECT");
+        }
+    } else {
+        (void)tinydb_record_scan(table, schema, visit_range_record, &context);
+        if (context.decode_failed) {
+            return execute_error(result, "unable to decode generic record during range SELECT");
+        }
     }
 
     if (count_only) {
