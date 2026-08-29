@@ -71,6 +71,11 @@ static bool tinydb_v2_publish_batch_snapshot_size(
  * before the first byte is copied. If publication is interrupted at the
  * deterministic fail_after boundary, every target is restored byte-for-byte.
  *
+ * This legacy in-memory helper remains used by the focused publication probe;
+ * production recursive publication may instead use the pager-aware publisher.
+ * Keep it inline so translation units that only need the shared entry/snapshot
+ * definitions do not emit an unused internal function under -Werror.
+ *
  * Page zero is a valid TinyDB root page. INVALID_PAGE_NUM is the only reserved
  * page identity rejected here; callers that use zero as a topology sentinel
  * must enforce that invariant before constructing a publication batch.
@@ -82,7 +87,7 @@ static bool tinydb_v2_publish_batch_snapshot_size(
  * copies after which publication should fail. Production callers pass
  * TINYDB_V2_PUBLISH_NO_FAIL.
  */
-static bool tinydb_v2_publish_batch(
+static inline bool tinydb_v2_publish_batch(
     const TinyDBV2PublishEntry* entries,
     uint32_t count,
     uint32_t fail_after) {
