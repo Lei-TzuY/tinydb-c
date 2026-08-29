@@ -111,6 +111,39 @@ bool pager_savepoint(Pager* pager, const char* name);
 bool pager_rollback_to_savepoint(Pager* pager, const char* name);
 bool pager_release_savepoint(Pager* pager, const char* name);
 
+/*
+ * Lightweight page-state API for staged mutation helpers.
+ *
+ * pager_restore_page_dirty_state() changes only Pager bookkeeping. Callers
+ * must restore the corresponding page bytes first. A clean rollback clears an
+ * obsolete no-steal spill so a later cache miss cannot resurrect the rejected
+ * staged image. A dirty rollback deliberately preserves dirty status so the
+ * restored pre-mutation image remains part of the surrounding transaction.
+ */
+static inline bool pager_page_is_dirty(Pager* pager, uint32_t page_num) {
+    if (pager == NULL || page_num >= pager->page_capacity) return false;
+    db_rwlock_rdlock(&pager->pager_lock);
+    bool dirty = pager->is_dirty[page_num];
+    db_rwlock_rdunlock(&pager->pager_lock);
+    return dirty;
+}
+
+static inline void pager_restore_page_dirty_state(Pager* pager,
+                                                  uint32_t page_num,
+                                                  bool was_dirty) {
+    if (pager == NULL || page_num >= pager->page_capacity) return;
+
+    db_rwlock_wrlock(&pager->pager_lock);
+    pager->is_dirty[page_num] = was_dirty;
+    int frame_idx = pager->page_table[page_num];
+    if (frame_idx != -1) pager->frames[frame_idx].is_dirty = was_dirty;
+    if (!was_dirty) {
+        free(pager->dirty_page_spills[page_num]);
+        pager->dirty_page_spills[page_num] = NULL;
+    }
+    db_rwlock_wrunlock(&pager->pager_lock);
+}
+
 /* Multi-threaded Page RW Lock API */
 void pager_acquire_read_lock(Pager* pager, uint32_t page_num);
 void pager_release_read_lock(Pager* pager, uint32_t page_num);
