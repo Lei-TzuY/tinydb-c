@@ -77,6 +77,11 @@ def main():
                 "INSERT INTO near_limit VALUES (2, 'short', 'edge');",
                 "ALTER TABLE near_limit ADD COLUMN overflow VARCHAR(1);",
                 "PRAGMA table_info(near_limit);",
+                "CREATE TABLE wide_docs (id INT, left_text VARCHAR(145), right_text VARCHAR(145));",
+                "INSERT INTO wide_docs VALUES (7, 'left', 'right');",
+                "ALTER TABLE wide_docs ADD COLUMN tag VARCHAR(5);",
+                "PRAGMA table_info(wide_docs);",
+                "SELECT * FROM wide_docs WHERE id = 7;",
                 "CREATE TABLE archive (id INT, username VARCHAR, email VARCHAR);",
                 "ALTER TABLE archive ADD COLUMN extra VARCHAR(5);",
                 "ALTER TABLE contacts ADD COLUMN bad_zero VARCHAR(0);",
@@ -98,13 +103,19 @@ def main():
             "payload | VARCHAR(250)",
             "tail | VARCHAR(37)",
             "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented",
+            "ALTER TABLE ADD COLUMN is disabled for schema-sized payload tables until physical row migration is implemented",
+            "(7, left, right)",
             "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented",
             "Syntax error. Could not parse statement.",
             "ok",
         ]:
             require(first, marker)
 
-        if "blocked | VARCHAR(5)" in first or "overflow | VARCHAR(1)" in first:
+        if (
+            "blocked | VARCHAR(5)" in first
+            or "overflow | VARCHAR(1)" in first
+            or "tag | VARCHAR(5)" in first
+        ):
             raise AssertionError("rejected ALTER column leaked into catalog\n" + first)
 
         second = run_session(
@@ -113,12 +124,16 @@ def main():
             [
                 "PRAGMA table_info(contacts);",
                 "PRAGMA table_info(near_limit);",
+                "PRAGMA table_info(wide_docs);",
                 "SELECT * FROM contacts WHERE id = 1;",
                 "SELECT * FROM contacts WHERE id = 2;",
                 "SELECT * FROM near_limit WHERE id = 1;",
                 "SELECT * FROM near_limit WHERE id = 2;",
+                "SELECT * FROM wide_docs WHERE id = 7;",
                 "INSERT INTO contacts VALUES (3, 'gamma', 300, 'g', 'persist');",
                 "SELECT note FROM contacts WHERE id = 3;",
+                "INSERT INTO wide_docs VALUES (8, 'left-2', 'right-2');",
+                "SELECT * FROM wide_docs WHERE id = 8;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
@@ -129,21 +144,30 @@ def main():
             "note | VARCHAR(10)",
             "payload | VARCHAR(250)",
             "tail | VARCHAR(37)",
+            "left_text | VARCHAR(145)",
+            "right_text | VARCHAR(145)",
             "(1, alpha, 100, ally, )",
             "(2, beta, 200, bee, memo)",
             "(1, seed, )",
             "(2, short, edge)",
+            "(7, left, right)",
             "db > persist\nExecuted.",
+            "(8, left-2, right-2)",
             "ok",
         ]:
             require(second, marker)
 
-        if "blocked | VARCHAR(5)" in second or "overflow | VARCHAR(1)" in second:
+        if (
+            "blocked | VARCHAR(5)" in second
+            or "overflow | VARCHAR(1)" in second
+            or "tag | VARCHAR(5)" in second
+        ):
             raise AssertionError("rejected ALTER column persisted after reopen\n" + second)
 
         print(
             "PASS: compact VARCHAR(n) ADD COLUMN persists n+1-byte layouts, "
             "supports prepared routing, honors the exact 293-byte boundary, "
+            "keeps schema-sized payload ALTER fail-closed until row migration, "
             "and preserves fixed-Row/transaction safety guards."
         )
     finally:
