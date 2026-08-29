@@ -279,20 +279,4 @@ static bool tinydb_record_payload_plan_overflow_chain(
     return true;
 }
 
-/* Read-only compatibility wrapper for callers that only need validation. */
-static bool tinydb_record_payload_validate_ancestor_chain(
-    Table* table,
-    const TableSchema* schema,
-    uint32_t key,
-    char* message,
-    size_t message_size) {
-    TinyDBPayloadAncestorChain chain;
-    if (!tinydb_record_payload_collect_ancestor_chain(
-            table, schema, key, &chain, message, message_size)) {
-        return false;
-    }
-    tinydb_record_payload_ancestor_chain_release(&chain);
-    return true;
-}
-
 #endif
