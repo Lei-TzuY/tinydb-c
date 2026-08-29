@@ -16,6 +16,18 @@ def main() -> None:
             "recursive payload overflow needs a concrete multi-page claim primitive")
     require("tinydb_record_payload_rollback_claimed_pages" in TXN,
             "recursive payload overflow needs an explicit allocator rollback primitive")
+    require("tinydb_record_payload_next_prepared_claim_matches" in TXN,
+            "recursive payload overflow must validate the next allocator identity before claiming it")
+    require("pager->free_pages[pager->free_page_count - 1u]" in TXN and
+            ": pager->num_pages" in TXN,
+            "pre-claim validation must mirror the pager's free-stack-then-append allocation order")
+    precheck = TXN.index("tinydb_record_payload_next_prepared_claim_matches(",
+                         TXN.index("for (uint32_t i = 0u; i < claim_plan->count; i++)"))
+    consume = TXN.index("get_unused_page_num(pager)", precheck)
+    require(precheck < consume,
+            "prepared page identity must be checked before get_unused_page_num mutates allocator state")
+    require("*claimed_count_out = 0u;" in TXN[precheck:consume],
+            "a pre-claim mismatch must leave the caller with no outstanding reservation")
     require("get_unused_page_num(pager)" in TXN,
             "claim transaction must consume the real pager allocator")
     require("(void)get_page(pager, claimed)" in TXN,
