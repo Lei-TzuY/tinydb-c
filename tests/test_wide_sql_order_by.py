@@ -81,11 +81,11 @@ def main():
         db_path = os.path.join(temp_dir, "wide-order.db")
         setup = [
             "CREATE TABLE wide_order (id INT, left_text VARCHAR, right_text VARCHAR);",
-            "INSERT INTO wide_order VALUES (30, 'left-30', 'right-30');",
-            "INSERT INTO wide_order VALUES (10, 'left-10', 'right-10');",
-            "INSERT INTO wide_order VALUES (50, 'left-50', 'right-50');",
-            "INSERT INTO wide_order VALUES (20, 'left-20', 'right-20');",
-            "INSERT INTO wide_order VALUES (40, 'left-40', 'right-40');",
+            "INSERT INTO wide_order VALUES (30, 'left-30', 'delta');",
+            "INSERT INTO wide_order VALUES (10, 'left-10', 'echo');",
+            "INSERT INTO wide_order VALUES (50, 'left-50', 'alpha');",
+            "INSERT INTO wide_order VALUES (20, 'left-20', 'charlie');",
+            "INSERT INTO wide_order VALUES (40, 'left-40', 'bravo');",
         ]
         output = require_ok(executable, db_path, "\n".join(setup))
         if "schema-sized" in output.lower() and "error" in output.lower():
@@ -110,6 +110,22 @@ def main():
         output = require_ok(
             executable,
             db_path,
+            "SELECT id FROM wide_order ORDER BY right_text ASC;",
+        )
+        if scalar_uints(output) != [50, 40, 20, 30, 10]:
+            raise AssertionError("wide VARCHAR ORDER BY mismatch:\n" + output)
+
+        output = require_ok(
+            executable,
+            db_path,
+            "SELECT left_text FROM wide_order ORDER BY right_text DESC LIMIT 2 OFFSET 1;",
+        )
+        if scalar_text(output) != ["left-30", "left-20"]:
+            raise AssertionError("wide VARCHAR DESC LIMIT/OFFSET mismatch:\n" + output)
+
+        output = require_ok(
+            executable,
+            db_path,
             "SELECT left_text FROM wide_order "
             "WHERE id >= 20 AND id <= 40 "
             "ORDER BY id DESC LIMIT 2 OFFSET 1;",
@@ -121,19 +137,23 @@ def main():
             executable,
             db_path,
             "SELECT id FROM wide_order "
-            "WHERE (id = 10 OR id = 50) ORDER BY id DESC;",
+            "WHERE (id = 10 OR id = 50) ORDER BY right_text ASC;",
         )
         if scalar_uints(output) != [50, 10]:
-            raise AssertionError("wide boolean ORDER BY mismatch:\n" + output)
+            raise AssertionError("wide boolean schema-column ORDER BY mismatch:\n" + output)
 
         # Reopen is implicit because each command launches a fresh process.
         output = require_ok(
             executable,
             db_path,
-            "SELECT id FROM wide_order ORDER BY id DESC OFFSET 4;",
+            "SELECT id FROM wide_order ORDER BY right_text DESC OFFSET 4;",
         )
-        if scalar_uints(output) != [10]:
-            raise AssertionError("wide ORDER BY reopen/offset mismatch:\n" + output)
+        if scalar_uints(output) != [50]:
+            raise AssertionError("wide schema-column ORDER BY reopen/offset mismatch:\n" + output)
+
+        output = require_ok(executable, db_path, "PRAGMA integrity_check;")
+        if "ok" not in output.lower():
+            raise AssertionError("wide ORDER BY integrity check failed:\n" + output)
 
         legacy_path = os.path.join(temp_dir, "legacy-order.db")
         legacy_setup = (
@@ -151,8 +171,8 @@ def main():
             raise AssertionError("legacy ORDER BY route regressed:\n" + output)
 
     print(
-        "PASS: wide SQL ORDER BY id supports ASC/DESC, boolean WHERE, projection, "
-        "LIMIT/OFFSET, reopen, and preserves the legacy users route"
+        "PASS: wide SQL ORDER BY supports schema-aware INT/VARCHAR keys, boolean WHERE, "
+        "projection, LIMIT/OFFSET, reopen, integrity checks, and preserves the legacy users route"
     )
 
 
