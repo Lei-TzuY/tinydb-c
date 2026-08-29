@@ -135,18 +135,22 @@ bool tinydb_record_payload_try_nonroot_split(
     }
 
     /* A full grandparent is the first still-unimplemented payload-native
-     * recursive capacity boundary. Before reporting that limitation, prove
-     * the selected leaf's reciprocal parent chain actually reaches the
-     * catalog-stable root. Otherwise a broken/cyclic ancestry could be
-     * misclassified as a harmless unsupported depth and hide corruption. */
+     * recursive capacity boundary. Before reporting that limitation, collect
+     * the selected leaf's reciprocal ancestry and convert it into a read-only
+     * cascade preflight. This proves both that the chain reaches the catalog
+     * root and how many consecutive full internal levels must participate in
+     * the eventual split before any durable mutation starts. */
     if (nonroot_failure_is_recursive_capacity(nonroot_parent_applicable,
                                               nonroot_parent_message)) {
+        TinyDBPayloadAncestorChain chain;
+        TinyDBPayloadOverflowPlan plan;
         char ancestry_message[TINYDB_RECORD_MESSAGE_MAX];
         ancestry_message[0] = '\0';
-        if (!tinydb_record_payload_validate_ancestor_chain(
+        if (!tinydb_record_payload_collect_ancestor_chain(
                 table,
                 schema,
                 key,
+                &chain,
                 ancestry_message,
                 sizeof(ancestry_message))) {
             if (applicable != NULL) *applicable = true;
@@ -154,7 +158,31 @@ bool tinydb_record_payload_try_nonroot_split(
                         message_size,
                         ancestry_message[0] != '\0'
                             ? ancestry_message
-                            : "payload-native recursive overflow ancestry validation failed");
+                            : "payload-native recursive overflow ancestry collection failed");
+            return false;
+        }
+        bool planned = tinydb_record_payload_plan_overflow_chain(
+            table,
+            schema,
+            &chain,
+            &plan,
+            ancestry_message,
+            sizeof(ancestry_message));
+        tinydb_record_payload_ancestor_chain_release(&chain);
+        if (!planned) {
+            if (applicable != NULL) *applicable = true;
+            set_message(message,
+                        message_size,
+                        ancestry_message[0] != '\0'
+                            ? ancestry_message
+                            : "payload-native recursive overflow preflight failed");
+            return false;
+        }
+        if (plan.full_internal_levels < 2u) {
+            if (applicable != NULL) *applicable = true;
+            set_message(message,
+                        message_size,
+                        "payload-native recursive overflow preflight disagrees with the full-grandparent boundary");
             return false;
         }
     }
