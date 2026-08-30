@@ -3,6 +3,12 @@
 
 #include "pager.h"
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <sys/types.h>
+#endif
+
 /*
  * Non-fatal page acquisition for existing pages.
  *
