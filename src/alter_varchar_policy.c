@@ -92,6 +92,45 @@ static bool schema_table_is_provably_empty(Table* table,
     return scan_complete && row_count == 0u;
 }
 
+static bool schema_rows_accept_appended_column(
+    Table* table,
+    const TableSchema* schema,
+    const TinyDBColumnTypeSpec* type,
+    char* message,
+    size_t message_size) {
+    if (table == NULL || schema == NULL || type == NULL ||
+        schema->num_columns >= MAX_COLUMNS_PER_TABLE ||
+        schema->row_size > TINYDB_RECORD_PAYLOAD_MAX ||
+        type->storage_size > TINYDB_RECORD_PAYLOAD_MAX - schema->row_size) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message,
+                     message_size,
+                     "%s",
+                     "prospective schema is outside append-compatible bounds");
+        }
+        return false;
+    }
+
+    TableSchema prospective = *schema;
+    TableColumn* added = &prospective.columns[prospective.num_columns];
+    memset(added, 0, sizeof(*added));
+    added->type = type->type;
+    added->offset = schema->row_size;
+    added->size = type->storage_size;
+    prospective.num_columns++;
+    prospective.row_size += type->storage_size;
+
+    bool scan_complete = false;
+    (void)tinydb_record_payload_scan(table,
+                                     &prospective,
+                                     NULL,
+                                     NULL,
+                                     &scan_complete,
+                                     message,
+                                     message_size);
+    return scan_complete;
+}
+
 TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     TinyDB* database,
     const char* sql,
@@ -143,29 +182,26 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     }
 
     /*
-     * Existing payload rows depend on the catalog for their physical offsets.
-     * Changing those offsets without rewriting every row would decode old
-     * payloads under the new layout, so any schema growth that changes the
-     * physical row class remains fail-closed for a non-empty table. An empty
-     * table has no physical row images to migrate: prove emptiness with the
-     * payload-native, corruption-aware scan before permitting metadata-only
-     * growth. Any incomplete scan is deliberately treated as non-empty.
-     *
-     * This guard applies to every schema-sized ADD COLUMN type owned by this
-     * policy, including INT. Otherwise `ALTER ... ADD COLUMN score INT`
-     * could bypass the VARCHAR(n) safety route and reinterpret existing V2
-     * payloads under a longer catalog layout without rewriting them.
+     * Compact V2 rows carry their field count, logical length, and a schema
+     * fingerprint. For append-only evolution the decoder can reconstruct the
+     * historical schema from the current schema's unchanged prefix, verify the
+     * stored fingerprint, and materialize missing trailing columns as zero/empty
+     * defaults. Prove every existing row accepts the prospective schema before
+     * changing catalog metadata. Raw/migration-era rows, malformed envelopes,
+     * or non-prefix layouts fail the corruption-aware scan and keep ALTER
+     * fail-closed.
      */
     if (target->row_size > ROW_SIZE) {
         char scan_message[TINYDB_RECORD_MESSAGE_MAX];
-        if (!schema_table_is_provably_empty(table,
-                                            target,
-                                            scan_message,
-                                            sizeof(scan_message))) {
+        if (!schema_rows_accept_appended_column(table,
+                                                target,
+                                                &type,
+                                                scan_message,
+                                                sizeof(scan_message))) {
             return fail_result(
                 result,
                 TINYDB_SQL_POLICY_ERROR,
-                "ALTER TABLE ADD COLUMN is disabled for non-empty schema-sized payload tables until physical row migration is implemented");
+                "ALTER TABLE ADD COLUMN requires append-compatible compact V2 rows for a non-empty schema-sized payload table");
         }
     }
 
