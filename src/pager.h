@@ -6,11 +6,6 @@
 #include <stdlib.h>
 #include <errno.h>
 
-/*
- * TABLE_MAX_PAGES is retained as a legacy compatibility/sanity constant for
- * older auxiliary-file validation paths. The Pager itself no longer uses it
- * as a hard page-number ceiling.
- */
 #ifndef TABLE_MAX_PAGES
 #define TABLE_MAX_PAGES 4096u
 #endif
@@ -73,13 +68,7 @@ typedef struct {
     int lru_tail;
     db_rwlock_t pager_lock;
 
-    /*
-     * Explicit pin admission state. A destructive operation that must release
-     * pager_lock while rebuilding cache contents can raise pin_barrier_active
-     * only when pin_admissions is zero. pager_pin_page_handle() registers an
-     * admission before its initial get_page(), closing the otherwise unavoidable
-     * gap between fetching a frame and incrementing its pin_count.
-     */
+    /* Explicit pin admission and destructive-operation barrier state. */
     bool pin_barrier_active;
     uint32_t pin_admissions;
 
@@ -155,10 +144,8 @@ static inline bool pager_begin_pin_admission(Pager* pager) {
 }
 
 /*
- * Stable pinned-page handles for callers that retain a page pointer across
- * other LRU cache activity. Pin admission is registered before get_page(), so
- * a savepoint rollback barrier cannot begin while a handle is between its page
- * fetch and pin_count publication.
+ * Stable pinned-page handle. Admission is registered before get_page(), so a
+ * destructive barrier cannot begin in the fetch-to-pin ownership gap.
  */
 static inline bool pager_pin_page_handle(Pager* pager,
                                          uint32_t page_num,
@@ -304,7 +291,7 @@ static inline void pager_restore_page_dirty_state(Pager* pager,
     db_rwlock_wrunlock(&pager->pager_lock);
 }
 
-/* get_page() is unowned/unpinned; generic cleanup must not steal owned pins. */
+/* get_page() itself does not acquire pin ownership. */
 static inline void pager_unpin_page_unowned_compat(Pager* pager,
                                                    uint32_t page_num) {
     (void)pager;
@@ -332,11 +319,6 @@ static inline bool pager_removed_range_pinned_locked(Pager* pager,
     return false;
 }
 
-/*
- * Destructive operations that do not re-enter pager_lock run their guard and
- * mutation under one write lock. An in-flight pin admission is treated like a
- * live pin so the operation cannot race a handle between get_page() and pin.
- */
 static inline void pager_free_page_pin_guard(Pager* pager,
                                              uint32_t page_num) {
     if (pager == NULL) return;
@@ -381,13 +363,6 @@ static inline void pager_rollback_pin_guard(Pager* pager) {
     db_rwlock_wrunlock(&pager->pager_lock);
 }
 
-/*
- * Savepoint rollback re-enters get_page()/mark_page_dirty(), so it cannot keep
- * pager_lock held for the whole rebuild. Raise an admission barrier instead:
- * once active, new explicit handle/legacy-lock pins are rejected before they
- * can publish ownership. Existing pins and in-flight admissions make the
- * rollback fail closed.
- */
 static inline bool pager_rollback_to_savepoint_pin_guard(Pager* pager,
                                                          const char* name) {
     if (pager == NULL || name == NULL) return false;
@@ -411,7 +386,27 @@ static inline bool pager_rollback_to_savepoint_pin_guard(Pager* pager,
     return result;
 }
 
-/* Source-compatible page-number lock seam with pin ownership. */
+/*
+ * Pager destruction permanently invalidates every frame/lock, so it must not
+ * cross live explicit ownership. Once admitted, close raises the same barrier
+ * used by savepoint rollback; new explicit pins then fail before get_page().
+ */
+static inline void pager_close_pin_guard(Pager* pager) {
+    if (pager == NULL) return;
+
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (pager_pin_transition_busy_locked(pager) ||
+        pager_any_frame_pinned_locked(pager)) {
+        db_rwlock_wrunlock(&pager->pager_lock);
+        fprintf(stderr, "Refusing to close Pager while pin state is active.\n");
+        return;
+    }
+    pager->pin_barrier_active = true;
+    db_rwlock_wrunlock(&pager->pager_lock);
+
+    pager_close(pager);
+}
+
 static inline bool pager_page_number_lock_pin(Pager* pager,
                                               uint32_t page_num,
                                               PagerPageLockMode lock_mode) {
@@ -512,11 +507,8 @@ void pager_release_read_lock(Pager* pager, uint32_t page_num);
 void pager_acquire_write_lock(Pager* pager, uint32_t page_num);
 void pager_release_write_lock(Pager* pager, uint32_t page_num);
 
-/*
- * pager.c is built with pager_checkpoint renamed, so it keeps the historical
- * exported ABI symbols. Source-built consumers receive the safety seams below.
- */
 #if !defined(pager_checkpoint)
+#define pager_close                     pager_close_pin_guard
 #define pager_unpin_page                pager_unpin_page_unowned_compat
 #define pager_free_page                 pager_free_page_pin_guard
 #define pager_shrink                    pager_shrink_pin_guard
