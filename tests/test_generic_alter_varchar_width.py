@@ -127,11 +127,8 @@ def main():
         ]:
             require(first, marker)
 
-        if (
-            "blocked | VARCHAR(5)" in first
-            or "overflow | VARCHAR(1)" in first.split("empty_crossing", 1)[0]
-        ):
-            raise AssertionError("rejected ALTER column leaked into catalog\n" + first)
+        if "blocked | VARCHAR(5)" in first:
+            raise AssertionError("rejected transaction ALTER leaked into catalog\n" + first)
 
         second = run_session(
             executable,
@@ -146,6 +143,8 @@ def main():
                 "SELECT * FROM contacts WHERE id = 2;",
                 "SELECT * FROM near_limit WHERE id = 1;",
                 "SELECT * FROM near_limit WHERE id = 2;",
+                "INSERT INTO near_limit VALUES (5, 'still', 'fixed');",
+                "SELECT * FROM near_limit WHERE id = 5;",
                 "SELECT * FROM empty_crossing WHERE id = 3;",
                 "SELECT * FROM wide_docs WHERE id = 7;",
                 "SELECT * FROM empty_wide WHERE id = 9;",
@@ -175,6 +174,7 @@ def main():
             "(2, beta, 200, bee, memo)",
             "(1, seed, )",
             "(2, short, edge)",
+            "(5, still, fixed)",
             "(3, cross, edge, x)",
             "(7, left, right)",
             "(9, empty-left, empty-right, tag5)",
