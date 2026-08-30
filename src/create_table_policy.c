@@ -1,5 +1,6 @@
 #include "column_type.h"
 #include "engine.h"
+#include "pager_try_pin.h"
 #include "record_payload.h"
 
 #include <ctype.h>
@@ -112,22 +113,82 @@ static TinyDBSqlStatus policy_error(TinyDBSqlResult* result,
     return TINYDB_SQL_POLICY_ERROR;
 }
 
+static TinyDBSqlStatus read_user_version_nonfatal(TinyDB* database,
+                                                  TinyDBSqlResult* result) {
+    TinyDBSqlResult local_result;
+    TinyDBSqlResult* output = result != NULL ? result : &local_result;
+    memset(output, 0, sizeof(*output));
+    output->status = TINYDB_SQL_SUCCESS;
+    output->prepare_result = PREPARE_SUCCESS;
+    output->execute_result = EXECUTE_SUCCESS;
+    output->route_result = MULTITABLE_ROUTE_NOT_APPLICABLE;
+    output->statement_type = STATEMENT_PRAGMA_USER_VERSION;
+    output->statement_type_valid = true;
+
+    Table* table = tinydb_table(database);
+    if (table == NULL || table->pager == NULL) {
+        output->status = TINYDB_SQL_POLICY_ERROR;
+        output->executed = false;
+        snprintf(output->message,
+                 sizeof(output->message),
+                 "invalid database handle for PRAGMA user_version");
+        return output->status;
+    }
+
+    uint32_t version = 0u;
+    if (table->pager->num_pages > 0u) {
+        PagerPageHandle root_handle;
+        PagerTryPinStatus pin_status = pager_try_pin_existing_page_handle(
+            table->pager,
+            table->root_page_num,
+            &root_handle);
+        if (pin_status != PAGER_TRY_PIN_OK) {
+            output->status = TINYDB_SQL_EXECUTE_ERROR;
+            output->executed = false;
+            snprintf(output->message,
+                     sizeof(output->message),
+                     "PRAGMA user_version could not acquire root page: %s",
+                     pager_try_pin_status_string(pin_status));
+            return output->status;
+        }
+
+        version = *node_parent(root_handle.data);
+        if (!pager_release_page_handle(&root_handle)) {
+            output->status = TINYDB_SQL_EXECUTE_ERROR;
+            output->executed = false;
+            snprintf(output->message,
+                     sizeof(output->message),
+                     "PRAGMA user_version could not release root-page pin");
+            return output->status;
+        }
+    }
+
+    printf("%u\n", version);
+    output->executed = true;
+    return TINYDB_SQL_SUCCESS;
+}
+
 TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
                                    const char* sql,
                                    TinyDBSqlResult* result) {
     if (database != NULL && sql != NULL) {
         Statement statement;
         memset(&statement, 0, sizeof(statement));
-        if (prepare_statement(sql, &statement) == PREPARE_SUCCESS &&
-            statement.type == STATEMENT_CREATE_TABLE) {
-            const CreateTableStatement* create = &statement.create_table;
+        if (prepare_statement(sql, &statement) == PREPARE_SUCCESS) {
+            if (statement.type == STATEMENT_PRAGMA_USER_VERSION) {
+                return read_user_version_nonfatal(database, result);
+            }
 
-            if (generic_record_candidate(create)) {
-                char message[TINYDB_ENGINE_MESSAGE_MAX];
-                if (!validate_generic_layout(create,
-                                             message,
-                                             sizeof(message))) {
-                    return policy_error(result, message);
+            if (statement.type == STATEMENT_CREATE_TABLE) {
+                const CreateTableStatement* create = &statement.create_table;
+
+                if (generic_record_candidate(create)) {
+                    char message[TINYDB_ENGINE_MESSAGE_MAX];
+                    if (!validate_generic_layout(create,
+                                                 message,
+                                                 sizeof(message))) {
+                        return policy_error(result, message);
+                    }
                 }
             }
         }
