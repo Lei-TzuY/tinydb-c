@@ -57,6 +57,8 @@ def main():
                 "INSERT INTO wide_diag VALUES (3, 'left-3', 'right-3');",
                 ".schema wide_diag",
                 ".btree wide_diag",
+                ".stats wide_diag",
+                ".check wide_diag",
                 ".exit",
             ],
         )
@@ -65,6 +67,10 @@ def main():
         assert root_match is not None, first
         root_page = int(root_match.group(1))
         assert "- leaf (size 3)" in first, first
+        assert "Rows: 3" in first, first
+        assert "Leaf Pages: 1" in first, first
+        assert "Internal Pages: 0" in first, first
+        assert "wide_diag: ok: root=" in first, first
         for key in (1, 2, 3):
             assert f"- {key}" in first, first
 
@@ -90,6 +96,8 @@ def main():
         ]
         grow_commands.extend([
             ".btree wide_diag",
+            ".stats wide_diag",
+            ".check wide_diag",
             "PRAGMA integrity_check;",
             ".exit",
         ])
@@ -97,13 +105,35 @@ def main():
 
         assert "- internal (size " in split_output, split_output
         assert split_output.count("- leaf (size ") >= 2, split_output
+        assert "Rows: 40" in split_output, split_output
+        leaf_match = re.search(r"Leaf Pages: (\d+)", split_output)
+        internal_match = re.search(r"Internal Pages: (\d+)", split_output)
+        assert leaf_match is not None and int(leaf_match.group(1)) >= 2, split_output
+        assert internal_match is not None and int(internal_match.group(1)) >= 1, split_output
+        assert "wide_diag: ok: root=" in split_output, split_output
+        assert "rows=40" in split_output, split_output
         assert "- 1" in split_output, split_output
         assert "- 40" in split_output, split_output
         assert "invalid leaf" not in split_output.lower(), split_output
         assert "buffer pool busy" not in split_output.lower(), split_output
         assert "\nok\n" in split_output or "db > ok\n" in split_output, split_output
 
-        print("PASS: diagnostics-aware .page/.btree decode V2 slotted leaves before and after splits")
+        reopen_output = run_session(
+            executable,
+            db_path,
+            [
+                ".stats wide_diag",
+                ".check wide_diag",
+                ".btree wide_diag",
+                ".exit",
+            ],
+        )
+        assert "Rows: 40" in reopen_output, reopen_output
+        assert "wide_diag: ok: root=" in reopen_output, reopen_output
+        assert "rows=40" in reopen_output, reopen_output
+        assert reopen_output.count("- leaf (size ") >= 2, reopen_output
+
+        print("PASS: V2 slotted leaf inspection, stats, and table checks survive splits and reopen")
     finally:
         cleanup(db_path)
 
