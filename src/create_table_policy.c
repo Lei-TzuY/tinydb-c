@@ -1,7 +1,7 @@
 #include "column_type.h"
 #include "engine.h"
-#include "pager_try_pin.h"
 #include "record_payload.h"
+#include "user_version.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -136,31 +136,18 @@ static TinyDBSqlStatus read_user_version_nonfatal(TinyDB* database,
     }
 
     uint32_t version = 0u;
-    if (table->pager->num_pages > 0u) {
-        PagerPageHandle root_handle;
-        PagerTryPinStatus pin_status = pager_try_pin_existing_page_handle(
-            table->pager,
-            table->root_page_num,
-            &root_handle);
-        if (pin_status != PAGER_TRY_PIN_OK) {
-            output->status = TINYDB_SQL_EXECUTE_ERROR;
-            output->executed = false;
-            snprintf(output->message,
-                     sizeof(output->message),
-                     "PRAGMA user_version could not acquire root page: %s",
-                     pager_try_pin_status_string(pin_status));
-            return output->status;
-        }
-
-        version = *node_parent(root_handle.data);
-        if (!pager_release_page_handle(&root_handle)) {
-            output->status = TINYDB_SQL_EXECUTE_ERROR;
-            output->executed = false;
-            snprintf(output->message,
-                     sizeof(output->message),
-                     "PRAGMA user_version could not release root-page pin");
-            return output->status;
-        }
+    char message[TINYDB_ENGINE_MESSAGE_MAX];
+    if (!db_try_get_user_version(table,
+                                 &version,
+                                 message,
+                                 sizeof(message))) {
+        output->status = TINYDB_SQL_EXECUTE_ERROR;
+        output->executed = false;
+        snprintf(output->message,
+                 sizeof(output->message),
+                 "PRAGMA user_version %s",
+                 message[0] != '\0' ? message : "read failed");
+        return output->status;
     }
 
     printf("%u\n", version);
