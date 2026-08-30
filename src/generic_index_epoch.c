@@ -118,6 +118,29 @@ static bool epoch_filename(const Table* table, char* output, size_t output_size)
     return written >= 0 && (size_t)written < output_size;
 }
 
+static bool purge_generic_index_snapshots(Table* table) {
+    if (table == NULL) return false;
+
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        GenericSecondaryIndex* index = &table->sec_indexes[i];
+        if (!index->enabled || index->num_columns != 1 ||
+            index->index_filename[0] == '\0') {
+            continue;
+        }
+
+        char filename[640];
+        int written = snprintf(filename,
+                               sizeof(filename),
+                               "%s.range",
+                               index->index_filename);
+        if (written < 0 || (size_t)written >= sizeof(filename)) return false;
+
+        errno = 0;
+        if (remove(filename) != 0 && errno != ENOENT) return false;
+    }
+    return true;
+}
+
 static uint64_t epoch_checksum(uint64_t epoch) {
     unsigned char u32[4];
     unsigned char u64[8];
@@ -233,6 +256,16 @@ bool tinydb_generic_index_epoch_current(Table* table, uint64_t* epoch) {
         return true;
     }
 
+    /*
+     * The epoch sidecar is the authority that lets persistent range snapshots
+     * prove they describe the current database state. If that authority is
+     * missing or corrupt, a freshly generated epoch must not accidentally
+     * make an old snapshot current again (fresh_epoch_seed is deliberately
+     * lightweight and can repeat within the same second). Remove every
+     * persistent generic snapshot first, then publish the replacement epoch.
+     */
+    if (!purge_generic_index_snapshots(table)) return false;
+
     value = fresh_epoch_seed();
     if (!write_epoch_file(filename, value)) return false;
     *epoch = value;
@@ -248,6 +281,9 @@ bool tinydb_generic_index_epoch_before_mutation(Table* table,
 
     uint64_t epoch = 0;
     if (!read_epoch_file(filename, &epoch)) {
+        /* Do not advance from unauthenticated epoch metadata while retaining
+         * snapshots that may have been produced by an older incarnation. */
+        if (!purge_generic_index_snapshots(table)) return false;
         epoch = fresh_epoch_seed();
     }
     if (epoch == UINT64_MAX) {
