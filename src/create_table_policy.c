@@ -50,10 +50,13 @@ static bool legacy_fixed_row_shape(const CreateTableStatement* create) {
         return false;
     }
 
-    /* Historical bare VARCHAR schemas use the legacy Row executor even though
-     * their catalog metadata recorded a generic 256-byte VARCHAR width. Keep
-     * that compatibility. Explicit widths are safe only when they exactly
-     * match the physical Row fields. */
+    /*
+     * Names alone are not an ABI. Historical bare VARCHAR schemas keep the
+     * original Row executor, and explicit widths opt into that ABI only when
+     * they exactly match the serialized Row fields. Any other explicit width
+     * is a normal schema-aware generic layout even if the columns happen to be
+     * named id/username/email.
+     */
     if (!username.explicitly_sized && !email.explicitly_sized) return true;
     return username.explicitly_sized && email.explicitly_sized &&
            username.storage_size == USERNAME_SIZE &&
@@ -66,7 +69,7 @@ static bool generic_record_candidate(const CreateTableStatement* create) {
            ci_equal(create->col_names[0], "id") &&
            tinydb_column_type_parse(create->col_types[0], &id) &&
            id.type == COL_TYPE_INT &&
-           !legacy_column_names_and_types(create);
+           !legacy_fixed_row_shape(create);
 }
 
 static bool validate_generic_layout(const CreateTableStatement* create,
@@ -118,12 +121,6 @@ TinyDBSqlStatus tinydb_execute_sql(TinyDB* database,
         if (prepare_statement(sql, &statement) == PREPARE_SUCCESS &&
             statement.type == STATEMENT_CREATE_TABLE) {
             const CreateTableStatement* create = &statement.create_table;
-            if (legacy_column_names_and_types(create) &&
-                !legacy_fixed_row_shape(create)) {
-                return policy_error(
-                    result,
-                    "sized legacy Row schemas require username VARCHAR(32) and email VARCHAR(255)");
-            }
 
             if (generic_record_candidate(create)) {
                 char message[TINYDB_ENGINE_MESSAGE_MAX];
