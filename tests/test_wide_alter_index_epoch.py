@@ -47,11 +47,22 @@ def require(output, marker):
         raise AssertionError(f"missing marker {marker!r}\n{output}")
 
 
+def projected_id_lines(output):
+    values = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("db > "):
+            line = line[5:].strip()
+        if line.isdigit():
+            values.append(int(line))
+    return values
+
+
 def require_projected_id(output, value, count=1):
-    marker = f"db > {value}\n"
-    if output.count(marker) < count:
+    actual = projected_id_lines(output).count(value)
+    if actual < count:
         raise AssertionError(
-            f"expected at least {count} projected id line(s) {value!r}\n{output}"
+            f"expected at least {count} projected id line(s) {value!r}; got {actual}\n{output}"
         )
 
 
