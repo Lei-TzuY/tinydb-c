@@ -11,6 +11,11 @@ typedef struct {
     size_t input_length;
 } InputBuffer;
 
+typedef struct {
+    TinyDBDatabaseTreeStats aggregate;
+    TinyDBTreeStats table_stats[MAX_TABLES];
+} ReplCatalogStatsSnapshot;
+
 InputBuffer* new_input_buffer(void) {
     InputBuffer* input_buffer = (InputBuffer*)malloc(sizeof(InputBuffer));
     input_buffer->buffer = NULL;
@@ -104,22 +109,97 @@ static bool get_table_stats(Table* table,
     return true;
 }
 
+static void print_table_stats_values(const char* table_name,
+                                     const TinyDBTreeStats* stats) {
+    printf("Table: %s\n", table_name);
+    printf("  Root Page: %u\n", stats->root_page_num);
+    printf("  Height: %u\n", stats->height);
+    printf("  Rows: %u\n", stats->total_rows);
+    printf("  Leaf Pages: %u\n", stats->leaf_pages);
+    printf("  Internal Pages: %u\n", stats->internal_pages);
+}
+
 static void print_table_stats(Table* table, const char* table_name) {
     TinyDBTreeStats stats;
     if (!get_table_stats(table, table_name, &stats)) return;
-    printf("Table: %s\n", table_name);
-    printf("  Root Page: %u\n", stats.root_page_num);
-    printf("  Height: %u\n", stats.height);
-    printf("  Rows: %u\n", stats.total_rows);
-    printf("  Leaf Pages: %u\n", stats.leaf_pages);
-    printf("  Internal Pages: %u\n", stats.internal_pages);
+    print_table_stats_values(table_name, &stats);
+}
+
+static bool collect_catalog_stats_snapshot(Table* table,
+                                           ReplCatalogStatsSnapshot* snapshot,
+                                           char* message,
+                                           size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (snapshot != NULL) memset(snapshot, 0, sizeof(*snapshot));
+    if (table == NULL || snapshot == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid catalog tree-stat arguments");
+        }
+        return false;
+    }
+
+    ReplCatalogStatsSnapshot collected;
+    memset(&collected, 0, sizeof(collected));
+    collected.aggregate.table_count = table->catalog.num_tables;
+
+    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
+        const char* table_name = table->catalog.schemas[i].name;
+        TinyDBTreeStats* tree_stats = &collected.table_stats[i];
+        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+        if (!tinydb_get_tree_stats_diagnostic(table,
+                                               table_name,
+                                               tree_stats,
+                                               tree_message,
+                                               sizeof(tree_message))) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "table '%s': %s",
+                         table_name,
+                         tree_message[0] != '\0'
+                             ? tree_message
+                             : "tree statistics unavailable");
+            }
+            return false;
+        }
+        if (UINT32_MAX - collected.aggregate.total_rows < tree_stats->total_rows ||
+            UINT32_MAX - collected.aggregate.leaf_pages < tree_stats->leaf_pages ||
+            UINT32_MAX - collected.aggregate.internal_pages < tree_stats->internal_pages) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "catalog tree statistics overflow at table '%s'",
+                         table_name);
+            }
+            return false;
+        }
+        collected.aggregate.total_rows += tree_stats->total_rows;
+        collected.aggregate.leaf_pages += tree_stats->leaf_pages;
+        collected.aggregate.internal_pages += tree_stats->internal_pages;
+        if (tree_stats->height > collected.aggregate.max_height) {
+            collected.aggregate.max_height = tree_stats->height;
+        }
+    }
+
+    *snapshot = collected;
+    if (message != NULL && message_size > 0u) {
+        snprintf(message,
+                 message_size,
+                 "ok: tables=%u rows=%u leaf_pages=%u internal_pages=%u max_height=%u",
+                 collected.aggregate.table_count,
+                 collected.aggregate.total_rows,
+                 collected.aggregate.leaf_pages,
+                 collected.aggregate.internal_pages,
+                 collected.aggregate.max_height);
+    }
+    return true;
 }
 
 static bool print_global_stats(Table* table) {
-    TinyDBDatabaseTreeStats stats;
+    ReplCatalogStatsSnapshot snapshot;
     char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
-    if (!tinydb_get_database_tree_stats(table,
-                                        &stats,
+    if (!collect_catalog_stats_snapshot(table,
+                                        &snapshot,
                                         message,
                                         sizeof(message))) {
         printf("Error: Unable to inspect database tree statistics: %s.\n",
@@ -129,15 +209,23 @@ static bool print_global_stats(Table* table) {
         return false;
     }
 
+    const TinyDBDatabaseTreeStats* stats = &snapshot.aggregate;
     /* Keep the long-standing field names for scripts/tests while extending
      * their meaning to all catalog roots in a multi-table database. */
     printf("Total Pages: %u\n", table->pager->num_pages);
-    printf("Leaf Pages: %u\n", stats.leaf_pages);
-    printf("Internal Pages: %u\n", stats.internal_pages);
+    printf("Leaf Pages: %u\n", stats->leaf_pages);
+    printf("Internal Pages: %u\n", stats->internal_pages);
     printf("Free Pages: %u\n", table->pager->free_page_count);
-    printf("Total Rows: %u\n", stats.total_rows);
+    printf("Total Rows: %u\n", stats->total_rows);
     printf("In Transaction: %s\n", table->in_transaction ? "Yes" : "No");
     printf("Secondary Index: %s\n", table->username_index_enabled ? "Enabled" : "Disabled");
+
+    if (stats->table_count > 1u) {
+        for (uint32_t i = 0u; i < stats->table_count; i++) {
+            print_table_stats_values(table->catalog.schemas[i].name,
+                                     &snapshot.table_stats[i]);
+        }
+    }
     return true;
 }
 
@@ -210,14 +298,7 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
         if (argument[0] != '\0') {
             print_table_stats(table, argument);
         } else {
-            if (!print_global_stats(table)) {
-                return META_COMMAND_SUCCESS;
-            }
-            if (table->catalog.num_tables > 1) {
-                for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
-                    print_table_stats(table, table->catalog.schemas[i].name);
-                }
-            }
+            (void)print_global_stats(table);
         }
         return META_COMMAND_SUCCESS;
     }
