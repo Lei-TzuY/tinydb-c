@@ -31,6 +31,24 @@ typedef enum {
     PAGER_TRY_PIN_NO_MEMORY
 } PagerTryPinStatus;
 
+static inline const char* pager_try_pin_status_string(PagerTryPinStatus status) {
+    switch (status) {
+        case PAGER_TRY_PIN_OK:
+            return "ok";
+        case PAGER_TRY_PIN_BUSY:
+            return "buffer pool busy";
+        case PAGER_TRY_PIN_INVALID_PAGE:
+            return "invalid page";
+        case PAGER_TRY_PIN_IO_ERROR:
+            return "page I/O error";
+        case PAGER_TRY_PIN_CORRUPT_PAGE:
+            return "page checksum mismatch";
+        case PAGER_TRY_PIN_NO_MEMORY:
+            return "out of memory while spilling dirty page";
+    }
+    return "unknown pager try-pin status";
+}
+
 static inline uint32_t pager_try_pin_fnv1a32(const void* data, size_t len) {
     const uint8_t* bytes = (const uint8_t*)data;
     uint32_t hash = 2166136261u;
