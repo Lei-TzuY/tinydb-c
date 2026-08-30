@@ -148,7 +148,8 @@ int main(int argc, char** argv) {
         }
         pager_unpin_page(pager, page_num);
     }
-    memcpy(dirty_page, &(uint32_t){DIRTY_MARKER}, sizeof(uint32_t));
+    uint32_t dirty_marker = DIRTY_MARKER;
+    memcpy(dirty_page, &dirty_marker, sizeof(dirty_marker));
     mark_page_dirty(pager, 0u);
     pager_unpin_page(pager, 0u);
 
