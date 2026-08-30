@@ -33,6 +33,12 @@ typedef struct {
     uint32_t shared_pages;
 } TinyDBPageOwnershipStats;
 
+typedef struct {
+    uint32_t table_count;
+    TinyDBTreeStats table_stats[MAX_TABLES];
+    TinyDBPageOwnershipStats ownership;
+} TinyDBCatalogTreeCheck;
+
 const TableSchema* tinydb_find_table_schema(const Table* table, const char* table_name);
 
 bool tinydb_get_tree_stats(Table* table,
@@ -131,6 +137,82 @@ bool tinydb_check_page_ownership(Table* table,
                                  TinyDBPageOwnershipStats* stats,
                                  char* message,
                                  size_t message_size);
+
+/* Catalog-wide counterpart to tinydb_check_table_tree(). Every root is
+ * structurally walked exactly once, page ownership is checked exactly once,
+ * and results are published only after the complete catalog passes. */
+static inline bool tinydb_check_catalog_trees(
+    Table* table,
+    TinyDBCatalogTreeCheck* result,
+    char* message,
+    size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (result != NULL) memset(result, 0, sizeof(*result));
+    if (table == NULL || result == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid catalog tree-check arguments");
+        }
+        return false;
+    }
+    if (table->catalog.num_tables == 0u) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "catalog contains no table roots");
+        }
+        return false;
+    }
+
+    TinyDBCatalogTreeCheck checked;
+    memset(&checked, 0, sizeof(checked));
+    checked.table_count = table->catalog.num_tables;
+
+    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
+        const char* table_name = table->catalog.schemas[i].name;
+        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+        if (!tinydb_get_tree_stats_diagnostic(table,
+                                               table_name,
+                                               &checked.table_stats[i],
+                                               tree_message,
+                                               sizeof(tree_message))) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "table '%s': %s",
+                         table_name,
+                         tree_message[0] != '\0'
+                             ? tree_message
+                             : "tree validation failed");
+            }
+            return false;
+        }
+    }
+
+    char ownership_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+    if (!tinydb_check_page_ownership(table,
+                                     &checked.ownership,
+                                     ownership_message,
+                                     sizeof(ownership_message))) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message,
+                     message_size,
+                     "page ownership: %s",
+                     ownership_message[0] != '\0'
+                         ? ownership_message
+                         : "ownership validation failed");
+        }
+        return false;
+    }
+
+    *result = checked;
+    if (message != NULL && message_size > 0u) {
+        snprintf(message,
+                 message_size,
+                 "ok: tables=%u owned=%u free=%u",
+                 checked.table_count,
+                 checked.ownership.owned_pages,
+                 checked.ownership.free_pages);
+    }
+    return true;
+}
 
 bool tinydb_check_database(Table* table,
                            TinyDBPageOwnershipStats* ownership_stats,
