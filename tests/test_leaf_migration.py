@@ -37,6 +37,7 @@ def main():
     required = [
         "LEAF_MIGRATION_OK",
         "compact_roundtrip=yes",
+        "compact_row_primitive=yes",
         "full_v1=yes",
         "oversize_downgrade_rejected=yes",
         "overcount_downgrade_rejected=yes",
@@ -49,6 +50,7 @@ def main():
 
     print(
         "PASS: V1/V2 leaf migration preserves schema-sized payloads and identity, "
+        "exposes a failure-atomic reusable fixed-row compact encoder for whole-tree rebuilds, "
         "round-trips fixed pages, rejects unsafe downgrade geometry atomically, "
         "and leaves Pager checksum trailers untouched"
     )
