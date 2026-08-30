@@ -91,6 +91,24 @@ static bool v1_keys_strictly_increasing(const void* source) {
     return true;
 }
 
+static bool v1_payload_key_matches(const TableSchema* schema,
+                                   const void* source,
+                                   uint32_t index) {
+    if (schema == NULL || source == NULL || schema->num_columns == 0u ||
+        schema->columns[0].type != COL_TYPE_INT ||
+        schema->columns[0].offset > schema->row_size ||
+        schema->columns[0].size != sizeof(uint32_t) ||
+        schema->columns[0].offset + sizeof(uint32_t) > schema->row_size) {
+        return false;
+    }
+
+    uint32_t payload_key = 0u;
+    memcpy(&payload_key,
+           v1_value(source, index) + schema->columns[0].offset,
+           sizeof(payload_key));
+    return payload_key == v1_key(source, index);
+}
+
 static bool compact_envelope_roundtrips(const TableSchema* schema,
                                         const unsigned char* envelope,
                                         uint32_t envelope_length) {
@@ -238,6 +256,8 @@ bool tinydb_leaf_migrate_v1_to_compact_v2(const void* source,
 
     uint32_t count = v1_count(source);
     for (uint32_t i = 0u; i < count; i++) {
+        if (!v1_payload_key_matches(schema, source, i)) return false;
+
         TinyDBRecordPayload payload;
         memset(&payload, 0, sizeof(payload));
         payload.length = schema->row_size;
