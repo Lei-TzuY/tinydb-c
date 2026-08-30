@@ -118,6 +118,27 @@ static bool epoch_filename(const Table* table, char* output, size_t output_size)
     return written >= 0 && (size_t)written < output_size;
 }
 
+static bool remove_snapshot_durably(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') return false;
+
+    errno = 0;
+    if (remove(filename) != 0) {
+        return errno == ENOENT;
+    }
+
+#ifndef _WIN32
+    /*
+     * remove(2) only updates the directory entry in memory. The epoch file is
+     * the authority for reusing persistent range snapshots, so publishing a
+     * replacement epoch before the snapshot deletion is durable leaves a
+     * crash window where an old sidecar can reappear after reboot. Persist the
+     * namespace mutation before the new authority is written.
+     */
+    if (!sync_parent_directory(filename)) return false;
+#endif
+    return true;
+}
+
 static bool purge_generic_index_snapshots(Table* table) {
     if (table == NULL) return false;
 
@@ -135,8 +156,7 @@ static bool purge_generic_index_snapshots(Table* table) {
                                index->index_filename);
         if (written < 0 || (size_t)written >= sizeof(filename)) return false;
 
-        errno = 0;
-        if (remove(filename) != 0 && errno != ENOENT) return false;
+        if (!remove_snapshot_durably(filename)) return false;
     }
     return true;
 }
