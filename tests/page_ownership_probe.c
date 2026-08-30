@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
     }
 
     TinyDBPageOwnershipStats stats;
+    TinyDBTreeStats tree_stats;
     char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
     if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
         stats.orphan_pages != 0 || stats.shared_pages != 0) {
@@ -114,6 +115,16 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("page ownership did not fail non-fatally under full pin pressure");
+    }
+    if (tinydb_get_tree_stats_diagnostic(table,
+                                         "users",
+                                         &tree_stats,
+                                         message,
+                                         sizeof(message)) ||
+        strstr(message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("tree stats did not preserve full-pool backpressure detail");
     }
     if (tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
         strstr(message, "buffer pool busy") == NULL) {
@@ -160,11 +171,21 @@ int main(int argc, char** argv) {
         return fail("unable to free one frame for diagnostic progress");
     }
     if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
+        !tinydb_get_tree_stats_diagnostic(table,
+                                          "users",
+                                          &tree_stats,
+                                          message,
+                                          sizeof(message)) ||
         !tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
         !tinydb_check_database(table, &stats, message, sizeof(message))) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("diagnostics require more than one free frame");
+    }
+    if (tree_stats.total_rows != 1u) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("tree stats changed while retrying after backpressure");
     }
     if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) !=
         TINYDB_SQL_SUCCESS) {
@@ -261,6 +282,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
     return 0;
 }
