@@ -3,25 +3,27 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "src" / "record_payload.h").read_text(encoding="utf-8")
+TRY_HEADER = (ROOT / "src" / "record_payload_try_find.h").read_text(encoding="utf-8")
 SOURCE = (ROOT / "src" / "record_read_v2.c").read_text(encoding="utf-8")
+TRY_SOURCE = (ROOT / "src" / "record_payload.c").read_text(encoding="utf-8")
 
 
-def function_body(name: str) -> str:
+def function_body(name: str, source: str = SOURCE) -> str:
     marker = name + "("
-    start = SOURCE.find(marker)
+    start = source.find(marker)
     if start < 0:
         raise AssertionError(f"missing function {name}")
-    brace = SOURCE.find("{", start)
+    brace = source.find("{", start)
     if brace < 0:
         raise AssertionError(f"missing body for {name}")
     depth = 0
-    for i in range(brace, len(SOURCE)):
-        if SOURCE[i] == "{":
+    for i in range(brace, len(source)):
+        if source[i] == "{":
             depth += 1
-        elif SOURCE[i] == "}":
+        elif source[i] == "}":
             depth -= 1
             if depth == 0:
-                return SOURCE[brace : i + 1]
+                return source[brace : i + 1]
     raise AssertionError(f"unterminated body for {name}")
 
 
@@ -34,6 +36,7 @@ def main() -> int:
     require(HEADER, "TinyDBRecordPayloadVisitor", "payload visitor API")
     require(HEADER, "tinydb_record_payload_find", "payload point-read API")
     require(HEADER, "tinydb_record_payload_scan", "payload scan API")
+    require(TRY_HEADER, "tinydb_record_payload_try_find", "non-fatal payload point-read API")
 
     raw = function_body("raw_value_to_payload")
     require(raw, "schema->row_size > sizeof(payload->bytes)", "payload capacity guard")
@@ -50,6 +53,15 @@ def main() -> int:
     if "tinydb_schema_supports_records" in find or "tinydb_record_payload_to_record" in find:
         raise AssertionError("payload find must not round-trip through the legacy TinyDBRecord carrier")
 
+    safe_find = function_body("tinydb_record_payload_try_find", TRY_SOURCE)
+    require(safe_find, "pager_try_pin_existing_page_handle", "non-fatal page acquisition")
+    require(safe_find, "pager_page_handle_acquire_read", "stable read ownership")
+    require(safe_find, "pager_page_handle_release_read", "read-lock release")
+    require(safe_find, "pager_release_page_handle", "pin release")
+    require(safe_find, "try_find_internal_child", "one-page-at-a-time internal traversal")
+    if "get_page(" in safe_find or "tinydb_leaf_read_find" in safe_find:
+        raise AssertionError("non-fatal payload find must not re-enter fatal page/cursor lookup")
+
     scan = function_body("tinydb_record_payload_scan")
     require(scan, "tinydb_record_payload_schema_supported", "payload scan schema guard")
     require(scan, "tinydb_leaf_read_start", "format-aware scan start")
@@ -63,7 +75,7 @@ def main() -> int:
     require(legacy_find, "tinydb_schema_supports_records", "legacy compatibility ceiling")
     require(legacy_find, "cursor_to_record", "legacy adapter")
 
-    print("PASS: payload-native point/scan reads stay schema-sized, mixed-leaf aware, and independent of the legacy ROW_SIZE carrier")
+    print("PASS: payload-native reads retain the legacy cursor surface while exposing a linked try-pin point lookup that avoids fatal get_page() acquisition")
     return 0
 
 
