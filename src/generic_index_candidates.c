@@ -1,5 +1,6 @@
 #include "generic_index_candidates.h"
 #include "generic_index_epoch.h"
+#include "record_payload.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -205,24 +206,19 @@ static bool entry_less_or_equal(const CandidateSnapshot* snapshot,
     return compared <= 0;
 }
 
-static bool build_entry(const TableSchema* schema,
-                        const TinyDBRecord* record,
-                        void* raw_context) {
-    CandidateBuildContext* context = (CandidateBuildContext*)raw_context;
-    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
-    uint32_t value_count = 0;
-    char message[TINYDB_RECORD_MESSAGE_MAX];
-    if (!tinydb_record_decode(schema,
-                              record,
-                              values,
-                              MAX_COLUMNS_PER_TABLE,
-                              &value_count,
-                              message,
-                              sizeof(message)) ||
-        value_count != schema->num_columns ||
+static bool append_entry_from_values(CandidateBuildContext* context,
+                                     const TinyDBValue* values,
+                                     uint32_t value_count) {
+    if (context == NULL || context->schema == NULL ||
+        context->snapshot == NULL || values == NULL ||
+        value_count != context->schema->num_columns ||
+        context->column_index >= value_count ||
+        values[0].type != COL_TYPE_INT ||
+        values[context->column_index].type !=
+            context->schema->columns[context->column_index].type ||
         !reserve_entries(context->snapshot,
                          context->snapshot->count + 1u)) {
-        context->failed = true;
+        if (context != NULL) context->failed = true;
         return false;
     }
 
@@ -237,6 +233,46 @@ static bool build_entry(const TableSchema* schema,
     }
     entry->primary_key = values[0].int_value;
     return true;
+}
+
+static bool build_entry(const TableSchema* schema,
+                        const TinyDBRecord* record,
+                        void* raw_context) {
+    CandidateBuildContext* context = (CandidateBuildContext*)raw_context;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    uint32_t value_count = 0;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_decode(schema,
+                              record,
+                              values,
+                              MAX_COLUMNS_PER_TABLE,
+                              &value_count,
+                              message,
+                              sizeof(message))) {
+        context->failed = true;
+        return false;
+    }
+    return append_entry_from_values(context, values, value_count);
+}
+
+static bool build_payload_entry(const TableSchema* schema,
+                                const TinyDBRecordPayload* payload,
+                                void* raw_context) {
+    CandidateBuildContext* context = (CandidateBuildContext*)raw_context;
+    TinyDBValue values[MAX_COLUMNS_PER_TABLE];
+    uint32_t value_count = 0;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!tinydb_record_payload_decode_values(schema,
+                                             payload,
+                                             values,
+                                             MAX_COLUMNS_PER_TABLE,
+                                             &value_count,
+                                             message,
+                                             sizeof(message))) {
+        context->failed = true;
+        return false;
+    }
+    return append_entry_from_values(context, values, value_count);
 }
 
 static bool write_snapshot(const TableSchema* schema,
@@ -382,6 +418,14 @@ static bool load_snapshot(Table* table,
     return ok;
 }
 
+static void discard_snapshot(CandidateSnapshot* snapshot) {
+    if (snapshot == NULL) return;
+    free(snapshot->entries);
+    snapshot->entries = NULL;
+    snapshot->count = 0u;
+    snapshot->capacity = 0u;
+}
+
 static bool ensure_snapshot(Table* table,
                             const TableSchema* schema,
                             const GenericSecondaryIndex* index,
@@ -407,8 +451,25 @@ static bool ensure_snapshot(Table* table,
     context.schema = schema;
     context.column_index = column_index;
     context.snapshot = snapshot;
-    (void)tinydb_record_scan(table, schema, build_entry, &context);
-    if (context.failed) return false;
+
+    bool scan_complete = true;
+    if (schema->row_size > ROW_SIZE) {
+        char scan_message[TINYDB_RECORD_MESSAGE_MAX];
+        scan_complete = false;
+        (void)tinydb_record_payload_scan(table,
+                                         schema,
+                                         build_payload_entry,
+                                         &context,
+                                         &scan_complete,
+                                         scan_message,
+                                         sizeof(scan_message));
+    } else {
+        (void)tinydb_record_scan(table, schema, build_entry, &context);
+    }
+    if (context.failed || !scan_complete) {
+        discard_snapshot(snapshot);
+        return false;
+    }
 
     if (snapshot->count > 1) {
         qsort(snapshot->entries,
