@@ -78,6 +78,11 @@ def main():
         setup_commands.extend(
             [
                 "CREATE INDEX idx_products_price ON products(price);",
+                "CREATE TABLE wide_archive (id INT, left_text VARCHAR(255), right_text VARCHAR(255));",
+                "INSERT INTO wide_archive VALUES (10, 'left-a', 'right-c');",
+                "INSERT INTO wide_archive VALUES (20, 'left-b', 'right-a');",
+                "INSERT INTO wide_archive VALUES (30, 'left-c', 'right-b');",
+                "CREATE INDEX idx_wide_right ON wide_archive(right_text);",
                 "CREATE VIEW user_copy AS SELECT * FROM users;",
                 "PRAGMA user_version = 77;",
                 "DELETE FROM products WHERE price < 260;",
@@ -87,6 +92,7 @@ def main():
         )
         setup = run_session(executable, source, setup_commands)
         require(setup, "ok")
+        require(setup, "Table 'wide_archive' created.")
 
         if not os.path.exists(source):
             raise AssertionError("source database was not created")
@@ -98,13 +104,14 @@ def main():
             [
                 f"VACUUM INTO '{destination}';",
                 "SELECT COUNT(*) FROM products;",
+                "SELECT COUNT(*) FROM wide_archive;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
         )
         require(vacuum, f"Database backed up to '{destination}'.")
         require(vacuum, "ok")
-        if scalar_results(vacuum) != [15]:
+        if scalar_results(vacuum) != [15, 3]:
             raise AssertionError("VACUUM INTO changed the source database\n" + vacuum)
 
         if not os.path.exists(destination):
@@ -124,8 +131,14 @@ def main():
                 "SELECT * FROM archive WHERE id = 1;",
                 "SELECT COUNT(*) FROM products;",
                 "SELECT name FROM products WHERE id = 26;",
+                "SELECT right_text FROM wide_archive WHERE id = 20;",
+                "SELECT left_text FROM wide_archive WHERE right_text = 'right-b';",
+                "EXPLAIN SELECT left_text FROM wide_archive WHERE right_text >= 'right-b';",
+                "INSERT INTO wide_archive VALUES (40, 'left-d', 'right-d');",
+                "SELECT COUNT(*) FROM wide_archive;",
                 "PRAGMA user_version;",
                 "PRAGMA index_list(products);",
+                "PRAGMA index_list(wide_archive);",
                 "EXPLAIN SELECT name FROM products WHERE price >= 350;",
                 "SELECT * FROM user_copy;",
                 "PRAGMA integrity_check;",
@@ -135,14 +148,18 @@ def main():
         require(reopened, "(1, main1, m1@test.com)")
         require(reopened, "(1, archive1, a1@test.com)")
         require(reopened, "p26")
+        require(reopened, "right-a")
+        require(reopened, "left-c")
         require(reopened, "77")
         require(reopened, "idx_products_price")
+        require(reopened, "idx_wide_right")
         require(reopened, "PLAN: GENERIC SECONDARY INDEX RANGE SCAN")
         require(reopened, "INDEX: idx_products_price")
+        require(reopened, "INDEX: idx_wide_right")
         require(reopened, "(2, main2, m2@test.com)")
         require(reopened, "ok")
-        if scalar_results(reopened)[:1] != [15]:
-            raise AssertionError("destination generic row count is wrong\n" + reopened)
+        if scalar_results(reopened)[:2] != [15, 4]:
+            raise AssertionError("destination row counts are wrong\n" + reopened)
 
         collision = run_session(
             executable,
@@ -159,9 +176,10 @@ def main():
 
         print(
             "PASS: multi-table VACUUM INTO logically rebuilds compact independent roots, "
-            "preserves users/legacy/generic rows, user_version, views and generic indexes, "
-            "keeps the source unchanged, passes integrity after reopen, and refuses an "
-            "existing destination."
+            "preserves users/legacy/generic and 516-byte payload-native rows, user_version, "
+            "views and generic indexes, keeps the destination wide root writable after "
+            "reopen, passes integrity, keeps the source unchanged, and refuses an existing "
+            "destination."
         )
     finally:
         cleanup(source)
