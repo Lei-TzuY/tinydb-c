@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
     TinyDBPageOwnershipStats stats;
     TinyDBTreeStats tree_stats;
     TinyDBDatabaseTreeStats database_tree_stats;
+    TinyDBCatalogTreeCheck catalog_check;
     char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
     if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
         stats.orphan_pages != 0 || stats.shared_pages != 0) {
@@ -142,6 +143,19 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("catalog stats published partial totals under full pin pressure");
     }
+    memset(&catalog_check, 0xA5, sizeof(catalog_check));
+    if (tinydb_check_catalog_trees(table,
+                                   &catalog_check,
+                                   message,
+                                   sizeof(message)) ||
+        strstr(message, "buffer pool busy") == NULL ||
+        catalog_check.table_count != 0u ||
+        catalog_check.ownership.total_pages != 0u ||
+        catalog_check.ownership.owned_pages != 0u) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("catalog check published partial results under full pin pressure");
+    }
     if (tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
         strstr(message, "buffer pool busy") == NULL) {
         (void)release_handles(owners, owner_count);
@@ -196,6 +210,10 @@ int main(int argc, char** argv) {
                                         &database_tree_stats,
                                         message,
                                         sizeof(message)) ||
+        !tinydb_check_catalog_trees(table,
+                                    &catalog_check,
+                                    message,
+                                    sizeof(message)) ||
         !tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
         !tinydb_check_database(table, &stats, message, sizeof(message))) {
         (void)release_handles(owners, owner_count);
@@ -214,6 +232,16 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("catalog stats did not recover complete totals with one free frame");
+    }
+    if (catalog_check.table_count != 2u ||
+        catalog_check.table_stats[0].total_rows != 1u ||
+        catalog_check.table_stats[1].total_rows != 260u ||
+        catalog_check.ownership.orphan_pages != 0u ||
+        catalog_check.ownership.shared_pages != 0u ||
+        catalog_check.ownership.owned_pages == 0u) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("catalog check did not recover complete results with one free frame");
     }
     if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) !=
         TINYDB_SQL_SUCCESS) {
@@ -310,6 +338,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes catalog_stats_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes catalog_stats_one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes catalog_stats_busy=yes catalog_check_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes catalog_stats_one_free_frame_success=yes catalog_check_one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
     return 0;
 }
