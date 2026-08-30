@@ -1,5 +1,6 @@
 #include "diagnostics.h"
 #include "leaf_page_access.h"
+#include "pager_try_pin.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +24,23 @@ typedef struct {
     Table* table;
     uint32_t root_page_num;
     bool* visited;
+    PagerTryPinStatus pin_status;
 } DatabaseTreeWalk;
+
+static void record_pin_status(DatabaseTreeWalk* walk,
+                              PagerTryPinStatus status) {
+    if (walk->pin_status == PAGER_TRY_PIN_OK &&
+        status != PAGER_TRY_PIN_OK) {
+        walk->pin_status = status;
+    }
+}
+
+static bool release_diagnostic_handle(DatabaseTreeWalk* walk,
+                                      PagerPageHandle* handle) {
+    if (pager_release_page_handle(handle)) return true;
+    record_pin_status(walk, PAGER_TRY_PIN_BUSY);
+    return false;
+}
 
 static bool reciprocal_leaf_link_ok(DatabaseTreeWalk* walk,
                                     uint32_t page_num,
@@ -35,13 +52,27 @@ static bool reciprocal_leaf_link_ok(DatabaseTreeWalk* walk,
         page_is_free(pager, sibling_page_num)) {
         return false;
     }
-    void* sibling = get_page(pager, sibling_page_num);
-    if (get_node_type(sibling) != NODE_LEAF) return false;
+
+    PagerPageHandle sibling_handle;
+    PagerTryPinStatus status = pager_try_pin_existing_page_handle(
+        pager, sibling_page_num, &sibling_handle);
+    if (status != PAGER_TRY_PIN_OK) {
+        record_pin_status(walk, status);
+        return false;
+    }
+
+    void* sibling = sibling_handle.data;
+    bool ok = get_node_type(sibling) == NODE_LEAF;
     uint32_t reciprocal = 0u;
-    bool readable = sibling_is_previous
-        ? tinydb_leaf_page_next(sibling, PAGE_SIZE, &reciprocal)
-        : tinydb_leaf_page_prev(sibling, PAGE_SIZE, &reciprocal);
-    return readable && reciprocal == page_num;
+    if (ok) {
+        ok = sibling_is_previous
+            ? tinydb_leaf_page_next(sibling, PAGE_SIZE, &reciprocal)
+            : tinydb_leaf_page_prev(sibling, PAGE_SIZE, &reciprocal);
+        ok = ok && reciprocal == page_num;
+    }
+
+    if (!release_diagnostic_handle(walk, &sibling_handle)) return false;
+    return ok;
 }
 
 static bool walk_tree_dual(DatabaseTreeWalk* walk,
@@ -52,27 +83,41 @@ static bool walk_tree_dual(DatabaseTreeWalk* walk,
         walk->visited[page_num]) {
         return false;
     }
+
+    PagerPageHandle node_handle;
+    PagerTryPinStatus status = pager_try_pin_existing_page_handle(
+        pager, page_num, &node_handle);
+    if (status != PAGER_TRY_PIN_OK) {
+        record_pin_status(walk, status);
+        return false;
+    }
     walk->visited[page_num] = true;
 
-    void* node = get_page(pager, page_num);
+    void* node = node_handle.data;
     bool root_page = page_num == walk->root_page_num;
     if (root_page) {
-        if (!is_node_root(node)) return false;
-    } else {
-        if (is_node_root(node) || *node_parent(node) != expected_parent) {
+        if (!is_node_root(node)) {
+            (void)release_diagnostic_handle(walk, &node_handle);
             return false;
         }
+    } else if (is_node_root(node) || *node_parent(node) != expected_parent) {
+        (void)release_diagnostic_handle(walk, &node_handle);
+        return false;
     }
 
     NodeType type = get_node_type(node);
     if (type == NODE_LEAF) {
         uint32_t count = 0u;
-        if (!tinydb_leaf_page_count(node, PAGE_SIZE, &count)) return false;
+        if (!tinydb_leaf_page_count(node, PAGE_SIZE, &count)) {
+            (void)release_diagnostic_handle(walk, &node_handle);
+            return false;
+        }
         uint32_t prior_key = 0u;
         for (uint32_t i = 0u; i < count; i++) {
             uint32_t key = 0u;
             if (!tinydb_leaf_page_key_at(node, PAGE_SIZE, i, &key) ||
                 (i > 0u && prior_key >= key)) {
+                (void)release_diagnostic_handle(walk, &node_handle);
                 return false;
             }
             prior_key = key;
@@ -80,35 +125,49 @@ static bool walk_tree_dual(DatabaseTreeWalk* walk,
 
         uint32_t previous_leaf = 0u;
         uint32_t next_leaf = 0u;
-        if (!tinydb_leaf_page_prev(node, PAGE_SIZE, &previous_leaf) ||
-            !tinydb_leaf_page_next(node, PAGE_SIZE, &next_leaf) ||
-            !reciprocal_leaf_link_ok(walk,
-                                     page_num,
-                                     previous_leaf,
-                                     true) ||
-            !reciprocal_leaf_link_ok(walk,
-                                     page_num,
-                                     next_leaf,
-                                     false)) {
-            return false;
-        }
-        return true;
+        bool links_ok = tinydb_leaf_page_prev(node, PAGE_SIZE, &previous_leaf) &&
+                        tinydb_leaf_page_next(node, PAGE_SIZE, &next_leaf) &&
+                        reciprocal_leaf_link_ok(walk,
+                                                page_num,
+                                                previous_leaf,
+                                                true) &&
+                        reciprocal_leaf_link_ok(walk,
+                                                page_num,
+                                                next_leaf,
+                                                false);
+        if (!release_diagnostic_handle(walk, &node_handle)) return false;
+        return links_ok;
     }
 
-    if (type != NODE_INTERNAL) return false;
+    if (type != NODE_INTERNAL) {
+        (void)release_diagnostic_handle(walk, &node_handle);
+        return false;
+    }
     uint32_t num_keys = *internal_node_num_keys(node);
-    if (num_keys > INTERNAL_NODE_MAX_KEYS) return false;
+    if (num_keys > INTERNAL_NODE_MAX_KEYS) {
+        (void)release_diagnostic_handle(walk, &node_handle);
+        return false;
+    }
     for (uint32_t i = 1u; i < num_keys; i++) {
         if (*internal_node_key(node, i - 1u) >= *internal_node_key(node, i)) {
+            (void)release_diagnostic_handle(walk, &node_handle);
             return false;
         }
     }
 
     uint32_t child_count = num_keys + 1u;
     uint32_t* children = (uint32_t*)malloc(sizeof(uint32_t) * child_count);
-    if (children == NULL) return false;
+    if (children == NULL) {
+        (void)release_diagnostic_handle(walk, &node_handle);
+        return false;
+    }
     for (uint32_t i = 0u; i < child_count; i++) {
         children[i] = *internal_node_child(node, i);
+    }
+
+    if (!release_diagnostic_handle(walk, &node_handle)) {
+        free(children);
+        return false;
     }
 
     bool ok = true;
@@ -122,7 +181,10 @@ static bool walk_tree_dual(DatabaseTreeWalk* walk,
     return ok;
 }
 
-static bool validate_tree_dual(Table* table, const TableSchema* schema) {
+static bool validate_tree_dual(Table* table,
+                               const TableSchema* schema,
+                               PagerTryPinStatus* pin_status) {
+    if (pin_status != NULL) *pin_status = PAGER_TRY_PIN_OK;
     if (table == NULL || table->pager == NULL || schema == NULL ||
         schema->root_page_num >= table->pager->num_pages) {
         return false;
@@ -133,9 +195,11 @@ static bool validate_tree_dual(Table* table, const TableSchema* schema) {
     walk.table = table;
     walk.root_page_num = schema->root_page_num;
     walk.visited = visited;
+    walk.pin_status = PAGER_TRY_PIN_OK;
     bool ok = walk_tree_dual(&walk,
                              schema->root_page_num,
                              schema->root_page_num);
+    if (pin_status != NULL) *pin_status = walk.pin_status;
     free(visited);
     return ok;
 }
@@ -174,12 +238,21 @@ bool tinydb_check_database(Table* table,
             }
         }
 
-        if (!validate_tree_dual(table, schema)) {
+        PagerTryPinStatus pin_status = PAGER_TRY_PIN_OK;
+        if (!validate_tree_dual(table, schema, &pin_status)) {
             if (message != NULL && message_size > 0) {
-                snprintf(message,
-                         message_size,
-                         "table '%s' B+ tree structural validation failed",
-                         schema->name);
+                if (pin_status != PAGER_TRY_PIN_OK) {
+                    snprintf(message,
+                             message_size,
+                             "table '%s' B+ tree validation could not acquire page: %s",
+                             schema->name,
+                             pager_try_pin_status_string(pin_status));
+                } else {
+                    snprintf(message,
+                             message_size,
+                             "table '%s' B+ tree structural validation failed",
+                             schema->name);
+                }
             }
             return false;
         }
