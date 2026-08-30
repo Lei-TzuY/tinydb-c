@@ -147,6 +147,29 @@ static void check_table(Table* table, const char* table_name) {
     printf("%s: %s%s\n", table_name, ok ? "" : "ERROR: ", message);
 }
 
+static void check_all_tables(Table* table) {
+    TinyDBCatalogTreeCheck check;
+    char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+    if (!tinydb_check_catalog_trees(table, &check, message, sizeof(message))) {
+        printf("all: ERROR: %s\n",
+               message[0] != '\0' ? message : "catalog tree validation failed");
+        return;
+    }
+
+    for (uint32_t i = 0u; i < check.table_count; i++) {
+        const TinyDBTreeStats* stats = &check.table_stats[i];
+        printf("%s: ok: root=%u height=%u rows=%u leaf_pages=%u internal_pages=%u ownership_owned=%u free=%u\n",
+               table->catalog.schemas[i].name,
+               stats->root_page_num,
+               stats->height,
+               stats->total_rows,
+               stats->leaf_pages,
+               stats->internal_pages,
+               check.ownership.owned_pages,
+               check.ownership.free_pages);
+    }
+}
+
 MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
     Table* table = tinydb_table(database);
     const char* argument;
@@ -241,9 +264,7 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
         if (argument[0] != '\0' && strcmp(argument, "all") != 0) {
             check_table(table, argument);
         } else {
-            for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
-                check_table(table, table->catalog.schemas[i].name);
-            }
+            check_all_tables(table);
         }
         return META_COMMAND_SUCCESS;
     }
