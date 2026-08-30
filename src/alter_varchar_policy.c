@@ -70,10 +70,10 @@ static TinyDBSqlStatus fail_result(TinyDBSqlResult* result,
     return status;
 }
 
-static bool wide_table_is_provably_empty(Table* table,
-                                         const TableSchema* schema,
-                                         char* message,
-                                         size_t message_size) {
+static bool schema_table_is_provably_empty(Table* table,
+                                           const TableSchema* schema,
+                                           char* message,
+                                           size_t message_size) {
     bool scan_complete = false;
     uint32_t row_count = tinydb_record_payload_scan(table,
                                                     schema,
@@ -137,20 +137,20 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     }
 
     /*
-     * Existing schema-sized payload rows depend on the catalog for their
-     * physical offsets. Changing those offsets without rewriting every row
-     * would decode old payloads under the new layout, so non-empty wide tables
-     * remain fail-closed. An empty wide table has no physical row images to
-     * migrate: prove emptiness with the payload-native, corruption-aware scan
-     * before permitting a metadata-only ADD COLUMN. Any incomplete scan is
-     * deliberately treated the same as a non-empty table.
+     * Existing payload rows depend on the catalog for their physical offsets.
+     * Changing those offsets without rewriting every row would decode old
+     * payloads under the new layout, so any schema growth that changes the
+     * physical row class remains fail-closed for a non-empty table. An empty
+     * table has no physical row images to migrate: prove emptiness with the
+     * payload-native, corruption-aware scan before permitting metadata-only
+     * growth. Any incomplete scan is deliberately treated as non-empty.
      */
     if (target->row_size > ROW_SIZE) {
         char scan_message[TINYDB_RECORD_MESSAGE_MAX];
-        if (!wide_table_is_provably_empty(table,
-                                          target,
-                                          scan_message,
-                                          sizeof(scan_message))) {
+        if (!schema_table_is_provably_empty(table,
+                                            target,
+                                            scan_message,
+                                            sizeof(scan_message))) {
             return fail_result(
                 result,
                 TINYDB_SQL_POLICY_ERROR,
@@ -163,10 +163,16 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
         target, schema_message, sizeof(schema_message));
     if (executable_generic && target->row_size <= ROW_SIZE &&
         type.storage_size > ROW_SIZE - target->row_size) {
-        return fail_result(
-            result,
-            TINYDB_SQL_POLICY_ERROR,
-            "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented");
+        char scan_message[TINYDB_RECORD_MESSAGE_MAX];
+        if (!schema_table_is_provably_empty(table,
+                                            target,
+                                            scan_message,
+                                            sizeof(scan_message))) {
+            return fail_result(
+                result,
+                TINYDB_SQL_POLICY_ERROR,
+                "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented");
+        }
     }
 
     if (!table_add_column(table,
