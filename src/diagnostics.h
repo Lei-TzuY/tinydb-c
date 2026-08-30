@@ -18,6 +18,14 @@ typedef struct {
 } TinyDBTreeStats;
 
 typedef struct {
+    uint32_t table_count;
+    uint32_t total_rows;
+    uint32_t leaf_pages;
+    uint32_t internal_pages;
+    uint32_t max_height;
+} TinyDBDatabaseTreeStats;
+
+typedef struct {
     uint32_t total_pages;
     uint32_t owned_pages;
     uint32_t free_pages;
@@ -39,6 +47,80 @@ bool tinydb_get_tree_stats_diagnostic(Table* table,
                                       TinyDBTreeStats* stats,
                                       char* message,
                                       size_t message_size);
+
+/* Source-level catalog aggregate for diagnostics-aware callers. Accumulation
+ * stays local until every catalog root has been walked successfully, so a
+ * BUSY/corruption failure cannot publish a plausible-looking partial total. */
+static inline bool tinydb_get_database_tree_stats(
+    Table* table,
+    TinyDBDatabaseTreeStats* stats,
+    char* message,
+    size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (stats != NULL) memset(stats, 0, sizeof(*stats));
+    if (table == NULL || stats == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid database tree-stat arguments");
+        }
+        return false;
+    }
+
+    TinyDBDatabaseTreeStats aggregate;
+    memset(&aggregate, 0, sizeof(aggregate));
+    aggregate.table_count = table->catalog.num_tables;
+
+    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
+        const char* table_name = table->catalog.schemas[i].name;
+        TinyDBTreeStats tree_stats;
+        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+        if (!tinydb_get_tree_stats_diagnostic(table,
+                                               table_name,
+                                               &tree_stats,
+                                               tree_message,
+                                               sizeof(tree_message))) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "table '%s': %s",
+                         table_name,
+                         tree_message[0] != '\0'
+                             ? tree_message
+                             : "tree statistics unavailable");
+            }
+            return false;
+        }
+        if (UINT32_MAX - aggregate.total_rows < tree_stats.total_rows ||
+            UINT32_MAX - aggregate.leaf_pages < tree_stats.leaf_pages ||
+            UINT32_MAX - aggregate.internal_pages < tree_stats.internal_pages) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "catalog tree statistics overflow at table '%s'",
+                         table_name);
+            }
+            return false;
+        }
+        aggregate.total_rows += tree_stats.total_rows;
+        aggregate.leaf_pages += tree_stats.leaf_pages;
+        aggregate.internal_pages += tree_stats.internal_pages;
+        if (tree_stats.height > aggregate.max_height) {
+            aggregate.max_height = tree_stats.height;
+        }
+    }
+
+    *stats = aggregate;
+    if (message != NULL && message_size > 0u) {
+        snprintf(message,
+                 message_size,
+                 "ok: tables=%u rows=%u leaf_pages=%u internal_pages=%u max_height=%u",
+                 aggregate.table_count,
+                 aggregate.total_rows,
+                 aggregate.leaf_pages,
+                 aggregate.internal_pages,
+                 aggregate.max_height);
+    }
+    return true;
+}
 
 bool tinydb_check_table_tree(Table* table,
                              const char* table_name,
