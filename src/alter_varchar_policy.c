@@ -39,7 +39,6 @@ static TableSchema* find_schema(Table* table, const char* name) {
 
 static bool fixed_row_shape(const TableSchema* schema) {
     return schema != NULL &&
-           schema->row_size == ROW_SIZE &&
            schema->num_columns == 3u &&
            ci_equal(schema->columns[0].name, "id") &&
            ci_equal(schema->columns[1].name, "username") &&
@@ -104,8 +103,8 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
 
     TinyDBColumnTypeSpec type;
     if (!tinydb_column_type_parse(statement.alter_table.new_col_type, &type) ||
-        type.type != COL_TYPE_VARCHAR ||
-        !type.explicitly_sized) {
+        !((type.type == COL_TYPE_VARCHAR && type.explicitly_sized) ||
+          type.type == COL_TYPE_INT)) {
         return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
 
@@ -145,6 +144,11 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
      * table has no physical row images to migrate: prove emptiness with the
      * payload-native, corruption-aware scan before permitting metadata-only
      * growth. Any incomplete scan is deliberately treated as non-empty.
+     *
+     * This guard applies to every schema-sized ADD COLUMN type owned by this
+     * policy, including INT.  Otherwise `ALTER ... ADD COLUMN score INT`
+     * could bypass the VARCHAR(n) safety route and reinterpret existing V2
+     * payloads under a longer catalog layout without rewriting them.
      */
     if (target->row_size > ROW_SIZE) {
         char scan_message[TINYDB_RECORD_MESSAGE_MAX];
