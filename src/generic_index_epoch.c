@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -189,6 +190,11 @@ static uint64_t epoch_checksum(uint64_t epoch) {
     return hash;
 }
 
+static bool test_fail_before_epoch_replace(void) {
+    const char* value = getenv("TINYDB_TEST_FAIL_GENERIC_INDEX_EPOCH_BEFORE_REPLACE");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
 static bool write_epoch_file(const char* filename, uint64_t epoch) {
     if (filename == NULL || filename[0] == '\0') return false;
 
@@ -215,12 +221,21 @@ static bool write_epoch_file(const char* filename, uint64_t epoch) {
     if (ok) ok = sync_file(file);
     if (fclose(file) != 0) ok = false;
     if (!ok) {
-        remove(temporary);
+        (void)remove_file_durably_if_present(temporary);
         return false;
     }
 
+    /*
+     * Deterministic crash-window regression seam. The temporary epoch is fully
+     * durable here, while the previous final epoch is still authoritative.
+     * Returning failure models interruption before atomic publication and lets
+     * recovery tests prove that indexed mutations fail closed and that the
+     * orphan is discarded on the next open/read barrier.
+     */
+    if (test_fail_before_epoch_replace()) return false;
+
     if (!replace_file_atomically(temporary, filename)) {
-        remove(temporary);
+        (void)remove_file_durably_if_present(temporary);
         return false;
     }
     return true;
