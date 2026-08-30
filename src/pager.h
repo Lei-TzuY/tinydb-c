@@ -251,9 +251,12 @@ static inline bool pager_page_handle_release_write(PagerPageHandle* handle) {
  * restored pre-mutation image remains part of the surrounding transaction.
  */
 static inline bool pager_page_is_dirty(Pager* pager, uint32_t page_num) {
-    if (pager == NULL || page_num >= pager->page_capacity) return false;
+    if (pager == NULL) return false;
+
     db_rwlock_rdlock(&pager->pager_lock);
-    bool dirty = pager->is_dirty[page_num];
+    bool dirty = page_num < pager->page_capacity
+        ? pager->is_dirty[page_num]
+        : false;
     db_rwlock_rdunlock(&pager->pager_lock);
     return dirty;
 }
@@ -261,9 +264,13 @@ static inline bool pager_page_is_dirty(Pager* pager, uint32_t page_num) {
 static inline void pager_restore_page_dirty_state(Pager* pager,
                                                   uint32_t page_num,
                                                   bool was_dirty) {
-    if (pager == NULL || page_num >= pager->page_capacity) return;
+    if (pager == NULL) return;
 
     db_rwlock_wrlock(&pager->pager_lock);
+    if (page_num >= pager->page_capacity) {
+        db_rwlock_wrunlock(&pager->pager_lock);
+        return;
+    }
     pager->is_dirty[page_num] = was_dirty;
     int frame_idx = pager->page_table[page_num];
     if (frame_idx != -1) pager->frames[frame_idx].is_dirty = was_dirty;
