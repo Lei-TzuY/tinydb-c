@@ -94,6 +94,9 @@ def main():
             "invalid_page=yes",
             "no_process_exit=yes",
             "checksum_marker=yes",
+            "dirty_spill=yes",
+            "spill_reload=yes",
+            "rollback_restore=yes",
         ):
             if marker not in output:
                 raise AssertionError(f"missing {marker}\n{output}")
@@ -106,7 +109,8 @@ def main():
 
     print(
         "PASS: atomic existing-page try-pin returns BUSY instead of exiting when all "
-        "16 frames are pinned, still serves resident hits, and succeeds after release"
+        "16 frames are pinned, succeeds after release, and preserves dirty no-steal "
+        "spill semantics across eviction/reload/rollback"
     )
 
 
