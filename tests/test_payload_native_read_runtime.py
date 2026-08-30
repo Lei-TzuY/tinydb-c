@@ -92,6 +92,7 @@ def main():
         for marker in (
             "PAYLOAD_NATIVE_READ_OK",
             "row_size=308",
+            "try_find_missing_key=yes",
             "try_find_busy_nonfatal=yes",
             "try_find_zero_on_failure=yes",
             "try_find_one_free_frame_success=yes",
@@ -102,8 +103,8 @@ def main():
 
     print(
         "PASS: payload-native wide reads retain V2 point/range/scan behavior, "
-        "and linked tinydb_record_payload_try_find returns fail-closed BUSY "
-        "under 16/16 pin pressure then succeeds with exactly one free frame"
+        "and linked tinydb_record_payload_try_find distinguishes missing keys "
+        "from fail-closed BUSY pressure while succeeding with one free frame"
     )
 
 
