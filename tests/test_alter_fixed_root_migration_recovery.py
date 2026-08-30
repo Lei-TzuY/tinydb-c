@@ -56,6 +56,8 @@ def main():
     )
     cleanup(db_path)
 
+    max_payload = "m" * 249
+
     try:
         setup = run_session(
             executable,
@@ -64,8 +66,10 @@ def main():
                 "CREATE TABLE docs (id INT, payload VARCHAR(250));",
                 "INSERT INTO docs VALUES (1, 'alpha');",
                 "INSERT INTO docs VALUES (2, 'beta');",
+                f"INSERT INTO docs VALUES (4, '{max_payload}');",
                 "ALTER TABLE docs ADD COLUMN tail VARCHAR(37);",
                 "UPDATE docs SET tail = 'legacy' WHERE id = 2;",
+                "UPDATE docs SET tail = 'edge' WHERE id = 4;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
@@ -81,6 +85,7 @@ def main():
                 "PRAGMA table_info(docs);",
                 "SELECT * FROM docs WHERE id = 1;",
                 "SELECT * FROM docs WHERE id = 2;",
+                "SELECT * FROM docs WHERE id = 4;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
@@ -89,6 +94,7 @@ def main():
         require(interrupted, "schema catalog could not be persisted")
         require(interrupted, "(1, alpha, )")
         require(interrupted, "(2, beta, legacy)")
+        require(interrupted, f"(4, {max_payload}, edge)")
         require(interrupted, "ok")
         if "overflow | VARCHAR(1)" in interrupted:
             raise AssertionError("failed ALTER leaked the new schema in-process\n" + interrupted)
@@ -102,9 +108,11 @@ def main():
                 "PRAGMA table_info(docs);",
                 "SELECT * FROM docs WHERE id = 1;",
                 "SELECT * FROM docs WHERE id = 2;",
+                "SELECT * FROM docs WHERE id = 4;",
                 "ALTER TABLE docs ADD COLUMN overflow VARCHAR(1);",
                 "SELECT * FROM docs WHERE id = 1;",
                 "SELECT * FROM docs WHERE id = 2;",
+                "SELECT * FROM docs WHERE id = 4;",
                 "INSERT INTO docs VALUES (3, 'gamma', 'new', 'x');",
                 "SELECT * FROM docs WHERE id = 3;",
                 "PRAGMA integrity_check;",
@@ -113,9 +121,11 @@ def main():
         )
         require(recovered, "(1, alpha, )")
         require(recovered, "(2, beta, legacy)")
+        require(recovered, f"(4, {max_payload}, edge)")
         require(recovered, "Column 'overflow' added to table 'docs'.")
         require(recovered, "(1, alpha, , )")
         require(recovered, "(2, beta, legacy, )")
+        require(recovered, f"(4, {max_payload}, edge, )")
         require(recovered, "(3, gamma, new, x)")
         require(recovered, "ok")
 
@@ -127,6 +137,7 @@ def main():
                 "SELECT * FROM docs WHERE id = 1;",
                 "SELECT * FROM docs WHERE id = 2;",
                 "SELECT * FROM docs WHERE id = 3;",
+                "SELECT * FROM docs WHERE id = 4;",
                 "PRAGMA integrity_check;",
                 ".exit",
             ],
@@ -136,14 +147,16 @@ def main():
             "(1, alpha, , )",
             "(2, beta, legacy, )",
             "(3, gamma, new, x)",
+            f"(4, {max_payload}, edge, )",
             "ok",
         ]:
             require(reopened, marker)
 
         print(
-            "PASS: fixed-root rows migrate to compact V2 before a wide ALTER, "
-            "remain readable through the old schema after catalog publication failure, "
-            "and support a later successful append-only schema generation after reopen."
+            "PASS: fixed-root rows, including a maximum-width VARCHAR value, migrate "
+            "to canonical compact V2 envelopes before a wide ALTER, remain readable "
+            "through the old schema after catalog publication failure, and support a "
+            "later successful append-only schema generation after reopen."
         )
     finally:
         cleanup(db_path)
