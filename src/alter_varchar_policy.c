@@ -40,12 +40,19 @@ static TableSchema* find_schema(Table* table, const char* name) {
 static bool fixed_row_shape(const TableSchema* schema) {
     return schema != NULL &&
            schema->num_columns == 3u &&
+           schema->row_size == ROW_SIZE &&
            ci_equal(schema->columns[0].name, "id") &&
            ci_equal(schema->columns[1].name, "username") &&
            ci_equal(schema->columns[2].name, "email") &&
            schema->columns[0].type == COL_TYPE_INT &&
            schema->columns[1].type == COL_TYPE_VARCHAR &&
-           schema->columns[2].type == COL_TYPE_VARCHAR;
+           schema->columns[2].type == COL_TYPE_VARCHAR &&
+           schema->columns[0].offset == ID_OFFSET &&
+           schema->columns[0].size == ID_SIZE &&
+           schema->columns[1].offset == USERNAME_OFFSET &&
+           schema->columns[1].size == USERNAME_SIZE &&
+           schema->columns[2].offset == EMAIL_OFFSET &&
+           schema->columns[2].size == EMAIL_SIZE;
 }
 
 static void initialize_result(TinyDBSqlResult* result, TinyDBSqlStatus status) {
@@ -146,7 +153,7 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
      * growth. Any incomplete scan is deliberately treated as non-empty.
      *
      * This guard applies to every schema-sized ADD COLUMN type owned by this
-     * policy, including INT.  Otherwise `ALTER ... ADD COLUMN score INT`
+     * policy, including INT. Otherwise `ALTER ... ADD COLUMN score INT`
      * could bypass the VARCHAR(n) safety route and reinterpret existing V2
      * payloads under a longer catalog layout without rewriting them.
      */
