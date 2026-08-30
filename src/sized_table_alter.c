@@ -84,6 +84,19 @@ static bool schema_rows_accept_appended_column(
     return scan_complete;
 }
 
+static bool root_is_valid_v2(Table* table, const TableSchema* schema) {
+    if (table == NULL || table->pager == NULL || schema == NULL ||
+        schema->root_page_num >= table->pager->num_pages) {
+        return false;
+    }
+    void* root = get_page(table->pager, schema->root_page_num);
+    return get_node_type(root) == NODE_LEAF && is_node_root(root) &&
+           *node_parent(root) == 0u &&
+           tinydb_leaf_format_detect_page(root, PAGE_SIZE) ==
+               TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
+           tinydb_slotted_leaf_v2_validate(root, PAGE_SIZE);
+}
+
 static bool empty_root_can_become_v2(Table* table,
                                      const TableSchema* schema) {
     if (table == NULL || table->pager == NULL || schema == NULL ||
@@ -166,14 +179,23 @@ bool table_add_column(Table* table,
         executable_generic && old_row_size <= ROW_SIZE &&
         type.storage_size > ROW_SIZE - old_row_size;
 
+    bool crossing_already_v2 = false;
     if (crosses_payload_boundary) {
-        if (!schema_table_is_empty(table, schema)) {
-            printf("Error: ALTER TABLE ADD COLUMN would exceed the fixed generic record slot.\n");
-            return false;
-        }
-        if (!empty_root_can_become_v2(table, schema)) {
-            printf("Error: ALTER TABLE ADD COLUMN cannot safely migrate the empty table root to schema-sized storage.\n");
-            return false;
+        crossing_already_v2 = root_is_valid_v2(table, schema);
+        if (crossing_already_v2) {
+            if (!schema_rows_accept_appended_column(table, schema, &type)) {
+                printf("Error: ALTER TABLE ADD COLUMN requires append-compatible compact V2 rows before crossing the fixed record boundary.\n");
+                return false;
+            }
+        } else {
+            if (!schema_table_is_empty(table, schema)) {
+                printf("Error: ALTER TABLE ADD COLUMN would exceed the fixed generic record slot.\n");
+                return false;
+            }
+            if (!empty_root_can_become_v2(table, schema)) {
+                printf("Error: ALTER TABLE ADD COLUMN cannot safely migrate the empty table root to schema-sized storage.\n");
+                return false;
+            }
         }
     }
     if (old_row_size > ROW_SIZE &&
@@ -189,9 +211,10 @@ bool table_add_column(Table* table,
      * canonical compact physical layout from the shared type parser. Existing
      * compact V2 rows may retain an older append-only schema generation: the
      * row envelope validates their historical prefix fingerprint and decodes
-     * missing trailing fields as zero/empty defaults. When an empty table
-     * crosses out of the fixed carrier, its single empty root leaf is converted
-     * to V2 before the new schema is published. */
+     * missing trailing fields as zero/empty defaults. A crossing ALTER may
+     * arrive with a root already migrated to compact V2 by the schema-aware
+     * publication wrapper; otherwise only a provably empty fixed root is
+     * converted here. */
     if (!table_add_column_legacy_base(table,
                                       table_name,
                                       col_name,
@@ -210,7 +233,8 @@ bool table_add_column(Table* table,
     added->size = type.storage_size;
     schema->row_size = old_row_size + type.storage_size;
 
-    if (crosses_payload_boundary && !initialize_empty_v2_root(table, schema)) {
+    if (crosses_payload_boundary && !crossing_already_v2 &&
+        !initialize_empty_v2_root(table, schema)) {
         *schema = previous_schema;
         printf("Error: ALTER TABLE ADD COLUMN could not migrate the empty table root to schema-sized storage.\n");
         return false;
