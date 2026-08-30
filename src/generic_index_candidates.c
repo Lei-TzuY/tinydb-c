@@ -3,13 +3,16 @@
 #include "record_payload.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -173,6 +176,56 @@ static bool sync_file(FILE* file) {
 #endif
 }
 
+#ifndef _WIN32
+static bool sync_parent_directory(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') return false;
+    char directory[640];
+    int written = snprintf(directory, sizeof(directory), "%s", filename);
+    if (written < 0 || (size_t)written >= sizeof(directory)) return false;
+    char* slash = strrchr(directory, '/');
+    if (slash == NULL) {
+        snprintf(directory, sizeof(directory), ".");
+    } else if (slash == directory) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    int fd = open(directory, O_RDONLY);
+    if (fd < 0) return false;
+    bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
+}
+#endif
+
+static bool remove_file_durably_if_present(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') return false;
+    errno = 0;
+    if (remove(filename) != 0) return errno == ENOENT;
+#ifndef _WIN32
+    return sync_parent_directory(filename);
+#else
+    return true;
+#endif
+}
+
+static bool replace_file_atomically(const char* temporary,
+                                    const char* destination) {
+#ifdef _WIN32
+    return MoveFileExA(temporary,
+                       destination,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    if (rename(temporary, destination) != 0) return false;
+    return sync_parent_directory(destination);
+#endif
+}
+
+static bool test_fail_before_snapshot_replace(void) {
+    const char* value = getenv("TINYDB_TEST_FAIL_GENERIC_INDEX_SNAPSHOT_BEFORE_REPLACE");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
 static bool snapshot_filename(const GenericSecondaryIndex* index,
                               char* output,
                               size_t output_size) {
@@ -306,7 +359,12 @@ static bool write_snapshot(const TableSchema* schema,
                            uint64_t epoch) {
     char filename[600];
     if (!snapshot_filename(index, filename, sizeof(filename))) return false;
-    FILE* file = fopen(filename, "wb");
+
+    char temporary[640];
+    int written = snprintf(temporary, sizeof(temporary), "%s.tmp", filename);
+    if (written < 0 || (size_t)written >= sizeof(temporary)) return false;
+
+    FILE* file = fopen(temporary, "wb");
     if (file == NULL) return false;
 
     char table_name[MAX_NAME_SIZE] = {0};
@@ -348,7 +406,20 @@ static bool write_snapshot(const TableSchema* schema,
     ok = ok && write_u64(file, NULL, hash);
     if (ok) ok = sync_file(file);
     if (fclose(file) != 0) ok = false;
-    return ok;
+    if (!ok) {
+        (void)remove_file_durably_if_present(temporary);
+        return false;
+    }
+
+    /* The old final snapshot remains authoritative until this point. Leaving
+     * the fully synced temp behind models a crash just before atomic replace. */
+    if (test_fail_before_snapshot_replace()) return false;
+
+    if (!replace_file_atomically(temporary, filename)) {
+        (void)remove_file_durably_if_present(temporary);
+        return false;
+    }
+    return true;
 }
 
 static bool load_snapshot(Table* table,
