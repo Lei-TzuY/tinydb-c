@@ -48,15 +48,21 @@ def main():
             "one_free_frame_success=yes",
             "ownership_fail_closed=yes",
             "recovery=yes",
+            "stats_busy_nonfatal=yes",
+            "stats_zero_publish=yes",
+            "stats_one_free_frame_success=yes",
+            "stats_legacy_match=yes",
+            "stats_optional_message=yes",
         ):
             assert marker in result.stdout, output
         assert "buffer pool busy" in result.stdout, output
         assert "allocated but unreachable from every catalog root" in result.stdout, output
 
         print(
-            "PASS: exported db_integrity_check preserves its bool ABI while returning "
-            "non-fatal buffer-pool backpressure, making progress with one free frame, "
-            "and rejecting orphan-page ownership corruption"
+            "PASS: exported db_integrity_check and linked db_try_get_stats return "
+            "non-fatal buffer-pool backpressure; table stats publish atomically, "
+            "complete with one free frame, match legacy stats after pressure clears, "
+            "and integrity checking still rejects orphan-page ownership corruption"
         )
     finally:
         cleanup(db_path)
