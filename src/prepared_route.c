@@ -104,8 +104,8 @@ static TinyDBSqlStatus execute_integrity_check(TinyDB* database,
     output->status = TINYDB_SQL_EXECUTE_ERROR;
     snprintf(output->message,
              sizeof(output->message),
-             "%s",
-             "database integrity check failed");
+             "database integrity check failed: %s",
+             message);
     return output->status;
 }
 
