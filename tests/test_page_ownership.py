@@ -72,6 +72,7 @@ def main():
             "tree_stats_one_free_frame_success=yes",
             "catalog_stats_one_free_frame_success=yes",
             "catalog_check_one_free_frame_success=yes",
+            "catalog_pragmas_full_pool_success=yes",
             "page_inspect_busy=yes",
             "tree_inspect_busy=yes",
             "inspection_one_free_frame_success=yes",
@@ -117,8 +118,9 @@ def main():
             "PASS: page ownership catches orphan/shared pages; per-table and fail-closed "
             "catalog tree stats/checks, .check all, public diagnostics, .page/.btree "
             "inspection, PRAGMA integrity_check, and PRAGMA user_version return "
-            "non-fatal backpressure when fully pinned, and all read-only inspection "
-            "paths make progress with exactly one free frame"
+            "non-fatal backpressure when fully pinned; catalog-only PRAGMA table_info "
+            "and index_list remain available without a free frame; all page-backed "
+            "read-only inspection paths make progress with exactly one free frame"
         )
     finally:
         cleanup(probe_db)
