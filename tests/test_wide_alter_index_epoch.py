@@ -47,6 +47,14 @@ def require(output, marker):
         raise AssertionError(f"missing marker {marker!r}\n{output}")
 
 
+def require_projected_id(output, value, count=1):
+    marker = f"db > {value}\n"
+    if output.count(marker) < count:
+        raise AssertionError(
+            f"expected at least {count} projected id line(s) {value!r}\n{output}"
+        )
+
+
 def read_epoch(db_path):
     path = db_path + ".gidx.epoch"
     if not os.path.exists(path):
@@ -84,7 +92,7 @@ def main():
                 ".exit",
             ],
         )
-        require(first, "(20)")
+        require_projected_id(first, 20)
         epoch_before = read_epoch(db_path)
 
         second = run_session(
@@ -99,7 +107,7 @@ def main():
         )
         require(second, "Column 'tag' added to table 'wide_docs'.")
         require(second, "(10, left-a, right-a, )")
-        require(second, "(20)")
+        require_projected_id(second, 20)
         epoch_after = read_epoch(db_path)
         if epoch_after == epoch_before:
             raise AssertionError(
@@ -118,8 +126,8 @@ def main():
                 ".exit",
             ],
         )
-        require(third, "(10)")
-        require(third, "(20)")
+        require_projected_id(third, 10)
+        require_projected_id(third, 20, count=2)
         require(third, "ok")
 
         fourth = run_session(
@@ -137,13 +145,9 @@ def main():
         )
         require(fourth, "(10, left-a, right-a, )")
         require(fourth, "(20, left-b, right-b, new)")
+        require_projected_id(fourth, 10, count=2)
+        require_projected_id(fourth, 20)
         require(fourth, "ok")
-        if fourth.count("(10)") < 2:
-            raise AssertionError(
-                "old-generation default and original secondary index did not survive reopen\n"
-                + fourth
-            )
-        require(fourth, "(20)")
 
         print(
             "PASS: append-only wide schema evolution explicitly advances the generic "
