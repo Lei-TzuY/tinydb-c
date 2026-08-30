@@ -1,5 +1,6 @@
 #include "record.h"
 #include "record_payload.h"
+#include "record_payload_try_find.h"
 #include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 #include "table.h"
@@ -36,6 +37,14 @@ static TableSchema wide_schema(uint32_t root_page_num) {
     schema.columns[2].size = 4u;
     schema.row_size = 308u;
     return schema;
+}
+
+static bool release_handles(PagerPageHandle* handles, uint32_t count) {
+    bool ok = true;
+    for (uint32_t i = 0u; i < count; i++) {
+        if (handles[i].pinned && !pager_release_page_handle(&handles[i])) ok = false;
+    }
+    return ok;
 }
 
 static bool insert_wide(void* page,
@@ -211,6 +220,24 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!tinydb_record_payload_try_find(table,
+                                        &schema,
+                                        19u,
+                                        &found,
+                                        message,
+                                        sizeof(message)) ||
+        found.length != 308u ||
+        !expect_payload(&schema,
+                        &found,
+                        19u,
+                        "a much longer beta payload",
+                        190u)) {
+        fprintf(stderr, "non-fatal payload-native point lookup failed: %s\n", message);
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
     TinyDBRecord legacy;
     if (tinydb_record_find(table, &schema, 19u, &legacy)) {
         fprintf(stderr, "legacy TinyDBRecord unexpectedly accepted a 308-byte row\n");
@@ -251,8 +278,81 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    mark_page_dirty(table->pager, root);
+    pager_checkpoint(table->pager);
+    for (uint32_t page_num = 1u; page_num <= MAX_BUFFER_POOL_SIZE; page_num++) {
+        (void)get_page(table->pager, page_num);
+    }
+
+    PagerPageHandle owners[MAX_BUFFER_POOL_SIZE];
+    memset(owners, 0, sizeof(owners));
+    uint32_t owner_count = 0u;
+    for (uint32_t page_num = 1u; page_num <= MAX_BUFFER_POOL_SIZE; page_num++) {
+        if (!pager_pin_page_handle(table->pager, page_num, &owners[owner_count])) {
+            (void)release_handles(owners, owner_count);
+            fprintf(stderr, "unable to pin complete payload-read pressure fixture\n");
+            db_close(table);
+            remove(argv[1]);
+            return 1;
+        }
+        owner_count++;
+    }
+
+    memset(&found, 0xA5, sizeof(found));
+    memset(message, 0, sizeof(message));
+    if (tinydb_record_payload_try_find(table,
+                                       &schema,
+                                       19u,
+                                       &found,
+                                       message,
+                                       sizeof(message)) ||
+        found.length != 0u || found.bytes[0] != 0u ||
+        strstr(message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        fprintf(stderr,
+                "non-fatal payload lookup did not fail closed under 16/16 pressure: length=%u message=%s\n",
+                found.length,
+                message);
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
+    if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
+        (void)release_handles(owners, owner_count);
+        fprintf(stderr, "unable to free one payload-read frame\n");
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
+    if (!tinydb_record_payload_try_find(table,
+                                        &schema,
+                                        19u,
+                                        &found,
+                                        NULL,
+                                        0u) ||
+        !expect_payload(&schema,
+                        &found,
+                        19u,
+                        "a much longer beta payload",
+                        190u)) {
+        (void)release_handles(owners, owner_count);
+        fprintf(stderr, "non-fatal payload lookup did not recover with one free frame\n");
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
+    if (!release_handles(owners, owner_count)) {
+        fprintf(stderr, "unable to release payload-read pressure owners\n");
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
     db_close(table);
     remove(argv[1]);
-    printf("PAYLOAD_NATIVE_READ_OK row_size=308 rows=3 range=1\n");
+    printf("PAYLOAD_NATIVE_READ_OK row_size=308 rows=3 range=1 try_find_busy_nonfatal=yes try_find_zero_on_failure=yes try_find_one_free_frame_success=yes optional_message=yes\n");
     return 0;
 }
