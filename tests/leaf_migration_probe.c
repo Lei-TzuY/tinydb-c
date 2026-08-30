@@ -40,6 +40,31 @@ static void make_compact_payload(uint32_t key,
              key);
 }
 
+static TableSchema make_compact_schema(void) {
+    TableSchema schema;
+    memset(&schema, 0, sizeof(schema));
+    snprintf(schema.name, sizeof(schema.name), "%s", "docs");
+    schema.num_columns = 2u;
+    schema.row_size = COMPACT_LENGTH;
+
+    snprintf(schema.columns[0].name,
+             sizeof(schema.columns[0].name),
+             "%s",
+             "id");
+    schema.columns[0].type = COL_TYPE_INT;
+    schema.columns[0].offset = 0u;
+    schema.columns[0].size = sizeof(uint32_t);
+
+    snprintf(schema.columns[1].name,
+             sizeof(schema.columns[1].name),
+             "%s",
+             "payload");
+    schema.columns[1].type = COL_TYPE_VARCHAR;
+    schema.columns[1].offset = sizeof(uint32_t);
+    schema.columns[1].size = COMPACT_LENGTH - sizeof(uint32_t);
+    return schema;
+}
+
 static void make_v1_page(unsigned char page[PAGE_SIZE],
                          uint32_t count,
                          uint32_t logical_length,
@@ -171,6 +196,40 @@ static bool compact_roundtrip(void) {
     return true;
 }
 
+static bool compact_schema_rejects_key_payload_drift(void) {
+    unsigned char source[PAGE_SIZE];
+    unsigned char destination[PAGE_SIZE];
+    unsigned char expected[PAGE_SIZE];
+    TableSchema schema = make_compact_schema();
+
+    make_v1_page(source, 2u, COMPACT_LENGTH, 0x61u);
+    memset(destination, 0x72, sizeof(destination));
+    if (!tinydb_leaf_migrate_v1_to_compact_v2(source,
+                                               sizeof(source),
+                                               &schema,
+                                               destination,
+                                               sizeof(destination)) ||
+        tinydb_leaf_format_detect_page(destination, sizeof(destination)) !=
+            TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return false;
+    }
+
+    make_v1_page(source, 2u, COMPACT_LENGTH, 0x61u);
+    uint32_t divergent_payload_key = 999u;
+    memcpy(v1_cell(source, 1u) + LEAF_NODE_VALUE_OFFSET,
+           &divergent_payload_key,
+           sizeof(divergent_payload_key));
+    memset(destination, 0x83, sizeof(destination));
+    memcpy(expected, destination, sizeof(expected));
+
+    return !tinydb_leaf_migrate_v1_to_compact_v2(source,
+                                                  sizeof(source),
+                                                  &schema,
+                                                  destination,
+                                                  sizeof(destination)) &&
+           memcmp(destination, expected, sizeof(destination)) == 0;
+}
+
 static bool full_v1_upgrade(void) {
     unsigned char v1[PAGE_SIZE];
     unsigned char v2[PAGE_SIZE];
@@ -294,6 +353,10 @@ int main(void) {
         fprintf(stderr, "compact V1/V2/V1 roundtrip failed\n");
         return EXIT_FAILURE;
     }
+    if (!compact_schema_rejects_key_payload_drift()) {
+        fprintf(stderr, "compact schema migration accepted divergent key/payload identity\n");
+        return EXIT_FAILURE;
+    }
     if (!full_v1_upgrade()) {
         fprintf(stderr, "full V1 page migration failed\n");
         return EXIT_FAILURE;
@@ -307,6 +370,6 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    printf("LEAF_MIGRATION_OK compact_roundtrip=yes full_v1=yes oversize_downgrade_rejected=yes overcount_downgrade_rejected=yes atomic_failure=yes checksum_reserved=yes\n");
+    printf("LEAF_MIGRATION_OK compact_roundtrip=yes compact_key_payload_identity=yes full_v1=yes oversize_downgrade_rejected=yes overcount_downgrade_rejected=yes atomic_failure=yes checksum_reserved=yes\n");
     return EXIT_SUCCESS;
 }
