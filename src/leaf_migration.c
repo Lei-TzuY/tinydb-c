@@ -140,6 +140,10 @@ static bool v1_payload_is_canonical_for_schema(const TableSchema* schema,
             if (field[j] != 0u) return false;
         }
     }
+
+    for (uint32_t i = schema->row_size; i < ROW_SIZE; i++) {
+        if (payload[i] != 0u) return false;
+    }
     return true;
 }
 
