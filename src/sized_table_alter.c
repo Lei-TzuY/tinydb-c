@@ -52,6 +52,38 @@ static bool schema_table_is_empty(Table* table,
     return scan_complete && row_count == 0u;
 }
 
+static bool schema_rows_accept_appended_column(
+    Table* table,
+    const TableSchema* schema,
+    const TinyDBColumnTypeSpec* type) {
+    if (table == NULL || schema == NULL || type == NULL ||
+        schema->num_columns >= MAX_COLUMNS_PER_TABLE ||
+        schema->row_size > TINYDB_RECORD_PAYLOAD_MAX ||
+        type->storage_size > TINYDB_RECORD_PAYLOAD_MAX - schema->row_size) {
+        return false;
+    }
+
+    TableSchema prospective = *schema;
+    TableColumn* added = &prospective.columns[prospective.num_columns];
+    memset(added, 0, sizeof(*added));
+    added->type = type->type;
+    added->offset = schema->row_size;
+    added->size = type->storage_size;
+    prospective.num_columns++;
+    prospective.row_size += type->storage_size;
+
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    bool scan_complete = false;
+    (void)tinydb_record_payload_scan(table,
+                                     &prospective,
+                                     NULL,
+                                     NULL,
+                                     &scan_complete,
+                                     message,
+                                     sizeof(message));
+    return scan_complete;
+}
+
 static bool empty_root_can_become_v2(Table* table,
                                      const TableSchema* schema) {
     if (table == NULL || table->pager == NULL || schema == NULL ||
@@ -105,8 +137,8 @@ bool table_add_column(Table* table,
                       const char* col_type) {
     TinyDBColumnTypeSpec type;
     if (!tinydb_column_type_parse(col_type, &type) ||
-        type.type != COL_TYPE_VARCHAR ||
-        !type.explicitly_sized) {
+        !((type.type == COL_TYPE_VARCHAR && type.explicitly_sized) ||
+          type.type == COL_TYPE_INT)) {
         return table_add_column_legacy_base(table,
                                             table_name,
                                             col_name,
@@ -145,18 +177,21 @@ bool table_add_column(Table* table,
         }
     }
     if (old_row_size > ROW_SIZE &&
-        !schema_table_is_empty(table, schema)) {
-        printf("Error: ALTER TABLE ADD COLUMN requires physical row migration for a non-empty schema-sized payload table.\n");
+        !schema_rows_accept_appended_column(table, schema, &type)) {
+        printf("Error: ALTER TABLE ADD COLUMN requires append-compatible compact V2 rows for a non-empty schema-sized payload table.\n");
         return false;
     }
 
     TableSchema previous_schema = *schema;
 
     /* The legacy catalog mutator owns duplicate/max-column/users checks. It
-     * temporarily treats this as a generic VARCHAR; after success restore the
-     * canonical compact n+1 byte physical layout from the shared type parser.
-     * When an empty table crosses out of the fixed carrier, its single empty
-     * root leaf is converted to V2 before the new schema is published. */
+     * temporarily mutates the catalog entry; after success restore the
+     * canonical compact physical layout from the shared type parser. Existing
+     * compact V2 rows may retain an older append-only schema generation: the
+     * row envelope validates their historical prefix fingerprint and decodes
+     * missing trailing fields as zero/empty defaults. When an empty table
+     * crosses out of the fixed carrier, its single empty root leaf is converted
+     * to V2 before the new schema is published. */
     if (!table_add_column_legacy_base(table,
                                       table_name,
                                       col_name,
