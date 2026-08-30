@@ -123,6 +123,43 @@ def main():
         reject(reopened, "tag | VARCHAR")
         reject(reopened, "(1, left-a, right-a, )")
 
+        save_failed = run_session(
+            executable,
+            db_path,
+            [
+                "ALTER TABLE wide_docs ADD COLUMN tag VARCHAR(5);",
+                "PRAGMA table_info(wide_docs);",
+                "INSERT INTO wide_docs VALUES (3, 'left-c', 'right-c');",
+                "SELECT * FROM wide_docs WHERE id = 3;",
+                "SELECT id FROM wide_docs WHERE right_text = 'right-c';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+            env={"TINYDB_TEST_FAIL_ALTER_CATALOG_SAVE": "1"},
+        )
+        require(save_failed, "schema catalog could not be persisted")
+        require(save_failed, "(3, left-c, right-c)")
+        require(save_failed, "3")
+        require(save_failed, "ok")
+        reject(save_failed, "tag | VARCHAR")
+        reject(save_failed, "Column 'tag' added to table 'wide_docs'.")
+
+        save_failed_reopen = run_session(
+            executable,
+            db_path,
+            [
+                "PRAGMA table_info(wide_docs);",
+                "SELECT * FROM wide_docs WHERE id = 3;",
+                "SELECT id FROM wide_docs WHERE right_text = 'right-c';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+        )
+        require(save_failed_reopen, "(3, left-c, right-c)")
+        require(save_failed_reopen, "3")
+        require(save_failed_reopen, "ok")
+        reject(save_failed_reopen, "tag | VARCHAR")
+
         duplicate = run_session(
             executable,
             db_path,
@@ -139,9 +176,10 @@ def main():
         require(duplicate, "ok")
 
         print(
-            "PASS: interrupted append-only ALTER rolls the in-memory schema back before "
-            "catalog publication, old-arity DML and indexes remain usable in-process and "
-            "after reopen, and duplicate-column DDL fails during preflight."
+            "PASS: append-only ALTER rolls the in-memory schema back both before "
+            "catalog publication and when catalog save fails, suppresses premature "
+            "success output, preserves old-arity DML/indexes across reopen, and "
+            "rejects duplicate-column DDL during preflight."
         )
     finally:
         cleanup(db_path)
