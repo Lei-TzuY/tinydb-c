@@ -1,6 +1,8 @@
 #include "column_type.h"
+#include "leaf_format.h"
 #include "record.h"
 #include "record_payload.h"
+#include "slotted_leaf_v2.h"
 #include "table.h"
 
 #include <ctype.h>
@@ -50,6 +52,53 @@ static bool schema_table_is_empty(Table* table,
     return scan_complete && row_count == 0u;
 }
 
+static bool empty_root_can_become_v2(Table* table,
+                                     const TableSchema* schema) {
+    if (table == NULL || table->pager == NULL || schema == NULL ||
+        schema->root_page_num >= table->pager->num_pages) {
+        return false;
+    }
+
+    void* root = get_page(table->pager, schema->root_page_num);
+    if (get_node_type(root) != NODE_LEAF || !is_node_root(root) ||
+        *node_parent(root) != 0u) {
+        return false;
+    }
+
+    TinyDBLeafPageFormat format =
+        tinydb_leaf_format_detect_page(root, PAGE_USABLE_SIZE);
+    if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return tinydb_slotted_leaf_v2_validate(root, PAGE_USABLE_SIZE) &&
+               tinydb_slotted_leaf_v2_count(root, PAGE_USABLE_SIZE) == 0u;
+    }
+    if (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) return false;
+
+    return *leaf_node_num_cells(root) == 0u &&
+           *leaf_node_next_leaf(root) == 0u &&
+           *leaf_node_prev_leaf(root) == 0u;
+}
+
+static bool initialize_empty_v2_root(Table* table,
+                                     const TableSchema* schema) {
+    if (!empty_root_can_become_v2(table, schema)) return false;
+
+    void* root = get_page(table->pager, schema->root_page_num);
+    if (tinydb_leaf_format_detect_page(root, PAGE_USABLE_SIZE) ==
+        TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return true;
+    }
+
+    unsigned char staged[PAGE_SIZE];
+    memset(staged, 0, sizeof(staged));
+    if (!tinydb_slotted_leaf_v2_init(staged, sizeof(staged))) return false;
+    set_node_root(staged, true);
+    *node_parent(staged) = 0u;
+
+    memcpy(root, staged, PAGE_USABLE_SIZE);
+    mark_page_dirty(table->pager, schema->root_page_num);
+    return true;
+}
+
 bool table_add_column(Table* table,
                       const char* table_name,
                       const char* col_name,
@@ -81,11 +130,19 @@ bool table_add_column(Table* table,
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
     bool executable_generic = tinydb_schema_supports_records(
         schema, schema_message, sizeof(schema_message));
-    if (executable_generic && old_row_size <= ROW_SIZE &&
-        type.storage_size > ROW_SIZE - old_row_size &&
-        !schema_table_is_empty(table, schema)) {
-        printf("Error: ALTER TABLE ADD COLUMN would exceed the fixed generic record slot.\n");
-        return false;
+    bool crosses_payload_boundary =
+        executable_generic && old_row_size <= ROW_SIZE &&
+        type.storage_size > ROW_SIZE - old_row_size;
+
+    if (crosses_payload_boundary) {
+        if (!schema_table_is_empty(table, schema)) {
+            printf("Error: ALTER TABLE ADD COLUMN would exceed the fixed generic record slot.\n");
+            return false;
+        }
+        if (!empty_root_can_become_v2(table, schema)) {
+            printf("Error: ALTER TABLE ADD COLUMN cannot safely migrate the empty table root to schema-sized storage.\n");
+            return false;
+        }
     }
     if (old_row_size > ROW_SIZE &&
         !schema_table_is_empty(table, schema)) {
@@ -93,12 +150,13 @@ bool table_add_column(Table* table,
         return false;
     }
 
+    TableSchema previous_schema = *schema;
+
     /* The legacy catalog mutator owns duplicate/max-column/users checks. It
      * temporarily treats this as a generic VARCHAR; after success restore the
      * canonical compact n+1 byte physical layout from the shared type parser.
-     * Schema growth that crosses from the fixed carrier into payload-sized
-     * storage reaches this point only when a corruption-aware scan proved the
-     * table empty, so no physical row image needs migration. */
+     * When an empty table crosses out of the fixed carrier, its single empty
+     * root leaf is converted to V2 before the new schema is published. */
     if (!table_add_column_legacy_base(table,
                                       table_name,
                                       col_name,
@@ -116,5 +174,11 @@ bool table_add_column(Table* table,
     added->offset = old_row_size;
     added->size = type.storage_size;
     schema->row_size = old_row_size + type.storage_size;
+
+    if (crosses_payload_boundary && !initialize_empty_v2_root(table, schema)) {
+        *schema = previous_schema;
+        printf("Error: ALTER TABLE ADD COLUMN could not migrate the empty table root to schema-sized storage.\n");
+        return false;
+    }
     return true;
 }
