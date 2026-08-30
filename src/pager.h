@@ -295,6 +295,88 @@ static inline void pager_unpin_page_unowned_compat(Pager* pager,
     (void)page_num;
 }
 
+/* Helpers used by source-compatible destructive-operation guards. */
+static inline bool pager_frame_for_page_is_pinned_locked(Pager* pager,
+                                                         uint32_t page_num) {
+    if (page_num >= pager->page_capacity) return false;
+    int frame_idx = pager->page_table[page_num];
+    return frame_idx >= 0 && frame_idx < MAX_BUFFER_POOL_SIZE &&
+        pager->frames[frame_idx].page_num == page_num &&
+        pager->frames[frame_idx].pin_count > 0u;
+}
+
+static inline bool pager_any_frame_pinned_locked(Pager* pager) {
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        if (pager->frames[i].page_num != INVALID_PAGE_NUM &&
+            pager->frames[i].pin_count > 0u) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline bool pager_removed_range_pinned_locked(Pager* pager,
+                                                      uint32_t first_removed) {
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        if (pager->frames[i].page_num != INVALID_PAGE_NUM &&
+            pager->frames[i].page_num >= first_removed &&
+            pager->frames[i].pin_count > 0u) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Destructive Pager operations must not invalidate an explicitly pinned frame.
+ * These three legacy operations do not recursively acquire pager_lock, so the
+ * guard and mutation can execute under one write lock without a TOCTOU window.
+ * Savepoint rollback has a different implementation shape (it re-enters
+ * get_page/mark_page_dirty) and is intentionally not claimed here yet.
+ */
+static inline void pager_free_page_pin_guard(Pager* pager,
+                                             uint32_t page_num) {
+    if (pager == NULL) return;
+
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (pager_frame_for_page_is_pinned_locked(pager, page_num)) {
+        db_rwlock_wrunlock(&pager->pager_lock);
+        fprintf(stderr, "Refusing to free pinned page %u.\n", page_num);
+        return;
+    }
+    pager_free_page(pager, page_num);
+    db_rwlock_wrunlock(&pager->pager_lock);
+}
+
+static inline void pager_shrink_pin_guard(Pager* pager,
+                                          uint32_t new_num_pages) {
+    if (pager == NULL) return;
+
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (pager_removed_range_pinned_locked(pager, new_num_pages)) {
+        db_rwlock_wrunlock(&pager->pager_lock);
+        fprintf(stderr,
+                "Refusing to shrink Pager across a pinned page boundary.\n");
+        return;
+    }
+    pager_shrink(pager, new_num_pages);
+    db_rwlock_wrunlock(&pager->pager_lock);
+}
+
+static inline void pager_rollback_pin_guard(Pager* pager) {
+    if (pager == NULL) return;
+
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (pager->in_transaction && pager_any_frame_pinned_locked(pager)) {
+        db_rwlock_wrunlock(&pager->pager_lock);
+        fprintf(stderr,
+                "Refusing to rollback while Pager pages are pinned.\n");
+        return;
+    }
+    pager_rollback(pager);
+    db_rwlock_wrunlock(&pager->pager_lock);
+}
+
 /*
  * Source-compatible page-number lock seam. The historical implementation in
  * pager.c locked a resident frame without pinning it, so an unrelated cache
@@ -417,6 +499,9 @@ void pager_release_write_lock(Pager* pager, uint32_t page_num);
  */
 #if !defined(pager_checkpoint)
 #define pager_unpin_page         pager_unpin_page_unowned_compat
+#define pager_free_page          pager_free_page_pin_guard
+#define pager_shrink             pager_shrink_pin_guard
+#define pager_rollback           pager_rollback_pin_guard
 #define pager_acquire_read_lock  pager_acquire_read_lock_pinned_compat
 #define pager_release_read_lock  pager_release_read_lock_pinned_compat
 #define pager_acquire_write_lock pager_acquire_write_lock_pinned_compat
