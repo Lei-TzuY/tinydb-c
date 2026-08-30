@@ -1,4 +1,9 @@
-#include "record_payload.h"
+#include "record_payload_try_find.h"
+
+#include "leaf_format.h"
+#include "leaf_page_access.h"
+#include "pager_try_pin.h"
+#include "row_envelope.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -72,6 +77,228 @@ bool tinydb_record_payload_schema_supported(const TableSchema* schema,
         return false;
     }
     return true;
+}
+
+static bool try_find_valid_page(const Table* table, uint32_t page_num) {
+    return table != NULL && table->pager != NULL &&
+           page_num != INVALID_PAGE_NUM && page_num < table->pager->num_pages;
+}
+
+static bool try_find_internal_child(Table* table,
+                                    uint32_t page_num,
+                                    void* node,
+                                    uint32_t key,
+                                    uint32_t* child_page) {
+    if (table == NULL || node == NULL || child_page == NULL ||
+        get_node_type(node) != NODE_INTERNAL) {
+        return false;
+    }
+
+    uint32_t num_keys = *internal_node_num_keys(node);
+    if (num_keys == 0u || num_keys > INTERNAL_NODE_MAX_KEYS) return false;
+
+    uint32_t right_child = *internal_node_right_child(node);
+    if (!try_find_valid_page(table, right_child) || right_child == page_num) {
+        return false;
+    }
+
+    uint32_t previous_key = 0u;
+    for (uint32_t i = 0u; i < num_keys; i++) {
+        uint32_t separator = *internal_node_key(node, i);
+        if (i > 0u && separator <= previous_key) return false;
+        previous_key = separator;
+
+        uint32_t candidate = *internal_node_child(node, i);
+        if (!try_find_valid_page(table, candidate) ||
+            candidate == page_num || candidate == right_child) {
+            return false;
+        }
+        for (uint32_t j = 0u; j < i; j++) {
+            if (*internal_node_child(node, j) == candidate) return false;
+        }
+    }
+
+    uint32_t min_index = 0u;
+    uint32_t max_index = num_keys;
+    while (min_index < max_index) {
+        uint32_t index = min_index + (max_index - min_index) / 2u;
+        if (*internal_node_key(node, index) >= key) {
+            max_index = index;
+        } else {
+            min_index = index + 1u;
+        }
+    }
+
+    *child_page = min_index == num_keys
+        ? right_child
+        : *internal_node_child(node, min_index);
+    return try_find_valid_page(table, *child_page) && *child_page != page_num;
+}
+
+static bool try_find_decode_leaf(const TableSchema* schema,
+                                 const void* page,
+                                 uint32_t id,
+                                 TinyDBRecordPayload* payload,
+                                 char* message,
+                                 size_t message_size) {
+    uint32_t cell_index = 0u;
+    bool exact_match = false;
+    if (!tinydb_leaf_page_lower_bound(page,
+                                      PAGE_SIZE,
+                                      id,
+                                      &cell_index,
+                                      &exact_match)) {
+        set_message(message, message_size, "leaf page has an invalid searchable layout");
+        return false;
+    }
+    if (!exact_match) {
+        set_message(message, message_size, "primary key not found");
+        return false;
+    }
+
+    const void* value = NULL;
+    uint32_t stored_length = 0u;
+    if (!tinydb_leaf_page_value_at(page,
+                                   PAGE_SIZE,
+                                   cell_index,
+                                   &value,
+                                   &stored_length) ||
+        value == NULL) {
+        set_message(message, message_size, "row payload is invalid");
+        return false;
+    }
+
+    TinyDBRecordPayload local;
+    memset(&local, 0, sizeof(local));
+    TinyDBLeafPageFormat format = tinydb_leaf_format_detect_page(page, PAGE_SIZE);
+    if (format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+        if (stored_length < schema->row_size) {
+            set_message(message,
+                        message_size,
+                        "fixed V1 row is shorter than the logical schema payload");
+            return false;
+        }
+        local.length = schema->row_size;
+        memcpy(local.bytes, value, local.length);
+    } else if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        if (stored_length == schema->row_size) {
+            local.length = stored_length;
+            memcpy(local.bytes, value, local.length);
+        } else if (!tinydb_row_envelope_decode(schema,
+                                               value,
+                                               stored_length,
+                                               &local)) {
+            set_message(message,
+                        message_size,
+                        "slotted V2 row envelope is invalid for the logical schema");
+            return false;
+        }
+    } else {
+        set_message(message, message_size, "leaf page uses an unsupported format");
+        return false;
+    }
+
+    *payload = local;
+    return true;
+}
+
+bool tinydb_record_payload_try_find(Table* table,
+                                    const TableSchema* schema,
+                                    uint32_t id,
+                                    TinyDBRecordPayload* payload,
+                                    char* message,
+                                    size_t message_size) {
+    if (payload != NULL) memset(payload, 0, sizeof(*payload));
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (table == NULL || table->pager == NULL || schema == NULL || payload == NULL) {
+        set_message(message, message_size, "table, schema, and payload are required");
+        return false;
+    }
+    if (!tinydb_record_payload_schema_supported(schema, message, message_size)) {
+        return false;
+    }
+    if (!try_find_valid_page(table, schema->root_page_num)) {
+        set_message(message, message_size, "schema root page is invalid");
+        return false;
+    }
+
+    uint32_t page_num = schema->root_page_num;
+    for (uint32_t depth = 0u; depth <= table->pager->num_pages; depth++) {
+        PagerPageHandle handle;
+        PagerTryPinStatus status = pager_try_pin_existing_page_handle(table->pager,
+                                                                      page_num,
+                                                                      &handle);
+        if (status != PAGER_TRY_PIN_OK) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "could not acquire B+ tree page %u: %s",
+                         page_num,
+                         pager_try_pin_status_string(status));
+            }
+            return false;
+        }
+        if (!pager_page_handle_acquire_read(&handle)) {
+            (void)pager_release_page_handle(&handle);
+            set_message(message, message_size, "could not acquire B+ tree page read lock");
+            return false;
+        }
+
+        NodeType type = get_node_type(handle.data);
+        if (type == NODE_INTERNAL) {
+            uint32_t child_page = INVALID_PAGE_NUM;
+            bool valid = try_find_internal_child(table,
+                                                 page_num,
+                                                 handle.data,
+                                                 id,
+                                                 &child_page);
+            if (!pager_page_handle_release_read(&handle)) {
+                set_message(message, message_size, "could not release B+ tree page read lock");
+                return false;
+            }
+            if (!pager_release_page_handle(&handle)) {
+                set_message(message, message_size, "could not release B+ tree page pin");
+                return false;
+            }
+            if (!valid) {
+                set_message(message, message_size, "internal B+ tree routing metadata is invalid");
+                return false;
+            }
+            page_num = child_page;
+            continue;
+        }
+
+        TinyDBRecordPayload local;
+        memset(&local, 0, sizeof(local));
+        bool decoded = false;
+        if (type == NODE_LEAF) {
+            decoded = try_find_decode_leaf(schema,
+                                           handle.data,
+                                           id,
+                                           &local,
+                                           message,
+                                           message_size);
+        } else {
+            set_message(message, message_size, "B+ tree page has an invalid node type");
+        }
+
+        if (!pager_page_handle_release_read(&handle)) {
+            set_message(message, message_size, "could not release B+ tree page read lock");
+            return false;
+        }
+        if (!pager_release_page_handle(&handle)) {
+            set_message(message, message_size, "could not release B+ tree page pin");
+            return false;
+        }
+        if (!decoded) return false;
+
+        *payload = local;
+        if (message != NULL && message_size > 0u) message[0] = '\0';
+        return true;
+    }
+
+    set_message(message, message_size, "B+ tree traversal exceeded the allocated page count");
+    return false;
 }
 
 bool tinydb_record_payload_encode_values(const TableSchema* schema,
