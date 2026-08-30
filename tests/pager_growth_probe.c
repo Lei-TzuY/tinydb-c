@@ -12,6 +12,8 @@
 #define PREEXISTING_DIRTY_MARKER_BASE 0xD17A0000u
 #define PREEXISTING_DIRTY_PAGE 7u
 #define PINNED_TEST_PAGE 0u
+#define LEGACY_READ_LOCK_PAGE 1u
+#define LEGACY_WRITE_LOCK_PAGE 2u
 #define PUBLISH_PAGE_COUNT 64u
 #define PUBLISH_FAIL_AFTER 33u
 #define EVICTION_CHURN_START 128u
@@ -95,6 +97,86 @@ static int exercise_pinned_page_handle(Pager* pager) {
         pager->page_table[PINNED_TEST_PAGE] != -1 ||
         verify_page(pager, PINNED_TEST_PAGE) != 0) {
         fprintf(stderr, "released page did not return to the eviction set\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int exercise_legacy_page_number_locks(Pager* pager) {
+    uint32_t marker = 0u;
+    void* read_data = get_page(pager, LEGACY_READ_LOCK_PAGE);
+    int read_frame = pager->page_table[LEGACY_READ_LOCK_PAGE];
+    if (read_frame < 0) {
+        fprintf(stderr, "legacy read-lock page was not resident\n");
+        return 1;
+    }
+
+    pager_acquire_read_lock(pager, LEGACY_READ_LOCK_PAGE);
+    if (pager->frames[read_frame].pin_count == 0u) {
+        fprintf(stderr, "legacy read lock did not pin its frame\n");
+        return 1;
+    }
+
+    uint32_t evictions_before = pager->evictions;
+    force_eviction_churn(pager);
+    memcpy(&marker, read_data, sizeof(marker));
+    if (pager->evictions <= evictions_before ||
+        pager->page_table[LEGACY_READ_LOCK_PAGE] != read_frame ||
+        pager->frames[read_frame].page_num != LEGACY_READ_LOCK_PAGE ||
+        pager->frames[read_frame].data != read_data ||
+        marker != (MARKER_BASE ^ LEGACY_READ_LOCK_PAGE)) {
+        fprintf(stderr, "legacy read lock did not protect frame identity\n");
+        return 1;
+    }
+    pager_release_read_lock(pager, LEGACY_READ_LOCK_PAGE);
+    if (pager->frames[read_frame].pin_count != 0u) {
+        fprintf(stderr, "legacy read lock leaked its frame pin\n");
+        return 1;
+    }
+
+    force_eviction_churn(pager);
+    if (pager->page_table[LEGACY_READ_LOCK_PAGE] != -1 ||
+        verify_page(pager, LEGACY_READ_LOCK_PAGE) != 0) {
+        fprintf(stderr, "legacy read-lock page did not become evictable\n");
+        return 1;
+    }
+
+    void* write_data = get_page(pager, LEGACY_WRITE_LOCK_PAGE);
+    int write_frame = pager->page_table[LEGACY_WRITE_LOCK_PAGE];
+    if (write_frame < 0) {
+        fprintf(stderr, "legacy write-lock page was not resident\n");
+        return 1;
+    }
+
+    pager_acquire_write_lock(pager, LEGACY_WRITE_LOCK_PAGE);
+    if (pager->frames[write_frame].pin_count == 0u) {
+        fprintf(stderr, "legacy write lock did not pin its frame\n");
+        return 1;
+    }
+
+    evictions_before = pager->evictions;
+    force_eviction_churn(pager);
+    marker = 0u;
+    memcpy(&marker, write_data, sizeof(marker));
+    if (pager->evictions <= evictions_before ||
+        pager->page_table[LEGACY_WRITE_LOCK_PAGE] != write_frame ||
+        pager->frames[write_frame].page_num != LEGACY_WRITE_LOCK_PAGE ||
+        pager->frames[write_frame].data != write_data ||
+        marker != (MARKER_BASE ^ LEGACY_WRITE_LOCK_PAGE)) {
+        fprintf(stderr, "legacy write lock did not protect frame identity\n");
+        return 1;
+    }
+    pager_release_write_lock(pager, LEGACY_WRITE_LOCK_PAGE);
+    if (pager->frames[write_frame].pin_count != 0u) {
+        fprintf(stderr, "legacy write lock leaked its frame pin\n");
+        return 1;
+    }
+
+    force_eviction_churn(pager);
+    if (pager->page_table[LEGACY_WRITE_LOCK_PAGE] != -1 ||
+        verify_page(pager, LEGACY_WRITE_LOCK_PAGE) != 0) {
+        fprintf(stderr, "legacy write-lock page did not become evictable\n");
         return 1;
     }
 
@@ -288,6 +370,7 @@ int main(int argc, char** argv) {
     }
 
     if (exercise_pinned_page_handle(pager) != 0 ||
+        exercise_legacy_page_number_locks(pager) != 0 ||
         exercise_pager_aware_publication(pager) != 0) {
         pager_close(pager);
         return 1;
@@ -296,7 +379,8 @@ int main(int argc, char** argv) {
     printf("PAGER_GROWTH_OK pages=%u capacity=%u legacy_ceiling=%u "
            "pager_publish_pages=%u buffer_pool=%u eviction_safe=yes "
            "publish_rollback=yes preexisting_dirty_rollback=yes "
-           "pin_eviction_guard=yes pinned_rwlock=yes\n",
+           "pin_eviction_guard=yes pinned_rwlock=yes "
+           "legacy_lock_pin=yes\n",
            pages_after_growth,
            capacity_after_growth,
            (unsigned)TABLE_MAX_PAGES,
