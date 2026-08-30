@@ -89,13 +89,21 @@ def main():
         output = result.stdout + result.stderr
         if result.returncode != 0:
             raise AssertionError(output)
-        if "PAYLOAD_NATIVE_READ_OK" not in output or "row_size=308" not in output:
-            raise AssertionError(output)
+        for marker in (
+            "PAYLOAD_NATIVE_READ_OK",
+            "row_size=308",
+            "try_find_busy_nonfatal=yes",
+            "try_find_zero_on_failure=yes",
+            "try_find_one_free_frame_success=yes",
+            "optional_message=yes",
+        ):
+            if marker not in output:
+                raise AssertionError(output)
 
     print(
-        "PASS: payload-native point lookup and checked scan read a real 308-byte "
-        "logical schema from compact slotted-V2 rows without narrowing through "
-        "the 293-byte legacy TinyDBRecord carrier"
+        "PASS: payload-native wide reads retain V2 point/range/scan behavior, "
+        "and linked tinydb_record_payload_try_find returns fail-closed BUSY "
+        "under 16/16 pin pressure then succeeds with exactly one free frame"
     )
 
 
