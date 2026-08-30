@@ -230,6 +230,28 @@ static bool compact_schema_rejects_key_payload_drift(void) {
            memcmp(destination, expected, sizeof(destination)) == 0;
 }
 
+static bool compact_schema_rejects_noncanonical_varchar_padding(void) {
+    unsigned char source[PAGE_SIZE];
+    unsigned char destination[PAGE_SIZE];
+    unsigned char expected[PAGE_SIZE];
+    TableSchema schema = make_compact_schema();
+
+    make_v1_page(source, 2u, COMPACT_LENGTH, 0x51u);
+    unsigned char* field = v1_cell(source, 0u) + LEAF_NODE_VALUE_OFFSET +
+                           schema.columns[1].offset;
+    field[2] = '\0';
+    field[3] = 0x7Fu;
+
+    memset(destination, 0x64, sizeof(destination));
+    memcpy(expected, destination, sizeof(expected));
+    return !tinydb_leaf_migrate_v1_to_compact_v2(source,
+                                                  sizeof(source),
+                                                  &schema,
+                                                  destination,
+                                                  sizeof(destination)) &&
+           memcmp(destination, expected, sizeof(destination)) == 0;
+}
+
 static bool full_v1_upgrade(void) {
     unsigned char v1[PAGE_SIZE];
     unsigned char v2[PAGE_SIZE];
@@ -357,6 +379,10 @@ int main(void) {
         fprintf(stderr, "compact schema migration accepted divergent key/payload identity\n");
         return EXIT_FAILURE;
     }
+    if (!compact_schema_rejects_noncanonical_varchar_padding()) {
+        fprintf(stderr, "compact schema migration silently canonicalized varchar padding\n");
+        return EXIT_FAILURE;
+    }
     if (!full_v1_upgrade()) {
         fprintf(stderr, "full V1 page migration failed\n");
         return EXIT_FAILURE;
@@ -370,6 +396,6 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    printf("LEAF_MIGRATION_OK compact_roundtrip=yes compact_key_payload_identity=yes full_v1=yes oversize_downgrade_rejected=yes overcount_downgrade_rejected=yes atomic_failure=yes checksum_reserved=yes\n");
+    printf("LEAF_MIGRATION_OK compact_roundtrip=yes compact_key_payload_identity=yes compact_varchar_padding=yes full_v1=yes oversize_downgrade_rejected=yes overcount_downgrade_rejected=yes atomic_failure=yes checksum_reserved=yes\n");
     return EXIT_SUCCESS;
 }
