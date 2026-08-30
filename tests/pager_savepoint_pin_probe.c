@@ -116,12 +116,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     int close_frame = close_handle.frame_idx;
-    pager_close(pager);
+    if (pager_try_close(pager)) {
+        fprintf(stderr, "pager_try_close unexpectedly destroyed a pinned Pager\n");
+        return 1;
+    }
     if (!close_handle.pinned || pager->pin_barrier_active ||
         pager->frames[close_frame].page_num != TARGET_PAGE ||
         pager->frames[close_frame].pin_count == 0u ||
         read_marker(pager, TARGET_PAGE) != (ORIGINAL_MARKER ^ TARGET_PAGE)) {
-        fprintf(stderr, "close guard invalidated a live pinned handle\n");
+        fprintf(stderr, "try-close guard invalidated a live pinned handle\n");
         return 1;
     }
     if (!pager_release_page_handle(&close_handle)) {
@@ -129,9 +132,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    pager_close(pager);
+    if (!pager_try_close(pager)) {
+        fprintf(stderr, "pager_try_close did not succeed after pin release\n");
+        return 1;
+    }
     printf("SAVEPOINT_PIN_BARRIER_OK existing_pin_rejected=yes "
            "release_retry=yes admission_drained=yes barrier_cleared=yes "
-           "close_pin_guard=yes\n");
+           "close_pin_guard=yes try_close_busy=yes try_close_success=yes\n");
     return 0;
 }
