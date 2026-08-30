@@ -345,12 +345,30 @@ static bool run_tree_walk(Table* table,
     return ok;
 }
 
+bool tinydb_get_tree_stats_diagnostic(Table* table,
+                                      const char* table_name,
+                                      TinyDBTreeStats* stats,
+                                      char* message,
+                                      size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (table == NULL || table_name == NULL || stats == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid tree-stat arguments");
+        }
+        return false;
+    }
+    return run_tree_walk(table, table_name, stats, message, message_size);
+}
+
 bool tinydb_get_tree_stats(Table* table,
                            const char* table_name,
                            TinyDBTreeStats* stats) {
-    if (table == NULL || table_name == NULL || stats == NULL) return false;
     char ignored[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
-    return run_tree_walk(table, table_name, stats, ignored, sizeof(ignored));
+    return tinydb_get_tree_stats_diagnostic(table,
+                                            table_name,
+                                            stats,
+                                            ignored,
+                                            sizeof(ignored));
 }
 
 bool tinydb_check_table_tree(Table* table,
