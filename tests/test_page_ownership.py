@@ -61,6 +61,7 @@ def main():
         )
         assert direct.returncode == 0, direct.stdout + "\n" + direct.stderr
         assert "PAGE_OWNERSHIP_OK" in direct.stdout, direct.stdout
+        assert "diagnostic_pin_pressure=yes" in direct.stdout, direct.stdout
 
         run_repl(
             repl,
@@ -92,7 +93,10 @@ def main():
         assert output.count(needle) >= 2, output
         assert "page ownership:" in output, output
 
-        print("PASS: page ownership catches orphan and shared pages through diagnostics and PRAGMA")
+        print(
+            "PASS: page ownership catches orphan/shared pages and whole-database "
+            "diagnostics return non-fatally under full pin pressure"
+        )
     finally:
         cleanup(probe_db)
         cleanup(orphan_db)
