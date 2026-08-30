@@ -3,6 +3,7 @@
 
 #include "table.h"
 #include "pager_try_pin.h"
+#include "leaf_page_access.h"
 
 #include <ctype.h>
 
@@ -54,7 +55,8 @@ bool tinydb_check_database(Table* table,
  * Tree traversal snapshots child/key metadata and releases the current node
  * before descending, so inspection needs at most one replaceable frame. A
  * fully pinned pool reports BUSY and returns to the caller rather than taking
- * the process down through lru_evict().
+ * the process down through lru_evict(). Leaf decoding is routed through the
+ * shared V1/V2 leaf-page access boundary rather than the fixed V1 layout.
  */
 static inline void tinydb_inspect_indent(uint32_t level) {
     for (uint32_t i = 0u; i < level; i++) printf("  ");
@@ -76,19 +78,27 @@ static inline bool tinydb_print_tree_nonfatal_impl(Pager* pager,
     void* node = handle.data;
     NodeType type = get_node_type(node);
     if (type == NODE_LEAF) {
-        uint32_t num_keys = *leaf_node_num_cells(node);
-        if (num_keys > LEAF_NODE_MAX_CELLS) {
+        uint32_t num_keys = 0u;
+        if (!tinydb_leaf_page_count(node, PAGE_SIZE, &num_keys)) {
             (void)pager_release_page_handle(&handle);
-            printf("Error: Unable to inspect B+ tree page %u: invalid leaf cell count %u.\n",
-                   page_num,
-                   num_keys);
+            printf("Error: Unable to inspect B+ tree page %u: invalid leaf format.\n",
+                   page_num);
             return false;
         }
+
         tinydb_inspect_indent(indentation_level);
         printf("- leaf (size %u)\n", num_keys);
         for (uint32_t i = 0u; i < num_keys; i++) {
+            uint32_t key = 0u;
+            if (!tinydb_leaf_page_key_at(node, PAGE_SIZE, i, &key)) {
+                (void)pager_release_page_handle(&handle);
+                printf("Error: Unable to inspect B+ tree page %u: invalid leaf key at cell %u.\n",
+                       page_num,
+                       i);
+                return false;
+            }
             tinydb_inspect_indent(indentation_level + 1u);
-            printf("- %u\n", *leaf_node_key(node, i));
+            printf("- %u\n", key);
         }
         if (!pager_release_page_handle(&handle)) {
             printf("Error: Unable to release B+ tree inspection page %u.\n",
@@ -213,22 +223,32 @@ static inline bool tinydb_print_page_nonfatal(Table* table,
 
     bool valid = true;
     if (type == NODE_LEAF) {
-        uint32_t num_cells = *leaf_node_num_cells(page);
-        if (num_cells > LEAF_NODE_MAX_CELLS) {
-            printf("Error: Page %u has invalid leaf cell count %u.\n",
-                   page_num,
-                   num_cells);
+        uint32_t num_cells = 0u;
+        uint32_t next_leaf = 0u;
+        uint32_t prev_leaf = 0u;
+        if (!tinydb_leaf_page_count(page, PAGE_SIZE, &num_cells) ||
+            !tinydb_leaf_page_prev(page, PAGE_SIZE, &prev_leaf) ||
+            !tinydb_leaf_page_next(page, PAGE_SIZE, &next_leaf)) {
+            printf("Error: Page %u has invalid leaf format.\n", page_num);
             valid = false;
         } else {
-            uint32_t next_leaf = *leaf_node_next_leaf(page);
-            uint32_t prev_leaf = *leaf_node_prev_leaf(page);
+            printf("Leaf Format: %s\n",
+                   tinydb_leaf_page_is_fixed_v1(page, PAGE_SIZE)
+                       ? "FIXED_V1"
+                       : "SLOTTED_V2");
             printf("Num Cells: %u\n", num_cells);
             printf("Prev Leaf Page: %u\n", prev_leaf);
             printf("Next Leaf Page: %u\n", next_leaf);
             printf("Keys: ");
             for (uint32_t i = 0u; i < num_cells; i++) {
+                uint32_t key = 0u;
+                if (!tinydb_leaf_page_key_at(page, PAGE_SIZE, i, &key)) {
+                    printf("<invalid cell %u>", i);
+                    valid = false;
+                    break;
+                }
                 printf("%u%s",
-                       *leaf_node_key(page, i),
+                       key,
                        (i + 1u < num_cells) ? ", " : "");
             }
             printf("\n");
