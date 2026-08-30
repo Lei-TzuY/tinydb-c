@@ -125,18 +125,21 @@ static bool walk_tree_dual(DatabaseTreeWalk* walk,
 
         uint32_t previous_leaf = 0u;
         uint32_t next_leaf = 0u;
-        bool links_ok = tinydb_leaf_page_prev(node, PAGE_SIZE, &previous_leaf) &&
-                        tinydb_leaf_page_next(node, PAGE_SIZE, &next_leaf) &&
-                        reciprocal_leaf_link_ok(walk,
-                                                page_num,
-                                                previous_leaf,
-                                                true) &&
-                        reciprocal_leaf_link_ok(walk,
-                                                page_num,
-                                                next_leaf,
-                                                false);
+        if (!tinydb_leaf_page_prev(node, PAGE_SIZE, &previous_leaf) ||
+            !tinydb_leaf_page_next(node, PAGE_SIZE, &next_leaf)) {
+            (void)release_diagnostic_handle(walk, &node_handle);
+            return false;
+        }
         if (!release_diagnostic_handle(walk, &node_handle)) return false;
-        return links_ok;
+
+        return reciprocal_leaf_link_ok(walk,
+                                       page_num,
+                                       previous_leaf,
+                                       true) &&
+               reciprocal_leaf_link_ok(walk,
+                                       page_num,
+                                       next_leaf,
+                                       false);
     }
 
     if (type != NODE_INTERNAL) {
