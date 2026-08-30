@@ -84,6 +84,16 @@ def read_epoch(db_path):
     return epoch
 
 
+def range_snapshots(db_path):
+    return set(glob.glob(db_path + "*.range"))
+
+
+def corrupt_epoch(db_path):
+    path = db_path + ".gidx.epoch"
+    with open(path, "wb") as handle:
+        handle.write(b"corrupt-epoch")
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     executable = find_tinydb(repo_root)
@@ -160,10 +170,59 @@ def main():
         require_projected_id(fourth, 20)
         require(fourth, "ok")
 
+        snapshots_before_loss = range_snapshots(db_path)
+        if len(snapshots_before_loss) < 2:
+            raise AssertionError(
+                "expected both generic indexes to have persistent range snapshots before epoch corruption; "
+                f"found {sorted(snapshots_before_loss)!r}"
+            )
+
+        corrupt_epoch(db_path)
+        fifth = run_session(
+            executable,
+            db_path,
+            [
+                "SELECT id FROM wide_docs WHERE right_text = 'right-a';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+        )
+        require_projected_id(fifth, 10)
+        require(fifth, "ok")
+        read_epoch(db_path)
+
+        snapshots_after_loss = range_snapshots(db_path)
+        removed = snapshots_before_loss - snapshots_after_loss
+        if not removed:
+            raise AssertionError(
+                "recreating corrupt epoch metadata must purge unrelated stale generic-index snapshots "
+                "before rebuilding the index used by the current query"
+            )
+        if not snapshots_after_loss:
+            raise AssertionError("the queried generic index snapshot should be rebuilt after epoch recovery")
+
+        sixth = run_session(
+            executable,
+            db_path,
+            [
+                "SELECT id FROM wide_docs WHERE tag = '';",
+                "SELECT id FROM wide_docs WHERE tag = 'new';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+        )
+        require_projected_id(sixth, 10)
+        require_projected_id(sixth, 20)
+        require(sixth, "ok")
+        if len(range_snapshots(db_path)) < 2:
+            raise AssertionError(
+                "an unrelated purged snapshot must rebuild normally when its index is queried later"
+            )
+
         print(
-            "PASS: append-only wide schema evolution explicitly advances the generic "
-            "index epoch, invalidates pre-ALTER snapshots, rebuilds old indexed columns "
-            "under the new schema generation, and indexes trailing defaults safely."
+            "PASS: append-only wide schema evolution advances the generic index epoch, "
+            "and missing/corrupt epoch authority purges all persistent candidate snapshots "
+            "before a fresh epoch is published, preventing stale sidecar reuse."
         )
     finally:
         cleanup(db_path)
