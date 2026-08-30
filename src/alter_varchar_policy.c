@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 TinyDBSqlStatus tinydb_execute_sql_alter_delegate_base(
@@ -36,6 +37,19 @@ static TableSchema* find_schema(Table* table, const char* name) {
         }
     }
     return NULL;
+}
+
+static bool schema_has_column(const TableSchema* schema, const char* name) {
+    if (schema == NULL || name == NULL) return false;
+    for (uint32_t i = 0; i < schema->num_columns; i++) {
+        if (ci_equal(schema->columns[i].name, name)) return true;
+    }
+    return false;
+}
+
+static bool test_fail_before_catalog_persist(void) {
+    const char* value = getenv("TINYDB_TEST_FAIL_ALTER_BEFORE_CATALOG_PERSIST");
+    return value != NULL && strcmp(value, "1") == 0;
 }
 
 static bool fixed_row_shape(const TableSchema* schema) {
@@ -174,6 +188,12 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
             "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented");
     }
 
+    if (schema_has_column(target, statement.alter_table.new_col_name)) {
+        return fail_result(result,
+                           TINYDB_SQL_POLICY_ERROR,
+                           "ALTER TABLE ADD COLUMN cannot reuse an existing column name");
+    }
+
     if (target->row_size > TINYDB_RECORD_PAYLOAD_MAX ||
         type.storage_size > TINYDB_RECORD_PAYLOAD_MAX - target->row_size) {
         return fail_result(
@@ -240,6 +260,7 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                            "ALTER TABLE ADD COLUMN could not invalidate generic index snapshots");
     }
 
+    TableSchema schema_before_alter = *target;
     if (!table_add_column(table,
                           statement.alter_table.table_name,
                           statement.alter_table.new_col_name,
@@ -247,6 +268,21 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
         return fail_result(result,
                            TINYDB_SQL_EXECUTE_ERROR,
                            "ALTER TABLE ADD COLUMN failed");
+    }
+
+    /*
+     * Keep an explicit rollback seam between the in-memory catalog mutation and
+     * durable catalog publication. This is also a deterministic crash-window
+     * injection point for regression tests. The index epoch may have advanced,
+     * which is safe: it only forces stale sidecars to rebuild. The authoritative
+     * table schema, however, must remain the pre-ALTER schema until publication
+     * is allowed to proceed.
+     */
+    if (test_fail_before_catalog_persist()) {
+        *target = schema_before_alter;
+        return fail_result(result,
+                           TINYDB_SQL_CATALOG_PERSIST_ERROR,
+                           "ALTER TABLE ADD COLUMN interrupted before schema catalog publication");
     }
 
     printf("Column '%s' added to table '%s'.\n",
