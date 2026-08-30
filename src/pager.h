@@ -282,6 +282,20 @@ static inline void pager_restore_page_dirty_state(Pager* pager,
 }
 
 /*
+ * get_page() currently returns an unowned, unpinned frame pointer. Existing
+ * callers still invoke pager_unpin_page() after those reads, but there is no
+ * matching pin to release. Keep that source pattern harmless: explicit pins
+ * belong exclusively to PagerPageHandle or the page-number lock seam below,
+ * and only those owners may decrement pin_count. This also prevents a generic
+ * cleanup call from stealing a live handle/lock pin on the same page.
+ */
+static inline void pager_unpin_page_unowned_compat(Pager* pager,
+                                                   uint32_t page_num) {
+    (void)pager;
+    (void)page_num;
+}
+
+/*
  * Source-compatible page-number lock seam. The historical implementation in
  * pager.c locked a resident frame without pinning it, so an unrelated cache
  * miss could recycle that frame while the caller still held the lock. Normal
@@ -397,11 +411,12 @@ void pager_acquire_write_lock(Pager* pager, uint32_t page_num);
 void pager_release_write_lock(Pager* pager, uint32_t page_num);
 
 /*
- * In-tree consumers compile against the eviction-safe source-compatible seam.
+ * In-tree consumers compile against the ownership-safe compatibility seams.
  * pager.c itself sees the CMake pager_checkpoint rename and is intentionally
  * excluded so its exported ABI definitions keep their original symbol names.
  */
 #if !defined(pager_checkpoint)
+#define pager_unpin_page         pager_unpin_page_unowned_compat
 #define pager_acquire_read_lock  pager_acquire_read_lock_pinned_compat
 #define pager_release_read_lock  pager_release_read_lock_pinned_compat
 #define pager_acquire_write_lock pager_acquire_write_lock_pinned_compat
