@@ -91,6 +91,34 @@ static bool v1_keys_strictly_increasing(const void* source) {
     return true;
 }
 
+static bool compact_envelope_roundtrips(const TableSchema* schema,
+                                        const unsigned char* envelope,
+                                        uint32_t envelope_length) {
+    if (schema == NULL || envelope == NULL || envelope_length == 0u) {
+        return false;
+    }
+
+    TinyDBRecordPayload decoded;
+    if (!tinydb_row_envelope_decode(schema,
+                                    envelope,
+                                    envelope_length,
+                                    &decoded)) {
+        return false;
+    }
+
+    unsigned char canonical[PAGE_SIZE];
+    uint32_t canonical_length = 0u;
+    if (!tinydb_row_envelope_encode_compact_v2(schema,
+                                                &decoded,
+                                                canonical,
+                                                sizeof(canonical),
+                                                &canonical_length)) {
+        return false;
+    }
+    return canonical_length == envelope_length &&
+           memcmp(canonical, envelope, envelope_length) == 0;
+}
+
 static void copy_v1_identity_to_v2(const void* source, void* destination) {
     const unsigned char* src = (const unsigned char*)source;
     unsigned char* dst = (unsigned char*)destination;
@@ -223,6 +251,7 @@ bool tinydb_leaf_migrate_v1_to_compact_v2(const void* source,
                                                     sizeof(envelope),
                                                     &envelope_length) ||
             envelope_length == 0u || envelope_length > UINT16_MAX ||
+            !compact_envelope_roundtrips(schema, envelope, envelope_length) ||
             !tinydb_slotted_leaf_v2_insert(scratch,
                                            sizeof(scratch),
                                            v1_key(source, i),
