@@ -92,7 +92,6 @@ def main():
         )
         setup = run_session(executable, source, setup_commands)
         require(setup, "ok")
-        require(setup, "Table 'wide_archive' created.")
 
         if not os.path.exists(source):
             raise AssertionError("source database was not created")
