@@ -109,8 +109,29 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("SAVEPOINT_PIN_BARRIER_OK existing_pin_rejected=yes "
-           "release_retry=yes admission_drained=yes barrier_cleared=yes\n");
+    PagerPageHandle close_handle;
+    if (!pager_pin_page_handle(pager, TARGET_PAGE, &close_handle)) {
+        fprintf(stderr, "unable to pin close guard target\n");
+        pager_close(pager);
+        return 1;
+    }
+    int close_frame = close_handle.frame_idx;
     pager_close(pager);
+    if (!close_handle.pinned || pager->pin_barrier_active ||
+        pager->frames[close_frame].page_num != TARGET_PAGE ||
+        pager->frames[close_frame].pin_count == 0u ||
+        read_marker(pager, TARGET_PAGE) != (ORIGINAL_MARKER ^ TARGET_PAGE)) {
+        fprintf(stderr, "close guard invalidated a live pinned handle\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&close_handle)) {
+        fprintf(stderr, "unable to release close guard handle\n");
+        return 1;
+    }
+
+    pager_close(pager);
+    printf("SAVEPOINT_PIN_BARRIER_OK existing_pin_rejected=yes "
+           "release_retry=yes admission_drained=yes barrier_cleared=yes "
+           "close_pin_guard=yes\n");
     return 0;
 }
