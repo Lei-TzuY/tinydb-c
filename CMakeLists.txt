@@ -24,6 +24,7 @@ set(TINYDB_CORE_SOURCES
     src/engine.c
     src/engine_open_guard.c
     src/integrity_compat.c
+    src/user_version.c
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
     src/generic_error_status.c
@@ -363,6 +364,9 @@ target_link_libraries(tinydb_page_ownership_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_integrity_api_pin_probe tests/integrity_api_pin_probe.c)
 target_link_libraries(tinydb_integrity_api_pin_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_user_version_api_pin_probe tests/user_version_api_pin_probe.c)
+target_link_libraries(tinydb_user_version_api_pin_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_generic_record_probe tests/generic_record_probe.c)
 target_link_libraries(tinydb_generic_record_probe PRIVATE tinydb_core)
