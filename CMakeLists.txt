@@ -23,6 +23,7 @@ set(TINYDB_CORE_SOURCES
     src/diagnostics_inspection.c
     src/engine.c
     src/engine_open_guard.c
+    src/integrity_compat.c
     src/generic_boolean.c
     src/generic_compound_plan_guard.c
     src/generic_error_status.c
@@ -331,7 +332,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/table.c
     PROPERTIES COMPILE_DEFINITIONS
-    "table_create_table=table_create_table_legacy_base;table_add_column=table_add_column_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy;table_find=table_find_v1_base;table_start=table_start_v1_base;cursor_value=cursor_value_v1_base;cursor_advance=cursor_advance_v1_base;table_end=table_end_v1_base;cursor_retreat=cursor_retreat_v1_base"
+    "table_create_table=table_create_table_legacy_base;table_add_column=table_add_column_legacy_base;table_create_index=table_create_index_legacy;table_drop_index=table_drop_index_legacy;table_find=table_find_v1_base;table_start=table_start_v1_base;cursor_value=cursor_value_v1_base;cursor_advance=cursor_advance_v1_base;table_end=table_end_v1_base;cursor_retreat=cursor_retreat_v1_base;db_integrity_check=db_integrity_check_legacy_base"
 )
 set_source_files_properties(
     src/pager.c
@@ -359,6 +360,9 @@ target_link_libraries(tinydb_engine_api_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_page_ownership_probe tests/page_ownership_probe.c)
 target_link_libraries(tinydb_page_ownership_probe PRIVATE tinydb_core)
+
+add_executable(tinydb_integrity_api_pin_probe tests/integrity_api_pin_probe.c)
+target_link_libraries(tinydb_integrity_api_pin_probe PRIVATE tinydb_core)
 
 add_executable(tinydb_generic_record_probe tests/generic_record_probe.c)
 target_link_libraries(tinydb_generic_record_probe PRIVATE tinydb_core)
