@@ -92,6 +92,7 @@ def main():
             "release_retry=yes",
             "admission_drained=yes",
             "barrier_cleared=yes",
+            "close_pin_guard=yes",
         ):
             if marker not in output:
                 raise AssertionError(f"missing {marker}\n{output}")
@@ -103,8 +104,8 @@ def main():
                 pass
 
     print(
-        "PASS: savepoint rollback rejects live explicit pins, drains pin admission, "
-        "clears its barrier, and succeeds after the owner releases the page"
+        "PASS: savepoint rollback and Pager close reject live explicit pins, "
+        "admission drains cleanly, and both operations resume after owner release"
     )
 
 
