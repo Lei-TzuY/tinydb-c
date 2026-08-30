@@ -154,6 +154,35 @@ static bool remove_snapshot_durably(const char* filename) {
     return true;
 }
 
+static bool cleanup_interrupted_snapshot_publications(Table* table) {
+    if (table == NULL) return false;
+
+    for (uint32_t i = 0; i < table->num_sec_indexes; i++) {
+        GenericSecondaryIndex* index = &table->sec_indexes[i];
+        if (!index->enabled || index->num_columns != 1 ||
+            index->index_filename[0] == '\0') {
+            continue;
+        }
+
+        char temporary[640];
+        int written = snprintf(temporary,
+                               sizeof(temporary),
+                               "%s.range.tmp",
+                               index->index_filename);
+        if (written < 0 || (size_t)written >= sizeof(temporary)) return false;
+
+        /*
+         * A range-snapshot temporary is never authoritative. If publication
+         * was interrupted before replacement, the existing final snapshot is
+         * still the only reusable cache image; if replacement already won,
+         * this is merely leftover namespace garbage. Remove it durably before
+         * epoch validation allows any persistent snapshot to be trusted.
+         */
+        if (!remove_file_durably_if_present(temporary)) return false;
+    }
+    return true;
+}
+
 static bool purge_generic_index_snapshots(Table* table) {
     if (table == NULL) return false;
 
@@ -172,6 +201,14 @@ static bool purge_generic_index_snapshots(Table* table) {
         if (written < 0 || (size_t)written >= sizeof(filename)) return false;
 
         if (!remove_snapshot_durably(filename)) return false;
+
+        char temporary[640];
+        written = snprintf(temporary,
+                           sizeof(temporary),
+                           "%s.range.tmp",
+                           index->index_filename);
+        if (written < 0 || (size_t)written >= sizeof(temporary)) return false;
+        if (!remove_file_durably_if_present(temporary)) return false;
     }
     return true;
 }
@@ -316,6 +353,7 @@ bool tinydb_generic_index_epoch_current(Table* table, uint64_t* epoch) {
     char filename[600];
     if (!epoch_filename(table, filename, sizeof(filename))) return false;
     if (!cleanup_interrupted_epoch_publication(filename)) return false;
+    if (!cleanup_interrupted_snapshot_publications(table)) return false;
 
     uint64_t value = 0;
     if (read_epoch_file(filename, &value)) {
@@ -346,6 +384,7 @@ bool tinydb_generic_index_epoch_before_mutation(Table* table,
     char filename[600];
     if (!epoch_filename(table, filename, sizeof(filename))) return false;
     if (!cleanup_interrupted_epoch_publication(filename)) return false;
+    if (!cleanup_interrupted_snapshot_publications(table)) return false;
 
     uint64_t epoch = 0;
     if (!read_epoch_file(filename, &epoch)) {
