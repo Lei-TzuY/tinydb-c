@@ -238,6 +238,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    memset(&found, 0xA5, sizeof(found));
+    memset(message, 0, sizeof(message));
+    if (tinydb_record_payload_try_find(table,
+                                       &schema,
+                                       20u,
+                                       &found,
+                                       message,
+                                       sizeof(message)) ||
+        found.length != 0u || found.bytes[0] != 0u ||
+        strstr(message, "primary key not found") == NULL) {
+        fprintf(stderr,
+                "non-fatal payload missing-key semantics failed: length=%u message=%s\n",
+                found.length,
+                message);
+        db_close(table);
+        remove(argv[1]);
+        return 1;
+    }
+
     TinyDBRecord legacy;
     if (tinydb_record_find(table, &schema, 19u, &legacy)) {
         fprintf(stderr, "legacy TinyDBRecord unexpectedly accepted a 308-byte row\n");
@@ -353,6 +372,6 @@ int main(int argc, char** argv) {
 
     db_close(table);
     remove(argv[1]);
-    printf("PAYLOAD_NATIVE_READ_OK row_size=308 rows=3 range=1 try_find_busy_nonfatal=yes try_find_zero_on_failure=yes try_find_one_free_frame_success=yes optional_message=yes\n");
+    printf("PAYLOAD_NATIVE_READ_OK row_size=308 rows=3 range=1 try_find_missing_key=yes try_find_busy_nonfatal=yes try_find_zero_on_failure=yes try_find_one_free_frame_success=yes optional_message=yes\n");
     return 0;
 }
