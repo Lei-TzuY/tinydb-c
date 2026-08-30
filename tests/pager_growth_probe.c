@@ -51,6 +51,14 @@ static int exercise_pinned_page_handle(Pager* pager) {
         return 1;
     }
 
+    uint32_t explicit_pin_count = pager->frames[handle.frame_idx].pin_count;
+    pager_unpin_page(pager, PINNED_TEST_PAGE);
+    if (explicit_pin_count == 0u ||
+        pager->frames[handle.frame_idx].pin_count != explicit_pin_count) {
+        fprintf(stderr, "generic unpin stole an explicit page-handle pin\n");
+        return 1;
+    }
+
     uint32_t marker = 0u;
     if (!pager_page_handle_acquire_read(&handle)) {
         fprintf(stderr, "unable to acquire pinned read lock\n");
@@ -113,8 +121,11 @@ static int exercise_legacy_page_number_locks(Pager* pager) {
     }
 
     pager_acquire_read_lock(pager, LEGACY_READ_LOCK_PAGE);
-    if (pager->frames[read_frame].pin_count == 0u) {
-        fprintf(stderr, "legacy read lock did not pin its frame\n");
+    uint32_t read_pin_count = pager->frames[read_frame].pin_count;
+    pager_unpin_page(pager, LEGACY_READ_LOCK_PAGE);
+    if (read_pin_count == 0u ||
+        pager->frames[read_frame].pin_count != read_pin_count) {
+        fprintf(stderr, "generic unpin stole a legacy read-lock pin\n");
         return 1;
     }
 
@@ -150,8 +161,11 @@ static int exercise_legacy_page_number_locks(Pager* pager) {
     }
 
     pager_acquire_write_lock(pager, LEGACY_WRITE_LOCK_PAGE);
-    if (pager->frames[write_frame].pin_count == 0u) {
-        fprintf(stderr, "legacy write lock did not pin its frame\n");
+    uint32_t write_pin_count = pager->frames[write_frame].pin_count;
+    pager_unpin_page(pager, LEGACY_WRITE_LOCK_PAGE);
+    if (write_pin_count == 0u ||
+        pager->frames[write_frame].pin_count != write_pin_count) {
+        fprintf(stderr, "generic unpin stole a legacy write-lock pin\n");
         return 1;
     }
 
@@ -380,7 +394,7 @@ int main(int argc, char** argv) {
            "pager_publish_pages=%u buffer_pool=%u eviction_safe=yes "
            "publish_rollback=yes preexisting_dirty_rollback=yes "
            "pin_eviction_guard=yes pinned_rwlock=yes "
-           "legacy_lock_pin=yes\n",
+           "legacy_lock_pin=yes unowned_unpin_safe=yes\n",
            pages_after_growth,
            capacity_after_growth,
            (unsigned)TABLE_MAX_PAGES,
