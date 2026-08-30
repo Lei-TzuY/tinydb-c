@@ -39,6 +39,7 @@ static TableSchema* find_schema(Table* table, const char* name) {
 
 static bool fixed_row_shape(const TableSchema* schema) {
     return schema != NULL &&
+           schema->row_size == ROW_SIZE &&
            schema->num_columns == 3u &&
            ci_equal(schema->columns[0].name, "id") &&
            ci_equal(schema->columns[1].name, "username") &&
