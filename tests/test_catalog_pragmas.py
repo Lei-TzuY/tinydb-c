@@ -64,11 +64,13 @@ def main():
             ],
         )
 
-        assert "VARCHAR(32)" in first and "VARCHAR(255)" in first, first
+        # Bare id/username/email remains the historical Row ABI and its
+        # catalog metadata is normalized to the physical serialized widths.
+        assert "username | VARCHAR(32)" in first, first
+        assert "email | VARCHAR(255)" in first, first
         assert "name | VARCHAR(255)" in first, first
         assert "price | INT" in first, first
         assert "quantity | INT" in first, first
-        assert "username | VARCHAR(255)" in first, first
         assert "idx_users_username" in first, first
         assert "(no indexes found)" in first, first
         assert "table 'missing_table' not found" in first, first
@@ -84,7 +86,8 @@ def main():
             ],
         )
         assert "quantity | INT" in second, second
-        assert "username | VARCHAR(255)" in second, second
+        assert "username | VARCHAR(32)" in second, second
+        assert "email | VARCHAR(255)" in second, second
         assert "idx_users_username" in second, second
 
         print("PASS: catalog-aware PRAGMA table_info/index_list verified")
