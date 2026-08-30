@@ -1,5 +1,6 @@
 #include "leaf_format.h"
 #include "leaf_migration.h"
+#include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 
 #include <stdio.h>
@@ -205,6 +206,68 @@ static bool compact_roundtrip(void) {
     return true;
 }
 
+static bool compact_row_primitive_is_atomic_and_decodable(void) {
+    unsigned char source[PAGE_SIZE];
+    unsigned char envelope[PAGE_SIZE];
+    unsigned char expected[PAGE_SIZE];
+    TableSchema schema = make_compact_schema();
+    TinyDBRecordPayload decoded;
+    uint32_t envelope_length = 0u;
+
+    make_v1_page(source, 1u, COMPACT_LENGTH, 0x71u);
+    canonicalize_compact_schema_page(source, 1u);
+    memset(envelope, 0xA7, sizeof(envelope));
+    if (!tinydb_fixed_v1_row_encode_compact_v2(
+            &schema,
+            1u,
+            v1_cell(source, 0u) + LEAF_NODE_VALUE_OFFSET,
+            ROW_SIZE,
+            envelope,
+            sizeof(envelope),
+            &envelope_length) ||
+        envelope_length == 0u ||
+        !tinydb_row_envelope_decode(&schema,
+                                    envelope,
+                                    envelope_length,
+                                    &decoded) ||
+        decoded.length != COMPACT_LENGTH ||
+        memcmp(decoded.bytes,
+               v1_cell(source, 0u) + LEAF_NODE_VALUE_OFFSET,
+               COMPACT_LENGTH) != 0) {
+        return false;
+    }
+
+    memset(envelope, 0xB8, sizeof(envelope));
+    memcpy(expected, envelope, sizeof(expected));
+    envelope_length = 0xDEADBEEFu;
+    if (tinydb_fixed_v1_row_encode_compact_v2(
+            &schema,
+            1u,
+            v1_cell(source, 0u) + LEAF_NODE_VALUE_OFFSET,
+            ROW_SIZE,
+            envelope,
+            1u,
+            &envelope_length) ||
+        envelope_length != 0xDEADBEEFu ||
+        memcmp(envelope, expected, sizeof(envelope)) != 0) {
+        return false;
+    }
+
+    memset(envelope, 0xC9, sizeof(envelope));
+    memcpy(expected, envelope, sizeof(expected));
+    envelope_length = 0xCAFEBABEu;
+    return !tinydb_fixed_v1_row_encode_compact_v2(
+               &schema,
+               999u,
+               v1_cell(source, 0u) + LEAF_NODE_VALUE_OFFSET,
+               ROW_SIZE,
+               envelope,
+               sizeof(envelope),
+               &envelope_length) &&
+           envelope_length == 0xCAFEBABEu &&
+           memcmp(envelope, expected, sizeof(envelope)) == 0;
+}
+
 static bool compact_schema_rejects_key_payload_drift(void) {
     unsigned char source[PAGE_SIZE];
     unsigned char destination[PAGE_SIZE];
@@ -373,7 +436,7 @@ static bool rejected_upgrades_leave_destination_unchanged(void) {
            &bad_key,
            sizeof(bad_key));
     memset(destination, 0x8Du, sizeof(destination));
-    memcpy(expected, destination, sizeof(destination));
+    memcpy(expected, destination, sizeof(expected));
 
     if (tinydb_leaf_migrate_v1_to_v2(v1,
                                      sizeof(v1),
@@ -407,6 +470,10 @@ int main(void) {
         fprintf(stderr, "compact V1/V2/V1 roundtrip failed\n");
         return EXIT_FAILURE;
     }
+    if (!compact_row_primitive_is_atomic_and_decodable()) {
+        fprintf(stderr, "fixed-row compact migration primitive was not atomic/decodable\n");
+        return EXIT_FAILURE;
+    }
     if (!compact_schema_rejects_key_payload_drift()) {
         fprintf(stderr, "compact schema migration accepted divergent key/payload identity\n");
         return EXIT_FAILURE;
@@ -432,6 +499,6 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    printf("LEAF_MIGRATION_OK compact_roundtrip=yes compact_key_payload_identity=yes compact_varchar_padding=yes compact_unused_tail=yes full_v1=yes oversize_downgrade_rejected=yes overcount_downgrade_rejected=yes atomic_failure=yes checksum_reserved=yes\n");
+    printf("LEAF_MIGRATION_OK compact_roundtrip=yes compact_row_primitive=yes compact_key_payload_identity=yes compact_varchar_padding=yes compact_unused_tail=yes full_v1=yes oversize_downgrade_rejected=yes overcount_downgrade_rejected=yes atomic_failure=yes checksum_reserved=yes\n");
     return EXIT_SUCCESS;
 }
