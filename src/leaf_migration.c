@@ -109,6 +109,40 @@ static bool v1_payload_key_matches(const TableSchema* schema,
     return payload_key == v1_key(source, index);
 }
 
+static bool v1_payload_is_canonical_for_schema(const TableSchema* schema,
+                                                const void* source,
+                                                uint32_t index) {
+    if (schema == NULL || source == NULL) return false;
+
+    const unsigned char* payload = v1_value(source, index);
+    for (uint32_t i = 0u; i < schema->num_columns; i++) {
+        const TableColumn* column = &schema->columns[i];
+        if (column->offset > schema->row_size || column->size == 0u ||
+            column->size > schema->row_size - column->offset) {
+            return false;
+        }
+        if (column->type == COL_TYPE_INT) {
+            if (column->size != sizeof(uint32_t)) return false;
+            continue;
+        }
+        if (column->type != COL_TYPE_VARCHAR) return false;
+
+        const unsigned char* field = payload + column->offset;
+        uint32_t terminator = column->size;
+        for (uint32_t j = 0u; j < column->size; j++) {
+            if (field[j] == '\0') {
+                terminator = j;
+                break;
+            }
+        }
+        if (terminator == column->size) return false;
+        for (uint32_t j = terminator + 1u; j < column->size; j++) {
+            if (field[j] != 0u) return false;
+        }
+    }
+    return true;
+}
+
 static bool compact_envelope_roundtrips(const TableSchema* schema,
                                         const unsigned char* envelope,
                                         uint32_t envelope_length) {
@@ -256,7 +290,10 @@ bool tinydb_leaf_migrate_v1_to_compact_v2(const void* source,
 
     uint32_t count = v1_count(source);
     for (uint32_t i = 0u; i < count; i++) {
-        if (!v1_payload_key_matches(schema, source, i)) return false;
+        if (!v1_payload_key_matches(schema, source, i) ||
+            !v1_payload_is_canonical_for_schema(schema, source, i)) {
+            return false;
+        }
 
         TinyDBRecordPayload payload;
         memset(&payload, 0, sizeof(payload));
