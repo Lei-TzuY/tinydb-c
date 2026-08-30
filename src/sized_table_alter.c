@@ -84,14 +84,15 @@ static bool schema_rows_accept_appended_column(
     return scan_complete;
 }
 
-static bool root_is_valid_v2(Table* table, const TableSchema* schema) {
+static bool root_is_v2_tree(Table* table, const TableSchema* schema) {
     if (table == NULL || table->pager == NULL || schema == NULL ||
         schema->root_page_num >= table->pager->num_pages) {
         return false;
     }
     void* root = get_page(table->pager, schema->root_page_num);
-    return get_node_type(root) == NODE_LEAF && is_node_root(root) &&
-           *node_parent(root) == 0u &&
+    if (!is_node_root(root) || *node_parent(root) != 0u) return false;
+    if (get_node_type(root) == NODE_INTERNAL) return true;
+    return get_node_type(root) == NODE_LEAF &&
            tinydb_leaf_format_detect_page(root, PAGE_SIZE) ==
                TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 &&
            tinydb_slotted_leaf_v2_validate(root, PAGE_SIZE);
@@ -181,7 +182,7 @@ bool table_add_column(Table* table,
 
     bool crossing_already_v2 = false;
     if (crosses_payload_boundary) {
-        crossing_already_v2 = root_is_valid_v2(table, schema);
+        crossing_already_v2 = root_is_v2_tree(table, schema);
         if (crossing_already_v2) {
             if (!schema_rows_accept_appended_column(table, schema, &type)) {
                 printf("Error: ALTER TABLE ADD COLUMN requires append-compatible compact V2 rows before crossing the fixed record boundary.\n");
@@ -212,9 +213,9 @@ bool table_add_column(Table* table,
      * compact V2 rows may retain an older append-only schema generation: the
      * row envelope validates their historical prefix fingerprint and decodes
      * missing trailing fields as zero/empty defaults. A crossing ALTER may
-     * arrive with a root already migrated to compact V2 by the schema-aware
-     * publication wrapper; otherwise only a provably empty fixed root is
-     * converted here. */
+     * arrive with storage already migrated to a compact V2 leaf or multi-leaf
+     * tree by the schema-aware publication wrapper; otherwise only a provably
+     * empty fixed root is converted here. */
     if (!table_add_column_legacy_base(table,
                                       table_name,
                                       col_name,
