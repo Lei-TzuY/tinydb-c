@@ -183,6 +183,7 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
 
     TableSchema* target = find_schema(table, statement.alter_table.table_name);
     if (target == NULL) {
+        /* Preserve the base ALTER route's public not-found diagnostic. */
         return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
     if (ci_equal(target->name, "users") || fixed_row_shape(target)) {
@@ -206,6 +207,16 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
             "ALTER TABLE ADD COLUMN would exceed the schema-sized payload limit");
     }
 
+    /*
+     * Compact V2 rows carry their field count, logical length, and a schema
+     * fingerprint. For append-only evolution the decoder can reconstruct the
+     * historical schema from the current schema's unchanged prefix, verify the
+     * stored fingerprint, and materialize missing trailing columns as zero/empty
+     * defaults. Prove every existing row accepts the prospective schema before
+     * changing catalog metadata. Raw/migration-era rows, malformed envelopes,
+     * or non-prefix layouts fail the corruption-aware scan and keep ALTER
+     * fail-closed.
+     */
     if (target->row_size > ROW_SIZE) {
         char scan_message[TINYDB_RECORD_MESSAGE_MAX];
         if (!schema_rows_accept_appended_column(table,
@@ -237,6 +248,17 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
         }
     }
 
+    /*
+     * Generic secondary-index range snapshots are keyed by a durable mutation
+     * epoch. Schema evolution is a logical mutation even when existing compact
+     * V2 rows do not need to be rewritten: a later rebuild must decode those
+     * historical row generations through the new schema and materialize the
+     * appended defaults. Invalidate any snapshot for this table before the
+     * catalog mutation so no pre-ALTER sidecar can remain current under the new
+     * schema. A harmless extra invalidation is preferable to accepting stale
+     * candidates; failed DDL may therefore force a later rebuild without
+     * changing query results.
+     */
     if (!tinydb_generic_index_epoch_before_mutation(table, target)) {
         return fail_result(result,
                            TINYDB_SQL_EXECUTE_ERROR,
@@ -253,6 +275,13 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                            "ALTER TABLE ADD COLUMN failed");
     }
 
+    /*
+     * Keep an explicit rollback seam between the in-memory catalog mutation and
+     * durable catalog publication. The index epoch may have advanced, which is
+     * safe: it only forces stale sidecars to rebuild. The authoritative in-memory
+     * schema must stay aligned with the durable catalog whenever publication is
+     * rejected or fails.
+     */
     if (test_fail_before_catalog_persist()) {
         *target = schema_before_alter;
         return fail_result(result,
