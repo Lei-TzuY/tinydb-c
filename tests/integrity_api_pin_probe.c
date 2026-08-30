@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "table_stats_try.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +18,22 @@ static bool release_handles(PagerPageHandle* handles, uint32_t count) {
         }
     }
     return ok;
+}
+
+static bool stats_zero(const TableStats* stats) {
+    return stats->total_pages == 0u &&
+           stats->leaf_pages == 0u &&
+           stats->internal_pages == 0u &&
+           stats->free_pages == 0u &&
+           stats->total_rows == 0u;
+}
+
+static bool stats_equal(const TableStats* left, const TableStats* right) {
+    return left->total_pages == right->total_pages &&
+           left->leaf_pages == right->leaf_pages &&
+           left->internal_pages == right->internal_pages &&
+           left->free_pages == right->free_pages &&
+           left->total_rows == right->total_rows;
 }
 
 int main(int argc, char** argv) {
@@ -80,6 +97,25 @@ int main(int argc, char** argv) {
         return fail(database, "db_integrity_check unexpectedly succeeded with every frame pinned");
     }
 
+    TableStats safe_stats;
+    memset(&safe_stats, 0xA5, sizeof(safe_stats));
+    char stats_message[TINYDB_ENGINE_MESSAGE_MAX];
+    if (db_try_get_stats(table,
+                         &safe_stats,
+                         stats_message,
+                         sizeof(stats_message))) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "db_try_get_stats unexpectedly succeeded with every frame pinned");
+    }
+    if (!stats_zero(&safe_stats)) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "db_try_get_stats published partial output on BUSY");
+    }
+    if (strstr(stats_message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "db_try_get_stats did not preserve BUSY detail");
+    }
+
     if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
         (void)release_handles(owners, owner_count);
         return fail(database, "unable to free one frame");
@@ -88,9 +124,36 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         return fail(database, "db_integrity_check requires more than one free frame");
     }
+    if (!db_try_get_stats(table,
+                          &safe_stats,
+                          stats_message,
+                          sizeof(stats_message))) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "db_try_get_stats requires more than one free frame");
+    }
+    if (safe_stats.total_pages != table->pager->num_pages ||
+        safe_stats.free_pages != table->pager->free_page_count ||
+        safe_stats.total_rows != 1u ||
+        safe_stats.leaf_pages != 1u ||
+        safe_stats.internal_pages == 0u) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "db_try_get_stats returned unexpected routed/global statistics");
+    }
 
     if (!release_handles(owners, owner_count)) {
         return fail(database, "unable to release pin-pressure owners");
+    }
+
+    TableStats legacy_stats;
+    db_get_stats(table, &legacy_stats);
+    if (!stats_equal(&safe_stats, &legacy_stats)) {
+        return fail(database, "db_try_get_stats does not match legacy db_get_stats after pressure clears");
+    }
+
+    TableStats no_message_stats;
+    if (!db_try_get_stats(table, &no_message_stats, NULL, 0u) ||
+        !stats_equal(&no_message_stats, &legacy_stats)) {
+        return fail(database, "db_try_get_stats failed without a diagnostic buffer");
     }
 
     uint32_t orphan_page = get_unused_page_num(table->pager);
@@ -105,6 +168,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("INTEGRITY_API_PIN_OK busy_nonfatal=yes one_free_frame_success=yes ownership_fail_closed=yes recovery=yes\n");
+    printf("INTEGRITY_API_PIN_OK busy_nonfatal=yes one_free_frame_success=yes ownership_fail_closed=yes recovery=yes stats_busy_nonfatal=yes stats_zero_publish=yes stats_one_free_frame_success=yes stats_legacy_match=yes stats_optional_message=yes\n");
     return 0;
 }
