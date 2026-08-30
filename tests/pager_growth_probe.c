@@ -14,6 +14,8 @@
 #define PINNED_TEST_PAGE 0u
 #define LEGACY_READ_LOCK_PAGE 1u
 #define LEGACY_WRITE_LOCK_PAGE 2u
+#define FREE_GUARD_PAGE 3u
+#define ROLLBACK_GUARD_PAGE 4u
 #define PUBLISH_PAGE_COUNT 64u
 #define PUBLISH_FAIL_AFTER 33u
 #define EVICTION_CHURN_START 128u
@@ -191,6 +193,77 @@ static int exercise_legacy_page_number_locks(Pager* pager) {
     if (pager->page_table[LEGACY_WRITE_LOCK_PAGE] != -1 ||
         verify_page(pager, LEGACY_WRITE_LOCK_PAGE) != 0) {
         fprintf(stderr, "legacy write-lock page did not become evictable\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int exercise_destructive_pin_guards(Pager* pager) {
+    PagerPageHandle handle;
+
+    if (!pager_pin_page_handle(pager, FREE_GUARD_PAGE, &handle)) {
+        fprintf(stderr, "unable to pin free-page guard target\n");
+        return 1;
+    }
+    uint32_t free_count_before = pager->free_page_count;
+    int free_frame = handle.frame_idx;
+    pager_free_page(pager, FREE_GUARD_PAGE);
+    if (pager->free_page_count != free_count_before ||
+        pager->page_table[FREE_GUARD_PAGE] != free_frame ||
+        pager->frames[free_frame].page_num != FREE_GUARD_PAGE ||
+        pager->frames[free_frame].pin_count == 0u ||
+        verify_page(pager, FREE_GUARD_PAGE) != 0) {
+        fprintf(stderr, "free-page guard allowed a pinned page to be reclaimed\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&handle)) {
+        fprintf(stderr, "unable to release free-page guard handle\n");
+        return 1;
+    }
+
+    if (!pager_pin_page_handle(pager, TARGET_PAGE, &handle)) {
+        fprintf(stderr, "unable to pin shrink guard target\n");
+        return 1;
+    }
+    uint32_t pages_before = pager->num_pages;
+    int shrink_frame = handle.frame_idx;
+    pager_shrink(pager, TARGET_PAGE);
+    if (pager->num_pages != pages_before ||
+        pager->page_table[TARGET_PAGE] != shrink_frame ||
+        pager->frames[shrink_frame].page_num != TARGET_PAGE ||
+        pager->frames[shrink_frame].pin_count == 0u ||
+        verify_page(pager, TARGET_PAGE) != 0) {
+        fprintf(stderr, "shrink guard invalidated a pinned page\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&handle)) {
+        fprintf(stderr, "unable to release shrink guard handle\n");
+        return 1;
+    }
+
+    pager_begin_transaction(pager);
+    if (!pager_pin_page_handle(pager, ROLLBACK_GUARD_PAGE, &handle)) {
+        fprintf(stderr, "unable to pin rollback guard target\n");
+        return 1;
+    }
+    int rollback_frame = handle.frame_idx;
+    pager_rollback(pager);
+    if (!pager->in_transaction ||
+        pager->page_table[ROLLBACK_GUARD_PAGE] != rollback_frame ||
+        pager->frames[rollback_frame].page_num != ROLLBACK_GUARD_PAGE ||
+        pager->frames[rollback_frame].pin_count == 0u ||
+        verify_page(pager, ROLLBACK_GUARD_PAGE) != 0) {
+        fprintf(stderr, "transaction rollback invalidated a pinned page\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&handle)) {
+        fprintf(stderr, "unable to release rollback guard handle\n");
+        return 1;
+    }
+    pager_rollback(pager);
+    if (pager->in_transaction || verify_page(pager, ROLLBACK_GUARD_PAGE) != 0) {
+        fprintf(stderr, "rollback did not resume after pin release\n");
         return 1;
     }
 
@@ -385,6 +458,7 @@ int main(int argc, char** argv) {
 
     if (exercise_pinned_page_handle(pager) != 0 ||
         exercise_legacy_page_number_locks(pager) != 0 ||
+        exercise_destructive_pin_guards(pager) != 0 ||
         exercise_pager_aware_publication(pager) != 0) {
         pager_close(pager);
         return 1;
@@ -394,7 +468,8 @@ int main(int argc, char** argv) {
            "pager_publish_pages=%u buffer_pool=%u eviction_safe=yes "
            "publish_rollback=yes preexisting_dirty_rollback=yes "
            "pin_eviction_guard=yes pinned_rwlock=yes "
-           "legacy_lock_pin=yes unowned_unpin_safe=yes\n",
+           "legacy_lock_pin=yes unowned_unpin_safe=yes "
+           "destructive_pin_guard=yes\n",
            pages_after_growth,
            capacity_after_growth,
            (unsigned)TABLE_MAX_PAGES,
