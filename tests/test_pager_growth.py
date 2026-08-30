@@ -39,12 +39,14 @@ def main():
         assert 'preexisting_dirty_rollback=yes' in result.stdout, result.stdout
         assert 'pin_eviction_guard=yes' in result.stdout, result.stdout
         assert 'pinned_rwlock=yes' in result.stdout, result.stdout
+        assert 'legacy_lock_pin=yes' in result.stdout, result.stdout
 
         # The probe writes pages 0..4128 inclusive, proving that the old
         # TABLE_MAX_PAGES boundary is no longer a Pager allocation limit. It
-        # proves a pinned handle remains frame-stable across LRU churn, then
-        # becomes evictable after release. It also publishes and rolls back 64
-        # staged page images through a 16-frame pool. One target is already
+        # proves both explicit pinned handles and source-compatible legacy
+        # page-number read/write locks remain frame-stable across LRU churn,
+        # then become evictable after release. It also publishes and rolls back
+        # 64 staged page images through a 16-frame pool. One target is already
         # dirty and spilled before publication, so rollback must restore both
         # its older transactional image and dirty state across a second eviction
         # rather than resurrecting staged bytes.
