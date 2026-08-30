@@ -60,8 +60,13 @@ def main():
             timeout=120,
         )
         assert direct.returncode == 0, direct.stdout + "\n" + direct.stderr
-        assert "PAGE_OWNERSHIP_OK" in direct.stdout, direct.stdout
-        assert "diagnostic_pin_pressure=yes" in direct.stdout, direct.stdout
+        for marker in (
+            "PAGE_OWNERSHIP_OK",
+            "diagnostic_pin_pressure=yes",
+            "direct_ownership_busy=yes",
+            "table_check_busy=yes",
+        ):
+            assert marker in direct.stdout, direct.stdout
 
         run_repl(
             repl,
@@ -94,8 +99,8 @@ def main():
         assert "page ownership:" in output, output
 
         print(
-            "PASS: page ownership catches orphan/shared pages and whole-database "
-            "diagnostics return non-fatally under full pin pressure"
+            "PASS: page ownership catches orphan/shared pages and all public "
+            "tree/ownership diagnostics return non-fatally under full pin pressure"
         )
     finally:
         cleanup(probe_db)
