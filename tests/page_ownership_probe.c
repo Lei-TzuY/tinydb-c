@@ -95,6 +95,18 @@ int main(int argc, char** argv) {
         owner_count++;
     }
 
+    if (tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
+        strstr(message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("page ownership did not fail non-fatally under full pin pressure");
+    }
+    if (tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
+        strstr(message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("table diagnostics did not fail non-fatally under full pin pressure");
+    }
     if (tinydb_check_database(table, &stats, message, sizeof(message)) ||
         strstr(message, "buffer pool busy") == NULL) {
         (void)release_handles(owners, owner_count);
@@ -105,9 +117,11 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("unable to release diagnostic pin-pressure owners");
     }
-    if (!tinydb_check_database(table, &stats, message, sizeof(message))) {
+    if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
+        !tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
+        !tinydb_check_database(table, &stats, message, sizeof(message))) {
         tinydb_close(database);
-        return fail("whole-database diagnostics did not recover after pin release");
+        return fail("diagnostics did not recover after pin release");
     }
 
     uint32_t orphan_page = get_unused_page_num(table->pager);
@@ -168,6 +182,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes\n");
     return 0;
 }
