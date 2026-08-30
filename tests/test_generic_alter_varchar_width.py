@@ -77,6 +77,8 @@ def main():
                 "INSERT INTO near_limit VALUES (2, 'short', 'edge');",
                 "ALTER TABLE near_limit ADD COLUMN overflow VARCHAR(1);",
                 "PRAGMA table_info(near_limit);",
+                "SELECT * FROM near_limit WHERE id = 1;",
+                "SELECT * FROM near_limit WHERE id = 2;",
                 "CREATE TABLE empty_crossing (id INT, payload VARCHAR(250), tail VARCHAR(37));",
                 "ALTER TABLE empty_crossing ADD COLUMN overflow VARCHAR(1);",
                 "PRAGMA table_info(empty_crossing);",
@@ -116,11 +118,13 @@ def main():
             "(2, beta, 200, bee, memo)",
             "schema DDL is not allowed inside a transaction",
             "Column 'tail' added to table 'near_limit'.",
+            "Column 'overflow' added to table 'near_limit'.",
             "payload | VARCHAR(250)",
             "tail | VARCHAR(37)",
-            "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented",
-            "Column 'overflow' added to table 'empty_crossing'.",
             "overflow | VARCHAR(1)",
+            "(1, seed, , )",
+            "(2, short, edge, )",
+            "Column 'overflow' added to table 'empty_crossing'.",
             "(3, cross, edge, x)",
             "Column 'tag' added to table 'wide_docs'.",
             "Column 'note' added to table 'wide_docs'.",
@@ -153,7 +157,7 @@ def main():
                 "SELECT * FROM contacts WHERE id = 2;",
                 "SELECT * FROM near_limit WHERE id = 1;",
                 "SELECT * FROM near_limit WHERE id = 2;",
-                "INSERT INTO near_limit VALUES (5, 'still', 'fixed');",
+                "INSERT INTO near_limit VALUES (5, 'still', 'fixed', 'z');",
                 "SELECT * FROM near_limit WHERE id = 5;",
                 "SELECT * FROM empty_crossing WHERE id = 3;",
                 "SELECT * FROM wide_docs WHERE id = 7;",
@@ -184,9 +188,9 @@ def main():
             "note | VARCHAR(6)",
             "(1, alpha, 100, ally, )",
             "(2, beta, 200, bee, memo)",
-            "(1, seed, )",
-            "(2, short, edge)",
-            "(5, still, fixed)",
+            "(1, seed, , )",
+            "(2, short, edge, )",
+            "(5, still, fixed, z)",
             "(3, cross, edge, x)",
             "(7, left, right, , legacy)",
             "(8, left-2, right-2, tag8, )",
@@ -201,10 +205,9 @@ def main():
 
         print(
             "PASS: compact VARCHAR(n) ADD COLUMN persists n+1-byte layouts, "
-            "supports prepared routing, honors the exact 293-byte boundary, "
-            "allows provably empty tables to cross safely into payload-sized storage, "
-            "supports append-only schema generations on populated compact V2 rows, "
-            "materializes trailing defaults without weakening fingerprint checks, "
+            "supports prepared routing, migrates populated single fixed roots across "
+            "the 293-byte boundary into compact V2 schema generations, preserves "
+            "append-only defaults after reopen, supports already-wide compact V2 rows, "
             "and preserves fixed-Row/transaction safety guards."
         )
     finally:
