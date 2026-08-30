@@ -31,6 +31,15 @@ bool tinydb_get_tree_stats(Table* table,
                            const char* table_name,
                            TinyDBTreeStats* stats);
 
+/* ABI-additive variant that preserves the detailed non-fatal reason from the
+ * tree walker (for example, buffer-pool backpressure or malformed leaf data).
+ * The historical bool-only helper above remains available and delegates here. */
+bool tinydb_get_tree_stats_diagnostic(Table* table,
+                                      const char* table_name,
+                                      TinyDBTreeStats* stats,
+                                      char* message,
+                                      size_t message_size);
+
 bool tinydb_check_table_tree(Table* table,
                              const char* table_name,
                              char* message,
