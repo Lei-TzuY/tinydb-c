@@ -39,8 +39,24 @@ static bool legacy_column_names(uint32_t num_cols, char col_names[][32]) {
            ci_equal(col_names[2], "email");
 }
 
+static bool legacy_fixed_row_shape(uint32_t num_cols,
+                                   char col_names[][32],
+                                   const TinyDBColumnTypeSpec* types,
+                                   bool recognized_all) {
+    if (!recognized_all || !legacy_column_names(num_cols, col_names) ||
+        types[0].type != COL_TYPE_INT ||
+        types[1].type != COL_TYPE_VARCHAR ||
+        types[2].type != COL_TYPE_VARCHAR) {
+        return false;
+    }
+
+    if (!types[1].explicitly_sized && !types[2].explicitly_sized) return true;
+    return types[1].explicitly_sized && types[2].explicitly_sized &&
+           types[1].storage_size == USERNAME_SIZE &&
+           types[2].storage_size == EMAIL_SIZE;
+}
+
 static bool validate_sized_layout(uint32_t num_cols,
-                                  char col_names[][32],
                                   char col_types[][16],
                                   TinyDBColumnTypeSpec* types,
                                   bool* recognized_all,
@@ -56,19 +72,6 @@ static bool validate_sized_layout(uint32_t num_cols,
         }
         if (types[i].explicitly_sized) *has_explicit_width = true;
     }
-
-    if (*has_explicit_width && legacy_column_names(num_cols, col_names)) {
-        if (!*recognized_all ||
-            types[0].type != COL_TYPE_INT ||
-            types[1].type != COL_TYPE_VARCHAR ||
-            types[2].type != COL_TYPE_VARCHAR ||
-            types[1].storage_size != USERNAME_SIZE ||
-            types[2].storage_size != EMAIL_SIZE) {
-            printf("Error: sized legacy Row schemas require username VARCHAR(32) and email VARCHAR(255).\n");
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -120,7 +123,6 @@ bool table_create_table(Table* table,
     bool recognized_all = false;
     bool has_explicit_width = false;
     if (!validate_sized_layout(num_cols,
-                               col_names,
                                col_types,
                                types,
                                &recognized_all,
@@ -131,7 +133,10 @@ bool table_create_table(Table* table,
     const bool executable_generic =
         recognized_all && ci_equal(col_names[0], "id") &&
         types[0].type == COL_TYPE_INT &&
-        !legacy_column_names(num_cols, col_names);
+        !legacy_fixed_row_shape(num_cols,
+                                col_names,
+                                types,
+                                recognized_all);
     uint32_t validated_row_size = 0u;
     if (executable_generic) {
         for (uint32_t i = 0; i < num_cols; i++) {
