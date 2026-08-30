@@ -1,5 +1,6 @@
 #include "column_type.h"
 #include "engine.h"
+#include "generic_index_epoch.h"
 #include "multitable.h"
 #include "record.h"
 #include "record_payload.h"
@@ -220,6 +221,23 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                 TINYDB_SQL_POLICY_ERROR,
                 "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented");
         }
+    }
+
+    /*
+     * Generic secondary-index range snapshots are keyed by a durable mutation
+     * epoch. Schema evolution is a logical mutation even when existing compact
+     * V2 rows do not need to be rewritten: a later rebuild must decode those
+     * historical row generations through the new schema and materialize the
+     * appended defaults. Invalidate any snapshot for this table before the
+     * catalog mutation so no pre-ALTER sidecar can remain current under the new
+     * schema. A harmless extra invalidation is preferable to accepting stale
+     * candidates; failed DDL may therefore force a later rebuild without
+     * changing query results.
+     */
+    if (!tinydb_generic_index_epoch_before_mutation(table, target)) {
+        return fail_result(result,
+                           TINYDB_SQL_EXECUTE_ERROR,
+                           "ALTER TABLE ADD COLUMN could not invalidate generic index snapshots");
     }
 
     if (!table_add_column(table,
