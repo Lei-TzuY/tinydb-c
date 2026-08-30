@@ -113,6 +113,20 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("whole-database diagnostics did not fail non-fatally under full pin pressure");
     }
+
+    if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("unable to free one frame for diagnostic progress");
+    }
+    if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
+        !tinydb_check_table_tree(table, "users", message, sizeof(message)) ||
+        !tinydb_check_database(table, &stats, message, sizeof(message))) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("diagnostics require more than one free frame");
+    }
+
     if (!release_handles(owners, owner_count)) {
         tinydb_close(database);
         return fail("unable to release diagnostic pin-pressure owners");
@@ -182,6 +196,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes\n");
     return 0;
 }
