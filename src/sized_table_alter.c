@@ -66,10 +66,10 @@ static bool empty_root_can_become_v2(Table* table,
     }
 
     TinyDBLeafPageFormat format =
-        tinydb_leaf_format_detect_page(root, PAGE_USABLE_SIZE);
+        tinydb_leaf_format_detect_page(root, PAGE_SIZE);
     if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
-        return tinydb_slotted_leaf_v2_validate(root, PAGE_USABLE_SIZE) &&
-               tinydb_slotted_leaf_v2_count(root, PAGE_USABLE_SIZE) == 0u;
+        return tinydb_slotted_leaf_v2_validate(root, PAGE_SIZE) &&
+               tinydb_slotted_leaf_v2_count(root, PAGE_SIZE) == 0u;
     }
     if (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) return false;
 
@@ -83,7 +83,7 @@ static bool initialize_empty_v2_root(Table* table,
     if (!empty_root_can_become_v2(table, schema)) return false;
 
     void* root = get_page(table->pager, schema->root_page_num);
-    if (tinydb_leaf_format_detect_page(root, PAGE_USABLE_SIZE) ==
+    if (tinydb_leaf_format_detect_page(root, PAGE_SIZE) ==
         TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
         return true;
     }
