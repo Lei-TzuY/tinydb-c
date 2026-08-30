@@ -65,9 +65,11 @@ def main():
             "diagnostic_pin_pressure=yes",
             "direct_ownership_busy=yes",
             "tree_stats_busy=yes",
+            "catalog_stats_busy=yes",
             "table_check_busy=yes",
             "one_free_frame_success=yes",
             "tree_stats_one_free_frame_success=yes",
+            "catalog_stats_one_free_frame_success=yes",
             "page_inspect_busy=yes",
             "tree_inspect_busy=yes",
             "inspection_one_free_frame_success=yes",
@@ -109,10 +111,11 @@ def main():
         assert "page ownership:" in output, output
 
         print(
-            "PASS: page ownership catches orphan/shared pages; tree stats, public diagnostics, "
-            ".page/.btree inspection, PRAGMA integrity_check, and PRAGMA user_version "
-            "return non-fatal backpressure when fully pinned, and all read-only "
-            "inspection paths make progress with exactly one free frame"
+            "PASS: page ownership catches orphan/shared pages; per-table and fail-closed "
+            "catalog tree stats, public diagnostics, .page/.btree inspection, "
+            "PRAGMA integrity_check, and PRAGMA user_version return non-fatal "
+            "backpressure when fully pinned, and all read-only inspection paths "
+            "make progress with exactly one free frame"
         )
     finally:
         cleanup(probe_db)
