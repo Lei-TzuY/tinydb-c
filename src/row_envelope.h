@@ -267,6 +267,33 @@ static inline bool tinydb_row_envelope_decode_v1(
     return true;
 }
 
+static inline bool tinydb_row_envelope_prefix_schema(
+    const TableSchema* schema,
+    uint32_t field_count,
+    uint32_t logical_length,
+    TableSchema* prefix) {
+    if (schema == NULL || prefix == NULL || field_count == 0u ||
+        field_count > schema->num_columns) {
+        return false;
+    }
+
+    uint32_t expected_length = 0u;
+    for (uint32_t i = 0u; i < field_count; i++) {
+        const TableColumn* column = &schema->columns[i];
+        if (column->offset != expected_length || column->size == 0u ||
+            expected_length > UINT32_MAX - column->size) {
+            return false;
+        }
+        expected_length += column->size;
+    }
+    if (expected_length != logical_length) return false;
+
+    *prefix = *schema;
+    prefix->num_columns = field_count;
+    prefix->row_size = logical_length;
+    return true;
+}
+
 static inline bool tinydb_row_envelope_decode_compact_v2(
     const TableSchema* schema,
     const unsigned char* bytes,
@@ -276,29 +303,40 @@ static inline bool tinydb_row_envelope_decode_compact_v2(
         tinydb_row_envelope_read_u16_le(
             bytes + TINYDB_ROW_ENVELOPE_HEADER_SIZE_OFFSET) !=
             TINYDB_ROW_ENVELOPE_V2_HEADER_SIZE ||
-        tinydb_row_envelope_read_u32_le(
-            bytes + TINYDB_ROW_ENVELOPE_LOGICAL_LENGTH_OFFSET) !=
-            schema->row_size ||
-        tinydb_row_envelope_read_u64_le(
-            bytes + TINYDB_ROW_ENVELOPE_SCHEMA_FINGERPRINT_OFFSET) !=
-            tinydb_row_envelope_schema_fingerprint(schema) ||
-        tinydb_row_envelope_read_u16_le(
-            bytes + TINYDB_ROW_ENVELOPE_V2_FIELD_COUNT_OFFSET) !=
-            schema->num_columns ||
         tinydb_row_envelope_read_u16_le(
             bytes + TINYDB_ROW_ENVELOPE_V2_DIRECTORY_ENTRY_SIZE_OFFSET) !=
             TINYDB_ROW_ENVELOPE_V2_DIRECTORY_ENTRY_SIZE) {
         return false;
     }
 
+    uint32_t logical_length = tinydb_row_envelope_read_u32_le(
+        bytes + TINYDB_ROW_ENVELOPE_LOGICAL_LENGTH_OFFSET);
+    uint32_t field_count = tinydb_row_envelope_read_u16_le(
+        bytes + TINYDB_ROW_ENVELOPE_V2_FIELD_COUNT_OFFSET);
+    if (field_count == 0u || field_count > schema->num_columns ||
+        logical_length == 0u || logical_length > schema->row_size) {
+        return false;
+    }
+
+    TableSchema stored_schema;
+    if (!tinydb_row_envelope_prefix_schema(schema,
+                                           field_count,
+                                           logical_length,
+                                           &stored_schema) ||
+        tinydb_row_envelope_read_u64_le(
+            bytes + TINYDB_ROW_ENVELOPE_SCHEMA_FINGERPRINT_OFFSET) !=
+            tinydb_row_envelope_schema_fingerprint(&stored_schema)) {
+        return false;
+    }
+
     uint32_t directory_size =
-        schema->num_columns * TINYDB_ROW_ENVELOPE_V2_DIRECTORY_ENTRY_SIZE;
+        field_count * TINYDB_ROW_ENVELOPE_V2_DIRECTORY_ENTRY_SIZE;
     uint32_t expected_offset = TINYDB_ROW_ENVELOPE_V2_HEADER_SIZE + directory_size;
     if (expected_offset > stored_length) return false;
 
     memset(payload, 0, sizeof(*payload));
     payload->length = schema->row_size;
-    for (uint32_t i = 0u; i < schema->num_columns; i++) {
+    for (uint32_t i = 0u; i < field_count; i++) {
         const TableColumn* column = &schema->columns[i];
         const unsigned char* entry = bytes + TINYDB_ROW_ENVELOPE_V2_HEADER_SIZE +
                                      i * TINYDB_ROW_ENVELOPE_V2_DIRECTORY_ENTRY_SIZE;
