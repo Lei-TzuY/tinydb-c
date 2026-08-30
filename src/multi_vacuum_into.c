@@ -1,5 +1,8 @@
 #include "engine.h"
+#include "leaf_format.h"
 #include "multitable.h"
+#include "record_payload.h"
+#include "slotted_leaf_v2.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -166,6 +169,44 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
+static bool prepare_payload_destination_root(Table* destination,
+                                             const TableSchema* schema) {
+    if (destination == NULL || destination->pager == NULL || schema == NULL) {
+        return false;
+    }
+    if (schema->row_size <= ROW_SIZE) return true;
+    if (schema->root_page_num >= destination->pager->num_pages) return false;
+
+    void* root = get_page(destination->pager, schema->root_page_num);
+    if (get_node_type(root) != NODE_LEAF || !is_node_root(root) ||
+        *node_parent(root) != 0u) {
+        return false;
+    }
+
+    TinyDBLeafPageFormat format =
+        tinydb_leaf_format_detect_page(root, PAGE_SIZE);
+    if (format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return tinydb_slotted_leaf_v2_validate(root, PAGE_SIZE) &&
+               tinydb_slotted_leaf_v2_count(root, PAGE_SIZE) == 0u;
+    }
+    if (format != TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 ||
+        *leaf_node_num_cells(root) != 0u ||
+        *leaf_node_next_leaf(root) != 0u ||
+        *leaf_node_prev_leaf(root) != 0u) {
+        return false;
+    }
+
+    unsigned char staged[PAGE_SIZE];
+    memset(staged, 0, sizeof(staged));
+    if (!tinydb_slotted_leaf_v2_init(staged, sizeof(staged))) return false;
+    set_node_root(staged, true);
+    *node_parent(staged) = 0u;
+
+    memcpy(root, staged, PAGE_USABLE_SIZE);
+    mark_page_dirty(destination->pager, schema->root_page_num);
+    return true;
+}
+
 static bool create_destination_schema(Table* destination,
                                       const TableSchema* source_schema,
                                       TableSchema** created_schema) {
@@ -224,6 +265,7 @@ static bool create_destination_schema(Table* destination,
     uint32_t root_page_num = schema->root_page_num;
     *schema = *source_schema;
     schema->root_page_num = root_page_num;
+    if (!prepare_payload_destination_root(destination, schema)) return false;
     *created_schema = schema;
     return true;
 }
@@ -258,10 +300,63 @@ static bool insert_raw_record(Table* destination,
     return true;
 }
 
+typedef struct {
+    Table* destination;
+    const TableSchema* destination_schema;
+    bool ok;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+} PayloadCopyContext;
+
+static bool copy_payload_row(const TableSchema* source_schema,
+                             const TinyDBRecordPayload* payload,
+                             void* context) {
+    (void)source_schema;
+    PayloadCopyContext* copy = (PayloadCopyContext*)context;
+    if (copy == NULL || !copy->ok) return false;
+    if (!tinydb_record_payload_insert(copy->destination,
+                                      copy->destination_schema,
+                                      payload,
+                                      copy->message,
+                                      sizeof(copy->message))) {
+        copy->ok = false;
+        return false;
+    }
+    return true;
+}
+
+static bool copy_schema_payload_rows(Table* source,
+                                     const TableSchema* source_schema,
+                                     Table* destination,
+                                     const TableSchema* destination_schema) {
+    PayloadCopyContext copy;
+    memset(&copy, 0, sizeof(copy));
+    copy.destination = destination;
+    copy.destination_schema = destination_schema;
+    copy.ok = true;
+
+    bool scan_complete = false;
+    char scan_message[TINYDB_RECORD_MESSAGE_MAX];
+    (void)tinydb_record_payload_scan(source,
+                                     source_schema,
+                                     copy_payload_row,
+                                     &copy,
+                                     &scan_complete,
+                                     scan_message,
+                                     sizeof(scan_message));
+    return copy.ok && scan_complete;
+}
+
 static bool copy_schema_rows(Table* source,
                              const TableSchema* source_schema,
                              Table* destination,
                              const TableSchema* destination_schema) {
+    if (source_schema->row_size > ROW_SIZE) {
+        return copy_schema_payload_rows(source,
+                                        source_schema,
+                                        destination,
+                                        destination_schema);
+    }
+
     uint32_t source_previous_root = source->root_page_num;
     source->root_page_num = source_schema->root_page_num;
 
