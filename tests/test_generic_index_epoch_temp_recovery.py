@@ -25,7 +25,10 @@ def cleanup(db_path):
             pass
 
 
-def run_session(executable, db_path, commands):
+def run_session(executable, db_path, commands, extra_env=None):
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         [executable, db_path],
         input="\n".join(commands) + "\n",
@@ -34,6 +37,7 @@ def run_session(executable, db_path, commands):
         encoding="utf-8",
         errors="ignore",
         timeout=120,
+        env=env,
     )
     output = result.stdout + result.stderr
     if result.returncode != 0:
@@ -129,6 +133,57 @@ def main():
                 "valid snapshots must survive cleanup of a non-authoritative epoch temp"
             )
 
+        before_interrupted_mutation = read_bytes(epoch_path)
+        interrupted = run_session(
+            executable,
+            db_path,
+            [
+                "UPDATE wide_docs SET right_text = 'interrupted' WHERE id = 20;",
+                ".exit",
+            ],
+            {
+                "TINYDB_TEST_FAIL_GENERIC_INDEX_EPOCH_BEFORE_REPLACE": "1",
+            },
+        )
+        interrupted_temp = epoch_path + ".tmp"
+        if not os.path.exists(interrupted_temp):
+            raise AssertionError(
+                "failpoint must leave the fully synced pre-publication epoch temp behind"
+            )
+        if read_bytes(epoch_path) != before_interrupted_mutation:
+            raise AssertionError(
+                "interruption before atomic replacement must preserve the old epoch authority"
+            )
+        if "Executed." in interrupted:
+            raise AssertionError(
+                "indexed mutation must not report success when epoch publication is interrupted"
+            )
+
+        recovered = run_session(
+            executable,
+            db_path,
+            [
+                "SELECT id FROM wide_docs WHERE right_text = 'right-b';",
+                "SELECT id FROM wide_docs WHERE right_text = 'interrupted';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+        )
+        recovered_ids = projected_ids(recovered)
+        if recovered_ids != [20]:
+            raise AssertionError(
+                "failed epoch publication must leave the indexed row unchanged\n" + recovered
+            )
+        require(recovered, "ok")
+        if os.path.exists(interrupted_temp):
+            raise AssertionError(
+                "next read barrier must discard the interrupted durable epoch temp"
+            )
+        if read_bytes(epoch_path) != before_interrupted_mutation:
+            raise AssertionError(
+                "recovering a pre-replace interruption must retain the old epoch authority"
+            )
+
         orphan = write_orphan_temp(epoch_path)
         before_mutation = read_bytes(epoch_path)
         third = run_session(
@@ -165,9 +220,9 @@ def main():
         require(fourth, "ok")
 
         print(
-            "PASS: orphan generic-index epoch temp files are discarded before read reuse "
-            "and mutation barriers without replacing valid authority; indexed rows remain "
-            "correct across reopen."
+            "PASS: generic-index epoch publication fails closed before atomic replace; "
+            "orphan epoch temps are recovered without replacing valid authority, and "
+            "indexed rows remain correct across reopen."
         )
     finally:
         cleanup(db_path)
