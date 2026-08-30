@@ -85,7 +85,13 @@ def main():
                 "CREATE TABLE wide_docs (id INT, left_text VARCHAR(145), right_text VARCHAR(145));",
                 "INSERT INTO wide_docs VALUES (7, 'left', 'right');",
                 "ALTER TABLE wide_docs ADD COLUMN tag VARCHAR(5);",
+                "SELECT * FROM wide_docs WHERE id = 7;",
+                "INSERT INTO wide_docs VALUES (8, 'left-2', 'right-2', 'tag8');",
+                "ALTER TABLE wide_docs ADD COLUMN note VARCHAR(6);",
                 "PRAGMA table_info(wide_docs);",
+                "SELECT * FROM wide_docs WHERE id = 7;",
+                "SELECT * FROM wide_docs WHERE id = 8;",
+                "UPDATE wide_docs SET note = 'legacy' WHERE id = 7;",
                 "SELECT * FROM wide_docs WHERE id = 7;",
                 "CREATE TABLE empty_wide (id INT, left_text VARCHAR(145), right_text VARCHAR(145));",
                 "ALTER TABLE empty_wide ADD COLUMN tag VARCHAR(5);",
@@ -116,10 +122,14 @@ def main():
             "Column 'overflow' added to table 'empty_crossing'.",
             "overflow | VARCHAR(1)",
             "(3, cross, edge, x)",
-            "ALTER TABLE ADD COLUMN is disabled for non-empty schema-sized payload tables until physical row migration is implemented",
-            "(7, left, right)",
-            "Column 'tag' added to table 'empty_wide'.",
+            "Column 'tag' added to table 'wide_docs'.",
+            "Column 'note' added to table 'wide_docs'.",
             "tag | VARCHAR(5)",
+            "note | VARCHAR(6)",
+            "(7, left, right, , )",
+            "(8, left-2, right-2, tag8, )",
+            "(7, left, right, , legacy)",
+            "Column 'tag' added to table 'empty_wide'.",
             "(9, empty-left, empty-right, tag5)",
             "ALTER TABLE ADD COLUMN is disabled for executable fixed-Row table roots until physical row migration is implemented",
             "Syntax error. Could not parse statement.",
@@ -147,13 +157,14 @@ def main():
                 "SELECT * FROM near_limit WHERE id = 5;",
                 "SELECT * FROM empty_crossing WHERE id = 3;",
                 "SELECT * FROM wide_docs WHERE id = 7;",
+                "SELECT * FROM wide_docs WHERE id = 8;",
                 "SELECT * FROM empty_wide WHERE id = 9;",
                 "INSERT INTO contacts VALUES (3, 'gamma', 300, 'g', 'persist');",
                 "SELECT note FROM contacts WHERE id = 3;",
                 "INSERT INTO empty_crossing VALUES (4, 'cross-2', 'edge-2', 'y');",
                 "SELECT * FROM empty_crossing WHERE id = 4;",
-                "INSERT INTO wide_docs VALUES (8, 'left-2', 'right-2');",
-                "SELECT * FROM wide_docs WHERE id = 8;",
+                "INSERT INTO wide_docs VALUES (9, 'left-3', 'right-3', 'tag9', 'fresh');",
+                "SELECT * FROM wide_docs WHERE id = 9;",
                 "INSERT INTO empty_wide VALUES (10, 'left-10', 'right-10', 'again');",
                 "SELECT * FROM empty_wide WHERE id = 10;",
                 "PRAGMA integrity_check;",
@@ -170,17 +181,19 @@ def main():
             "left_text | VARCHAR(145)",
             "right_text | VARCHAR(145)",
             "tag | VARCHAR(5)",
+            "note | VARCHAR(6)",
             "(1, alpha, 100, ally, )",
             "(2, beta, 200, bee, memo)",
             "(1, seed, )",
             "(2, short, edge)",
             "(5, still, fixed)",
             "(3, cross, edge, x)",
-            "(7, left, right)",
+            "(7, left, right, , legacy)",
+            "(8, left-2, right-2, tag8, )",
             "(9, empty-left, empty-right, tag5)",
             "db > persist\nExecuted.",
             "(4, cross-2, edge-2, y)",
-            "(8, left-2, right-2)",
+            "(9, left-3, right-3, tag9, fresh)",
             "(10, left-10, right-10, again)",
             "ok",
         ]:
@@ -190,8 +203,8 @@ def main():
             "PASS: compact VARCHAR(n) ADD COLUMN persists n+1-byte layouts, "
             "supports prepared routing, honors the exact 293-byte boundary, "
             "allows provably empty tables to cross safely into payload-sized storage, "
-            "allows provably empty schema-sized payload tables to extend safely, "
-            "keeps non-empty rows fail-closed until row migration, "
+            "supports append-only schema generations on populated compact V2 rows, "
+            "materializes trailing defaults without weakening fingerprint checks, "
             "and preserves fixed-Row/transaction safety guards."
         )
     finally:
