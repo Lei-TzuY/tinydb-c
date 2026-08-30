@@ -36,8 +36,8 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
-static bool wide_schema_table_is_empty(Table* table,
-                                       const TableSchema* schema) {
+static bool schema_table_is_empty(Table* table,
+                                  const TableSchema* schema) {
     char message[TINYDB_RECORD_MESSAGE_MAX];
     bool scan_complete = false;
     uint32_t row_count = tinydb_record_payload_scan(table,
@@ -82,12 +82,13 @@ bool table_add_column(Table* table,
     bool executable_generic = tinydb_schema_supports_records(
         schema, schema_message, sizeof(schema_message));
     if (executable_generic && old_row_size <= ROW_SIZE &&
-        type.storage_size > ROW_SIZE - old_row_size) {
+        type.storage_size > ROW_SIZE - old_row_size &&
+        !schema_table_is_empty(table, schema)) {
         printf("Error: ALTER TABLE ADD COLUMN would exceed the fixed generic record slot.\n");
         return false;
     }
     if (old_row_size > ROW_SIZE &&
-        !wide_schema_table_is_empty(table, schema)) {
+        !schema_table_is_empty(table, schema)) {
         printf("Error: ALTER TABLE ADD COLUMN requires physical row migration for a non-empty schema-sized payload table.\n");
         return false;
     }
@@ -95,8 +96,9 @@ bool table_add_column(Table* table,
     /* The legacy catalog mutator owns duplicate/max-column/users checks. It
      * temporarily treats this as a generic VARCHAR; after success restore the
      * canonical compact n+1 byte physical layout from the shared type parser.
-     * Wide schemas reach this point only when a payload scan proved that no
-     * physical row image needs migration. */
+     * Schema growth that crosses from the fixed carrier into payload-sized
+     * storage reaches this point only when a corruption-aware scan proved the
+     * table empty, so no physical row image needs migration. */
     if (!table_add_column_legacy_base(table,
                                       table_name,
                                       col_name,
