@@ -90,8 +90,15 @@ static void print_schema(Table* table, const TableSchema* schema) {
 static bool get_table_stats(Table* table,
                             const char* table_name,
                             TinyDBTreeStats* stats) {
-    if (!tinydb_get_tree_stats(table, table_name, stats)) {
-        printf("Error: Unable to inspect table '%s'.\n", table_name);
+    char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+    if (!tinydb_get_tree_stats_diagnostic(table,
+                                          table_name,
+                                          stats,
+                                          message,
+                                          sizeof(message))) {
+        printf("Error: Unable to inspect table '%s': %s.\n",
+               table_name,
+               message[0] != '\0' ? message : "tree statistics unavailable");
         return false;
     }
     return true;
@@ -115,7 +122,7 @@ static void print_global_stats(Table* table) {
 
     for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
         TinyDBTreeStats stats;
-        if (tinydb_get_tree_stats(table, table->catalog.schemas[i].name, &stats)) {
+        if (get_table_stats(table, table->catalog.schemas[i].name, &stats)) {
             total_rows += stats.total_rows;
             leaf_pages += stats.leaf_pages;
             internal_pages += stats.internal_pages;
