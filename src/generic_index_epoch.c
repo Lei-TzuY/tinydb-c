@@ -118,6 +118,20 @@ static bool epoch_filename(const Table* table, char* output, size_t output_size)
     return written >= 0 && (size_t)written < output_size;
 }
 
+static bool remove_file_durably_if_present(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') return false;
+
+    errno = 0;
+    if (remove(filename) != 0) {
+        return errno == ENOENT;
+    }
+
+#ifndef _WIN32
+    if (!sync_parent_directory(filename)) return false;
+#endif
+    return true;
+}
+
 static bool remove_snapshot_durably(const char* filename) {
     if (filename == NULL || filename[0] == '\0') return false;
 
@@ -212,6 +226,23 @@ static bool write_epoch_file(const char* filename, uint64_t epoch) {
     return true;
 }
 
+static bool cleanup_interrupted_epoch_publication(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') return false;
+
+    char temporary[640];
+    int written = snprintf(temporary, sizeof(temporary), "%s.tmp", filename);
+    if (written < 0 || (size_t)written >= sizeof(temporary)) return false;
+
+    /*
+     * The temporary epoch is never authoritative. A crash before atomic
+     * replacement means mutation could not have proceeded past the epoch
+     * barrier; a crash after replacement leaves the final file authoritative.
+     * Either way, an orphan temporary file is recovery garbage and must not be
+     * carried indefinitely or mistaken for a second source of truth.
+     */
+    return remove_file_durably_if_present(temporary);
+}
+
 static bool read_epoch_file(const char* filename, uint64_t* epoch) {
     FILE* file = fopen(filename, "rb");
     if (file == NULL) return false;
@@ -269,6 +300,7 @@ bool tinydb_generic_index_epoch_current(Table* table, uint64_t* epoch) {
 
     char filename[600];
     if (!epoch_filename(table, filename, sizeof(filename))) return false;
+    if (!cleanup_interrupted_epoch_publication(filename)) return false;
 
     uint64_t value = 0;
     if (read_epoch_file(filename, &value)) {
@@ -298,6 +330,7 @@ bool tinydb_generic_index_epoch_before_mutation(Table* table,
 
     char filename[600];
     if (!epoch_filename(table, filename, sizeof(filename))) return false;
+    if (!cleanup_interrupted_epoch_publication(filename)) return false;
 
     uint64_t epoch = 0;
     if (!read_epoch_file(filename, &epoch)) {
