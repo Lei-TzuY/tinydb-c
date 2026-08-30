@@ -90,9 +90,14 @@ def main():
         assert "Keys: 1, 2, 3" in page_output, page_output
         assert "invalid leaf" not in page_output.lower(), page_output
 
+        # Compact V2 stores short VARCHAR values densely, so a fixed row-count
+        # assumption is not a stable way to exercise diagnostics after a split.
+        # Grow well beyond the observed one-leaf capacity and then assert the
+        # topology itself rather than relying on a historical 40-row threshold.
+        target_rows = 100
         grow_commands = [
             f"INSERT INTO wide_diag VALUES ({row_id}, 'left-{row_id}', 'right-{row_id}');"
-            for row_id in range(4, 41)
+            for row_id in range(4, target_rows + 1)
         ]
         grow_commands.extend([
             ".btree wide_diag",
@@ -105,15 +110,15 @@ def main():
 
         assert "- internal (size " in split_output, split_output
         assert split_output.count("- leaf (size ") >= 2, split_output
-        assert "Rows: 40" in split_output, split_output
+        assert f"Rows: {target_rows}" in split_output, split_output
         leaf_match = re.search(r"Leaf Pages: (\d+)", split_output)
         internal_match = re.search(r"Internal Pages: (\d+)", split_output)
         assert leaf_match is not None and int(leaf_match.group(1)) >= 2, split_output
         assert internal_match is not None and int(internal_match.group(1)) >= 1, split_output
         assert "wide_diag: ok: root=" in split_output, split_output
-        assert "rows=40" in split_output, split_output
+        assert f"rows={target_rows}" in split_output, split_output
         assert "- 1" in split_output, split_output
-        assert "- 40" in split_output, split_output
+        assert f"- {target_rows}" in split_output, split_output
         assert "invalid leaf" not in split_output.lower(), split_output
         assert "buffer pool busy" not in split_output.lower(), split_output
         assert "\nok\n" in split_output or "db > ok\n" in split_output, split_output
@@ -128,9 +133,9 @@ def main():
                 ".exit",
             ],
         )
-        assert "Rows: 40" in reopen_output, reopen_output
+        assert f"Rows: {target_rows}" in reopen_output, reopen_output
         assert "wide_diag: ok: root=" in reopen_output, reopen_output
-        assert "rows=40" in reopen_output, reopen_output
+        assert f"rows={target_rows}" in reopen_output, reopen_output
         assert reopen_output.count("- leaf (size ") >= 2, reopen_output
 
         print("PASS: V2 slotted leaf inspection, stats, and table checks survive splits and reopen")
