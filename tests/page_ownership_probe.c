@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
     TinyDBPageOwnershipStats stats;
     TinyDBTreeStats tree_stats;
     TinyDBDatabaseTreeStats database_tree_stats;
+    TinyDBCatalogTreeStatsSnapshot catalog_stats_snapshot;
     TinyDBCatalogTreeCheck catalog_check;
     char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
     if (!tinydb_check_page_ownership(table, &stats, message, sizeof(message)) ||
@@ -127,6 +128,23 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("tree stats did not preserve full-pool backpressure detail");
+    }
+    memset(&catalog_stats_snapshot, 0xA5, sizeof(catalog_stats_snapshot));
+    if (tinydb_get_catalog_tree_stats_snapshot(table,
+                                               &catalog_stats_snapshot,
+                                               message,
+                                               sizeof(message)) ||
+        strstr(message, "buffer pool busy") == NULL ||
+        catalog_stats_snapshot.aggregate.table_count != 0u ||
+        catalog_stats_snapshot.aggregate.total_rows != 0u ||
+        catalog_stats_snapshot.aggregate.leaf_pages != 0u ||
+        catalog_stats_snapshot.aggregate.internal_pages != 0u ||
+        catalog_stats_snapshot.aggregate.max_height != 0u ||
+        catalog_stats_snapshot.table_stats[0].total_rows != 0u ||
+        catalog_stats_snapshot.table_stats[1].total_rows != 0u) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("catalog stats snapshot published partial results under full pin pressure");
     }
     memset(&database_tree_stats, 0xA5, sizeof(database_tree_stats));
     if (tinydb_get_database_tree_stats(table,
@@ -214,6 +232,10 @@ int main(int argc, char** argv) {
                                           &tree_stats,
                                           message,
                                           sizeof(message)) ||
+        !tinydb_get_catalog_tree_stats_snapshot(table,
+                                                &catalog_stats_snapshot,
+                                                message,
+                                                sizeof(message)) ||
         !tinydb_get_database_tree_stats(table,
                                         &database_tree_stats,
                                         message,
@@ -232,6 +254,16 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("tree stats changed while retrying after backpressure");
+    }
+    if (catalog_stats_snapshot.aggregate.table_count != 2u ||
+        catalog_stats_snapshot.aggregate.total_rows != 261u ||
+        catalog_stats_snapshot.aggregate.leaf_pages == 0u ||
+        catalog_stats_snapshot.aggregate.max_height == 0u ||
+        catalog_stats_snapshot.table_stats[0].total_rows != 1u ||
+        catalog_stats_snapshot.table_stats[1].total_rows != 260u) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("catalog stats snapshot did not recover complete results with one free frame");
     }
     if (database_tree_stats.table_count != 2u ||
         database_tree_stats.total_rows != 261u ||
@@ -346,6 +378,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes catalog_stats_busy=yes catalog_check_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes catalog_stats_one_free_frame_success=yes catalog_check_one_free_frame_success=yes catalog_pragmas_full_pool_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes catalog_snapshot_busy=yes catalog_stats_busy=yes catalog_check_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes catalog_snapshot_one_free_frame_success=yes catalog_stats_one_free_frame_success=yes catalog_check_one_free_frame_success=yes catalog_pragmas_full_pool_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
     return 0;
 }
