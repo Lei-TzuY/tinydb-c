@@ -91,10 +91,10 @@ static bool v1_keys_strictly_increasing(const void* source) {
     return true;
 }
 
-static bool v1_payload_key_matches(const TableSchema* schema,
-                                   const void* source,
-                                   uint32_t index) {
-    if (schema == NULL || source == NULL || schema->num_columns == 0u ||
+static bool fixed_payload_key_matches(const TableSchema* schema,
+                                      uint32_t cell_key,
+                                      const unsigned char* payload) {
+    if (schema == NULL || payload == NULL || schema->num_columns == 0u ||
         schema->columns[0].type != COL_TYPE_INT ||
         schema->columns[0].offset > schema->row_size ||
         schema->columns[0].size != sizeof(uint32_t) ||
@@ -104,17 +104,15 @@ static bool v1_payload_key_matches(const TableSchema* schema,
 
     uint32_t payload_key = 0u;
     memcpy(&payload_key,
-           v1_value(source, index) + schema->columns[0].offset,
+           payload + schema->columns[0].offset,
            sizeof(payload_key));
-    return payload_key == v1_key(source, index);
+    return payload_key == cell_key;
 }
 
-static bool v1_payload_is_canonical_for_schema(const TableSchema* schema,
-                                                const void* source,
-                                                uint32_t index) {
-    if (schema == NULL || source == NULL) return false;
+static bool fixed_payload_is_canonical_for_schema(const TableSchema* schema,
+                                                   const unsigned char* payload) {
+    if (schema == NULL || payload == NULL) return false;
 
-    const unsigned char* payload = v1_value(source, index);
     for (uint32_t i = 0u; i < schema->num_columns; i++) {
         const TableColumn* column = &schema->columns[i];
         if (column->offset > schema->row_size || column->size == 0u ||
@@ -173,6 +171,49 @@ static bool compact_envelope_roundtrips(const TableSchema* schema,
     }
     return canonical_length == envelope_length &&
            memcmp(canonical, envelope, envelope_length) == 0;
+}
+
+bool tinydb_fixed_v1_row_encode_compact_v2(const TableSchema* schema,
+                                            uint32_t cell_key,
+                                            const void* fixed_payload,
+                                            size_t fixed_payload_capacity,
+                                            void* destination,
+                                            size_t destination_capacity,
+                                            uint32_t* destination_length) {
+    char schema_message[TINYDB_RECORD_MESSAGE_MAX];
+    const unsigned char* payload = (const unsigned char*)fixed_payload;
+    if (schema == NULL || payload == NULL || destination == NULL ||
+        destination_length == NULL || fixed_payload_capacity < ROW_SIZE ||
+        schema->row_size == 0u || schema->row_size > ROW_SIZE ||
+        !tinydb_record_payload_schema_supported(schema,
+                                                schema_message,
+                                                sizeof(schema_message)) ||
+        !fixed_payload_key_matches(schema, cell_key, payload) ||
+        !fixed_payload_is_canonical_for_schema(schema, payload)) {
+        return false;
+    }
+
+    TinyDBRecordPayload record_payload;
+    memset(&record_payload, 0, sizeof(record_payload));
+    record_payload.length = schema->row_size;
+    memcpy(record_payload.bytes, payload, record_payload.length);
+
+    unsigned char scratch[PAGE_SIZE];
+    uint32_t scratch_length = 0u;
+    if (!tinydb_row_envelope_encode_compact_v2(schema,
+                                                &record_payload,
+                                                scratch,
+                                                sizeof(scratch),
+                                                &scratch_length) ||
+        scratch_length == 0u || scratch_length > UINT16_MAX ||
+        scratch_length > destination_capacity ||
+        !compact_envelope_roundtrips(schema, scratch, scratch_length)) {
+        return false;
+    }
+
+    memcpy(destination, scratch, scratch_length);
+    *destination_length = scratch_length;
+    return true;
 }
 
 static void copy_v1_identity_to_v2(const void* source, void* destination) {
@@ -294,25 +335,15 @@ bool tinydb_leaf_migrate_v1_to_compact_v2(const void* source,
 
     uint32_t count = v1_count(source);
     for (uint32_t i = 0u; i < count; i++) {
-        if (!v1_payload_key_matches(schema, source, i) ||
-            !v1_payload_is_canonical_for_schema(schema, source, i)) {
-            return false;
-        }
-
-        TinyDBRecordPayload payload;
-        memset(&payload, 0, sizeof(payload));
-        payload.length = schema->row_size;
-        memcpy(payload.bytes, v1_value(source, i), payload.length);
-
         unsigned char envelope[PAGE_SIZE];
         uint32_t envelope_length = 0u;
-        if (!tinydb_row_envelope_encode_compact_v2(schema,
-                                                    &payload,
+        if (!tinydb_fixed_v1_row_encode_compact_v2(schema,
+                                                    v1_key(source, i),
+                                                    v1_value(source, i),
+                                                    ROW_SIZE,
                                                     envelope,
                                                     sizeof(envelope),
                                                     &envelope_length) ||
-            envelope_length == 0u || envelope_length > UINT16_MAX ||
-            !compact_envelope_roundtrips(schema, envelope, envelope_length) ||
             !tinydb_slotted_leaf_v2_insert(scratch,
                                            sizeof(scratch),
                                            v1_key(source, i),
