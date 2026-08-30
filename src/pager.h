@@ -387,24 +387,35 @@ static inline bool pager_rollback_to_savepoint_pin_guard(Pager* pager,
 }
 
 /*
- * Pager destruction permanently invalidates every frame/lock, so it must not
- * cross live explicit ownership. Once admitted, close raises the same barrier
- * used by savepoint rollback; new explicit pins then fail before get_page().
+ * Non-blocking Pager destruction. Returning false means the Pager is still
+ * alive because explicit pin ownership or pin admission is active. Returning
+ * true means destruction completed and the pointer must not be used again.
+ * NULL is treated as an already-closed Pager and succeeds.
  */
-static inline void pager_close_pin_guard(Pager* pager) {
-    if (pager == NULL) return;
+static inline bool pager_try_close(Pager* pager) {
+    if (pager == NULL) return true;
 
     db_rwlock_wrlock(&pager->pager_lock);
     if (pager_pin_transition_busy_locked(pager) ||
         pager_any_frame_pinned_locked(pager)) {
         db_rwlock_wrunlock(&pager->pager_lock);
-        fprintf(stderr, "Refusing to close Pager while pin state is active.\n");
-        return;
+        return false;
     }
     pager->pin_barrier_active = true;
     db_rwlock_wrunlock(&pager->pager_lock);
 
     pager_close(pager);
+    return true;
+}
+
+/*
+ * Source-compatible void close: preserve the historical call surface while
+ * using pager_try_close() for the actual ownership decision.
+ */
+static inline void pager_close_pin_guard(Pager* pager) {
+    if (!pager_try_close(pager)) {
+        fprintf(stderr, "Refusing to close Pager while pin state is active.\n");
+    }
 }
 
 static inline bool pager_page_number_lock_pin(Pager* pager,
