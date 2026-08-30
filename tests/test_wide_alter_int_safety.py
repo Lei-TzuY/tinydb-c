@@ -46,11 +46,6 @@ def require(output, marker):
         raise AssertionError(f"missing marker {marker!r}\n{output}")
 
 
-def reject(output, marker):
-    if marker in output:
-        raise AssertionError(f"unexpected marker {marker!r}\n{output}")
-
-
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     executable = find_tinydb(repo_root)
@@ -67,6 +62,10 @@ def main():
                 "ALTER TABLE wide_nonempty ADD COLUMN score INT;",
                 "PRAGMA table_info(wide_nonempty);",
                 "SELECT * FROM wide_nonempty WHERE id = 1;",
+                "UPDATE wide_nonempty SET score = 11 WHERE id = 1;",
+                "SELECT * FROM wide_nonempty WHERE id = 1;",
+                "INSERT INTO wide_nonempty VALUES (3, 'left-c', 'right-c', 13);",
+                "SELECT * FROM wide_nonempty WHERE id = 3;",
                 "CREATE TABLE wide_empty (id INT, left_text VARCHAR(145), right_text VARCHAR(145));",
                 "ALTER TABLE wide_empty ADD COLUMN score INT;",
                 "INSERT INTO wide_empty VALUES (2, 'left-b', 'right-b', 7);",
@@ -77,22 +76,16 @@ def main():
             ],
         )
 
-        require(
-            first,
-            "ALTER TABLE ADD COLUMN is disabled for non-empty schema-sized payload tables until physical row migration is implemented",
-        )
-        require(first, "(1, left-a, right-a)")
+        require(first, "Column 'score' added to table 'wide_nonempty'.")
         require(first, "Column 'score' added to table 'wide_empty'.")
-        require(first, "score | INT")
+        require(first, "(1, left-a, right-a, 0)")
+        require(first, "(1, left-a, right-a, 11)")
+        require(first, "(3, left-c, right-c, 13)")
         require(first, "(2, left-b, right-b, 7)")
         require(first, "ok")
-
-        # The rejected ALTER must not have published a catalog-only fourth
-        # column for the non-empty table.  There should be exactly one score
-        # entry, belonging to wide_empty.
-        if first.count("score | INT") != 1:
+        if first.count("score | INT") != 2:
             raise AssertionError(
-                "rejected wide_nonempty INT ALTER changed persisted schema\n" + first
+                "both wide tables must persist the appended INT schema\n" + first
             )
 
         second = run_session(
@@ -101,8 +94,9 @@ def main():
             [
                 "PRAGMA table_info(wide_nonempty);",
                 "SELECT * FROM wide_nonempty WHERE id = 1;",
-                "INSERT INTO wide_nonempty VALUES (3, 'left-c', 'right-c');",
                 "SELECT * FROM wide_nonempty WHERE id = 3;",
+                "INSERT INTO wide_nonempty VALUES (5, 'left-e', 'right-e', 15);",
+                "SELECT * FROM wide_nonempty WHERE id = 5;",
                 "PRAGMA table_info(wide_empty);",
                 "SELECT * FROM wide_empty WHERE id = 2;",
                 "INSERT INTO wide_empty VALUES (4, 'left-d', 'right-d', 9);",
@@ -112,21 +106,21 @@ def main():
             ],
         )
 
-        require(second, "(1, left-a, right-a)")
-        require(second, "(3, left-c, right-c)")
-        require(second, "score | INT")
+        require(second, "(1, left-a, right-a, 11)")
+        require(second, "(3, left-c, right-c, 13)")
+        require(second, "(5, left-e, right-e, 15)")
         require(second, "(2, left-b, right-b, 7)")
         require(second, "(4, left-d, right-d, 9)")
         require(second, "ok")
-        if second.count("score | INT") != 1:
+        if second.count("score | INT") != 2:
             raise AssertionError(
-                "rejected non-empty ALTER leaked into catalog after reopen\n" + second
+                "appended INT schemas did not persist across reopen\n" + second
             )
 
         print(
-            "PASS: INT ADD COLUMN cannot bypass schema-sized payload migration "
-            "safety; non-empty rows remain decodable and unchanged across reopen, "
-            "while an empty wide table can grow safely."
+            "PASS: populated compact V2 rows accept append-only INT schema evolution, "
+            "old rows materialize a zero trailing default, UPDATE upgrades them to the "
+            "current schema generation, and reopen preserves both old and new rows."
         )
     finally:
         cleanup(db_path)
