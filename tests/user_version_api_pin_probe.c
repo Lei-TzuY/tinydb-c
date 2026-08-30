@@ -87,6 +87,16 @@ int main(int argc, char** argv) {
         return fail(database, "try-get did not fail closed with BUSY diagnostic");
     }
 
+    memset(message, 0, sizeof(message));
+    if (db_try_set_user_version(table, 88u, message, sizeof(message))) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-set unexpectedly succeeded with every frame pinned");
+    }
+    if (strstr(message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-set did not return BUSY diagnostic");
+    }
+
     if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
         (void)release_handles(owners, owner_count);
         return fail(database, "unable to free one frame");
@@ -100,18 +110,56 @@ int main(int argc, char** argv) {
                                  sizeof(message)) ||
         version != 77u || message[0] != '\0') {
         (void)release_handles(owners, owner_count);
-        return fail(database, "try-get did not recover with one free frame and value 77");
+        return fail(database, "BUSY try-set changed user_version before retry");
+    }
+
+    memset(message, 0, sizeof(message));
+    if (!db_try_set_user_version(table, 88u, message, sizeof(message)) ||
+        message[0] != '\0') {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-set did not recover with one free frame");
+    }
+    if (!pager_page_is_dirty(table->pager, table->root_page_num)) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-set did not mark root page dirty");
+    }
+
+    version = 0u;
+    if (!db_try_get_user_version(table,
+                                 &version,
+                                 message,
+                                 sizeof(message)) ||
+        version != 88u) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-set value 88 was not observable after mutation");
     }
 
     if (!release_handles(owners, owner_count)) {
         return fail(database, "unable to release pin-pressure owners");
     }
 
-    if (!db_try_get_user_version(table, &version, NULL, 0u) || version != 77u) {
+    if (!db_try_get_user_version(table, &version, NULL, 0u) || version != 88u) {
         return fail(database, "message-less try-get failed after pressure release");
+    }
+    if (!db_try_set_user_version(table, 99u, NULL, 0u)) {
+        return fail(database, "message-less try-set failed after pressure release");
+    }
+    if (!db_try_get_user_version(table, &version, NULL, 0u) || version != 99u) {
+        return fail(database, "message-less try-set value 99 was not observable");
+    }
+
+    pager_checkpoint(table->pager);
+    tinydb_close(database);
+    database = tinydb_open(argv[1]);
+    if (database == NULL) return fail(NULL, "unable to reopen checkpointed database");
+    table = tinydb_table(database);
+    version = 0u;
+    if (!db_try_get_user_version(table, &version, message, sizeof(message)) ||
+        version != 99u) {
+        return fail(database, "checkpointed try-set value did not survive reopen");
     }
 
     tinydb_close(database);
-    printf("USER_VERSION_API_PIN_OK busy_nonfatal=yes zero_on_failure=yes one_free_frame_success=yes value_preserved=yes optional_message=yes\n");
+    printf("USER_VERSION_API_PIN_OK busy_nonfatal=yes zero_on_failure=yes one_free_frame_success=yes value_preserved=yes optional_message=yes set_busy_nonfatal=yes set_no_mutation_on_busy=yes set_one_free_frame_success=yes set_dirty=yes set_optional_message=yes set_persisted=yes\n");
     return 0;
 }
