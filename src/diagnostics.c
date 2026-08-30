@@ -1,4 +1,5 @@
 #include "diagnostics.h"
+#include "leaf_page_access.h"
 #include "pager_try_pin.h"
 
 #include <stdarg.h>
@@ -99,10 +100,12 @@ static bool validate_leaf_neighbor(TreeWalkContext* context,
 
     void* sibling = sibling_handle.data;
     bool reciprocal_ok = get_node_type(sibling) == NODE_LEAF;
+    uint32_t reciprocal_page = 0u;
     if (reciprocal_ok) {
         reciprocal_ok = previous_neighbor
-            ? *leaf_node_next_leaf(sibling) == page_num
-            : *leaf_node_prev_leaf(sibling) == page_num;
+            ? tinydb_leaf_page_next(sibling, PAGE_SIZE, &reciprocal_page)
+            : tinydb_leaf_page_prev(sibling, PAGE_SIZE, &reciprocal_page);
+        reciprocal_ok = reciprocal_ok && reciprocal_page == page_num;
     }
 
     if (!release_tree_handle(context, &sibling_handle, sibling_page_num)) {
@@ -183,30 +186,45 @@ static bool walk_tree(TreeWalkContext* context,
 
     NodeType type = get_node_type(node);
     if (type == NODE_LEAF) {
-        uint32_t num_cells = *leaf_node_num_cells(node);
-        if (num_cells > LEAF_NODE_MAX_CELLS) {
+        uint32_t num_cells = 0u;
+        if (!tinydb_leaf_page_count(node, PAGE_SIZE, &num_cells)) {
             (void)pager_release_page_handle(&node_handle);
             return diagnostic_fail(context,
-                                   "leaf page %u has %u cells, max is %u",
-                                   page_num,
-                                   num_cells,
-                                   (uint32_t)LEAF_NODE_MAX_CELLS);
+                                   "leaf page %u has an invalid leaf format",
+                                   page_num);
         }
-        for (uint32_t i = 1; i < num_cells; i++) {
-            uint32_t previous = *leaf_node_key(node, i - 1);
-            uint32_t current = *leaf_node_key(node, i);
-            if (previous >= current) {
+
+        uint32_t previous_key = 0u;
+        for (uint32_t i = 0u; i < num_cells; i++) {
+            uint32_t current_key = 0u;
+            if (!tinydb_leaf_page_key_at(node, PAGE_SIZE, i, &current_key)) {
+                (void)pager_release_page_handle(&node_handle);
+                return diagnostic_fail(context,
+                                       "leaf page %u has an invalid key at cell %u",
+                                       page_num,
+                                       i);
+            }
+            if (i > 0u && previous_key >= current_key) {
                 (void)pager_release_page_handle(&node_handle);
                 return diagnostic_fail(context,
                                        "leaf page %u keys are not strictly ordered (%u >= %u)",
                                        page_num,
-                                       previous,
-                                       current);
+                                       previous_key,
+                                       current_key);
             }
+            previous_key = current_key;
         }
 
-        uint32_t previous_leaf = *leaf_node_prev_leaf(node);
-        uint32_t next_leaf = *leaf_node_next_leaf(node);
+        uint32_t previous_leaf = 0u;
+        uint32_t next_leaf = 0u;
+        if (!tinydb_leaf_page_prev(node, PAGE_SIZE, &previous_leaf) ||
+            !tinydb_leaf_page_next(node, PAGE_SIZE, &next_leaf)) {
+            (void)pager_release_page_handle(&node_handle);
+            return diagnostic_fail(context,
+                                   "leaf page %u has invalid sibling metadata",
+                                   page_num);
+        }
+
         context->stats->leaf_pages++;
         context->stats->total_rows += num_cells;
         if (!release_tree_handle(context, &node_handle, page_num)) return false;
