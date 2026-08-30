@@ -1,6 +1,8 @@
 #include "column_type.h"
 #include "engine.h"
 #include "generic_index_epoch.h"
+#include "leaf_format.h"
+#include "leaf_migration.h"
 #include "multitable.h"
 #include "record.h"
 #include "record_payload.h"
@@ -97,21 +99,6 @@ static TinyDBSqlStatus fail_result(TinyDBSqlResult* result,
     return status;
 }
 
-static bool schema_table_is_provably_empty(Table* table,
-                                           const TableSchema* schema,
-                                           char* message,
-                                           size_t message_size) {
-    bool scan_complete = false;
-    uint32_t row_count = tinydb_record_payload_scan(table,
-                                                    schema,
-                                                    NULL,
-                                                    NULL,
-                                                    &scan_complete,
-                                                    message,
-                                                    message_size);
-    return scan_complete && row_count == 0u;
-}
-
 static bool schema_rows_accept_appended_column(
     Table* table,
     const TableSchema* schema,
@@ -183,7 +170,6 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
 
     TableSchema* target = find_schema(table, statement.alter_table.table_name);
     if (target == NULL) {
-        /* Preserve the base ALTER route's public not-found diagnostic. */
         return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
     if (ci_equal(target->name, "users") || fixed_row_shape(target)) {
@@ -207,16 +193,6 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
             "ALTER TABLE ADD COLUMN would exceed the schema-sized payload limit");
     }
 
-    /*
-     * Compact V2 rows carry their field count, logical length, and a schema
-     * fingerprint. For append-only evolution the decoder can reconstruct the
-     * historical schema from the current schema's unchanged prefix, verify the
-     * stored fingerprint, and materialize missing trailing columns as zero/empty
-     * defaults. Prove every existing row accepts the prospective schema before
-     * changing catalog metadata. Raw/migration-era rows, malformed envelopes,
-     * or non-prefix layouts fail the corruption-aware scan and keep ALTER
-     * fail-closed.
-     */
     if (target->row_size > ROW_SIZE) {
         char scan_message[TINYDB_RECORD_MESSAGE_MAX];
         if (!schema_rows_accept_appended_column(table,
@@ -234,31 +210,53 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     char schema_message[TINYDB_RECORD_MESSAGE_MAX];
     bool executable_generic = tinydb_schema_supports_records(
         target, schema_message, sizeof(schema_message));
+    bool staged_fixed_root_migration = false;
+    unsigned char staged_root[PAGE_SIZE];
+    memset(staged_root, 0, sizeof(staged_root));
+
     if (executable_generic && target->row_size <= ROW_SIZE &&
         type.storage_size > ROW_SIZE - target->row_size) {
-        char scan_message[TINYDB_RECORD_MESSAGE_MAX];
-        if (!schema_table_is_provably_empty(table,
-                                            target,
-                                            scan_message,
-                                            sizeof(scan_message))) {
+        if (target->root_page_num >= table->pager->num_pages) {
+            return fail_result(result,
+                               TINYDB_SQL_POLICY_ERROR,
+                               "ALTER TABLE ADD COLUMN cannot migrate an invalid table root");
+        }
+
+        void* root = get_page(table->pager, target->root_page_num);
+        TinyDBLeafPageFormat root_format =
+            tinydb_leaf_format_detect_page(root, PAGE_SIZE);
+        if (root_format == TINYDB_LEAF_PAGE_FORMAT_FIXED_V1) {
+            if (!tinydb_leaf_migrate_v1_to_compact_v2(root,
+                                                       PAGE_SIZE,
+                                                       target,
+                                                       staged_root,
+                                                       sizeof(staged_root))) {
+                return fail_result(
+                    result,
+                    TINYDB_SQL_POLICY_ERROR,
+                    "ALTER TABLE ADD COLUMN cannot migrate this fixed root leaf to compact V2 without a split");
+            }
+            staged_fixed_root_migration = true;
+        } else if (root_format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+            char scan_message[TINYDB_RECORD_MESSAGE_MAX];
+            if (!schema_rows_accept_appended_column(table,
+                                                    target,
+                                                    &type,
+                                                    scan_message,
+                                                    sizeof(scan_message))) {
+                return fail_result(
+                    result,
+                    TINYDB_SQL_POLICY_ERROR,
+                    "ALTER TABLE ADD COLUMN requires append-compatible compact V2 rows before crossing the fixed record boundary");
+            }
+        } else {
             return fail_result(
                 result,
                 TINYDB_SQL_POLICY_ERROR,
-                "ALTER TABLE ADD COLUMN would exceed the fixed generic record slot; variable-size row migration is not implemented");
+                "ALTER TABLE ADD COLUMN requires a table-rebuild migration for multi-leaf fixed storage");
         }
     }
 
-    /*
-     * Generic secondary-index range snapshots are keyed by a durable mutation
-     * epoch. Schema evolution is a logical mutation even when existing compact
-     * V2 rows do not need to be rewritten: a later rebuild must decode those
-     * historical row generations through the new schema and materialize the
-     * appended defaults. Invalidate any snapshot for this table before the
-     * catalog mutation so no pre-ALTER sidecar can remain current under the new
-     * schema. A harmless extra invalidation is preferable to accepting stale
-     * candidates; failed DDL may therefore force a later rebuild without
-     * changing query results.
-     */
     if (!tinydb_generic_index_epoch_before_mutation(table, target)) {
         return fail_result(result,
                            TINYDB_SQL_EXECUTE_ERROR,
@@ -266,6 +264,12 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
     }
 
     TableSchema schema_before_alter = *target;
+    if (staged_fixed_root_migration) {
+        void* root = get_page(table->pager, target->root_page_num);
+        memcpy(root, staged_root, PAGE_USABLE_SIZE);
+        mark_page_dirty(table->pager, target->root_page_num);
+    }
+
     if (!table_add_column(table,
                           statement.alter_table.table_name,
                           statement.alter_table.new_col_name,
@@ -275,13 +279,9 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                            "ALTER TABLE ADD COLUMN failed");
     }
 
-    /*
-     * Keep an explicit rollback seam between the in-memory catalog mutation and
-     * durable catalog publication. The index epoch may have advanced, which is
-     * safe: it only forces stale sidecars to rebuild. The authoritative in-memory
-     * schema must stay aligned with the durable catalog whenever publication is
-     * rejected or fails.
-     */
+    /* A compact-V2 physical upgrade is intentionally not rolled back here.
+     * It is backward-readable through schema_before_alter and therefore remains
+     * a safe, forward-compatible storage upgrade if catalog publication fails. */
     if (test_fail_before_catalog_persist()) {
         *target = schema_before_alter;
         return fail_result(result,
