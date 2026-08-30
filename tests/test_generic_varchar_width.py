@@ -77,7 +77,14 @@ def main():
                 "SELECT * FROM oversized WHERE id = 501;",
                 "CREATE TABLE invalid_zero (id INT, a VARCHAR(0));",
                 "CREATE TABLE invalid_large (id INT, a VARCHAR(256));",
-                "CREATE TABLE archive_bad (id INT, username VARCHAR(20), email VARCHAR(40));",
+                # Explicit widths that do not match the historical Row ABI are
+                # ordinary schema-aware generic layouts even when column names
+                # happen to be id/username/email.
+                "CREATE TABLE archive_compact (id INT, username VARCHAR(20), email VARCHAR(40));",
+                "INSERT INTO archive_compact VALUES (6, 'compact', 'compact@example.com');",
+                "PRAGMA table_info(archive_compact);",
+                "SELECT * FROM archive_compact WHERE id = 6;",
+                # Exact serialized widths still opt into the legacy Row ABI.
                 "CREATE TABLE archive_exact (id INT, username VARCHAR(32), email VARCHAR(255));",
                 "INSERT INTO archive_exact VALUES (7, 'archived', 'archive@example.com');",
                 "SELECT * FROM archive_exact WHERE id = 7;",
@@ -100,10 +107,9 @@ def main():
             raise AssertionError("valid 296-byte V2 schema was rejected\n" + first)
         if first.count("Syntax error. Could not parse statement.") < 2:
             raise AssertionError("VARCHAR(0)/VARCHAR(256) were not rejected\n" + first)
-        require(
-            first,
-            "sized legacy Row schemas require username VARCHAR(32) and email VARCHAR(255)",
-        )
+        require(first, "username | VARCHAR(20)")
+        require(first, "email | VARCHAR(40)")
+        require(first, "(6, compact, compact@example.com)")
         require(first, "(7, archived, archive@example.com)")
         require(first, "ok")
 
@@ -118,6 +124,10 @@ def main():
                 "SELECT * FROM oversized WHERE id = 501;",
                 "INSERT INTO oversized VALUES (502, 'wide-c', 'wide-d');",
                 "SELECT * FROM oversized WHERE id = 502;",
+                "PRAGMA table_info(archive_compact);",
+                "SELECT * FROM archive_compact WHERE id = 6;",
+                "INSERT INTO archive_compact VALUES (8, 'compact2', 'second@example.com');",
+                "SELECT * FROM archive_compact WHERE id = 8;",
                 "SELECT * FROM archive_exact WHERE id = 7;",
                 "PRAGMA integrity_check;",
                 ".exit",
@@ -132,14 +142,18 @@ def main():
         require(second, "b | VARCHAR(145)")
         require(second, "(501, wide-a, wide-b)")
         require(second, "(502, wide-c, wide-d)")
+        require(second, "username | VARCHAR(20)")
+        require(second, "email | VARCHAR(40)")
+        require(second, "(6, compact, compact@example.com)")
+        require(second, "(8, compact2, second@example.com)")
         require(second, "(7, archived, archive@example.com)")
         require(second, "ok")
 
         print(
-            "PASS: VARCHAR(n) capacities drive compact schemas, reject oversized values "
-            "atomically, admit executable rows beyond TinyDBRecord through V2 payload "
-            "storage, survive reopen and continued insertion, and preserve legacy Row "
-            "routing only for compatible widths."
+            "PASS: VARCHAR(n) capacities drive schema-aware layouts, reject oversized "
+            "values atomically, admit rows beyond TinyDBRecord through V2 payload "
+            "storage, preserve compact id/username/email layouts across reopen, and "
+            "reserve legacy Row routing for compatible serialized widths."
         )
     finally:
         cleanup(db_path)
