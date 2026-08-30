@@ -128,7 +128,7 @@ bool pager_release_savepoint(Pager* pager, const char* name);
 
 /*
  * Stable pinned-page handles for callers that retain a page pointer across
- * other Pager activity. get_page() alone returns an unpinned frame pointer;
+ * other LRU cache activity. get_page() alone returns an unpinned frame pointer;
  * the frame may be recycled by a later cache miss. This handle revalidates the
  * page/frame identity while holding pager_lock, then increments pin_count so
  * lru_evict() must skip the frame until the handle is released.
@@ -282,13 +282,130 @@ static inline void pager_restore_page_dirty_state(Pager* pager,
 }
 
 /*
- * Legacy page-number lock API. New code that retains page pointers across
- * cache activity should prefer PagerPageHandle so the frame is pinned for the
- * entire lock lifetime.
+ * Source-compatible page-number lock seam. The historical implementation in
+ * pager.c locked a resident frame without pinning it, so an unrelated cache
+ * miss could recycle that frame while the caller still held the lock. Normal
+ * translation units are redirected to these wrappers: they validate the
+ * page/frame mapping and increment pin_count under pager_lock before waiting
+ * for the per-frame lock. The pin remains held until the matching release, so
+ * LRU eviction cannot invalidate the lock target.
+ *
+ * pager.c is compiled with a pager_checkpoint macro rename by CMake; that
+ * implementation translation unit therefore keeps exporting the historical
+ * ABI symbols without macro redirection, while in-tree/header consumers get
+ * the eviction-safe compatibility path below.
  */
+static inline bool pager_page_number_lock_pin(Pager* pager,
+                                              uint32_t page_num,
+                                              PagerPageLockMode lock_mode) {
+    if (pager == NULL || page_num == INVALID_PAGE_NUM ||
+        (lock_mode != PAGER_PAGE_LOCK_READ &&
+         lock_mode != PAGER_PAGE_LOCK_WRITE)) {
+        return false;
+    }
+
+    int frame_idx = -1;
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (page_num < pager->page_capacity) {
+        frame_idx = pager->page_table[page_num];
+        if (frame_idx < 0 || frame_idx >= MAX_BUFFER_POOL_SIZE ||
+            pager->frames[frame_idx].page_num != page_num ||
+            pager->frames[frame_idx].pin_count == UINT32_MAX) {
+            frame_idx = -1;
+        } else {
+            pager->frames[frame_idx].pin_count++;
+        }
+    }
+    db_rwlock_wrunlock(&pager->pager_lock);
+
+    if (frame_idx == -1) return false;
+    if (lock_mode == PAGER_PAGE_LOCK_READ) {
+        db_rwlock_rdlock(&pager->frames[frame_idx].rwlock);
+    } else {
+        db_rwlock_wrlock(&pager->frames[frame_idx].rwlock);
+    }
+    return true;
+}
+
+static inline bool pager_page_number_unlock_unpin(Pager* pager,
+                                                  uint32_t page_num,
+                                                  PagerPageLockMode lock_mode) {
+    if (pager == NULL || page_num == INVALID_PAGE_NUM ||
+        (lock_mode != PAGER_PAGE_LOCK_READ &&
+         lock_mode != PAGER_PAGE_LOCK_WRITE)) {
+        return false;
+    }
+
+    int frame_idx = -1;
+    db_rwlock_rdlock(&pager->pager_lock);
+    if (page_num < pager->page_capacity) {
+        frame_idx = pager->page_table[page_num];
+        if (frame_idx < 0 || frame_idx >= MAX_BUFFER_POOL_SIZE ||
+            pager->frames[frame_idx].page_num != page_num ||
+            pager->frames[frame_idx].pin_count == 0u) {
+            frame_idx = -1;
+        }
+    }
+    db_rwlock_rdunlock(&pager->pager_lock);
+    if (frame_idx == -1) return false;
+
+    if (lock_mode == PAGER_PAGE_LOCK_READ) {
+        db_rwlock_rdunlock(&pager->frames[frame_idx].rwlock);
+    } else {
+        db_rwlock_wrunlock(&pager->frames[frame_idx].rwlock);
+    }
+
+    bool unpinned = false;
+    db_rwlock_wrlock(&pager->pager_lock);
+    if (page_num < pager->page_capacity &&
+        pager->page_table[page_num] == frame_idx &&
+        pager->frames[frame_idx].page_num == page_num &&
+        pager->frames[frame_idx].pin_count > 0u) {
+        pager->frames[frame_idx].pin_count--;
+        unpinned = true;
+    }
+    db_rwlock_wrunlock(&pager->pager_lock);
+    return unpinned;
+}
+
+static inline void pager_acquire_read_lock_pinned_compat(Pager* pager,
+                                                         uint32_t page_num) {
+    (void)pager_page_number_lock_pin(pager, page_num, PAGER_PAGE_LOCK_READ);
+}
+
+static inline void pager_release_read_lock_pinned_compat(Pager* pager,
+                                                         uint32_t page_num) {
+    (void)pager_page_number_unlock_unpin(pager, page_num,
+                                         PAGER_PAGE_LOCK_READ);
+}
+
+static inline void pager_acquire_write_lock_pinned_compat(Pager* pager,
+                                                          uint32_t page_num) {
+    (void)pager_page_number_lock_pin(pager, page_num, PAGER_PAGE_LOCK_WRITE);
+}
+
+static inline void pager_release_write_lock_pinned_compat(Pager* pager,
+                                                          uint32_t page_num) {
+    (void)pager_page_number_unlock_unpin(pager, page_num,
+                                         PAGER_PAGE_LOCK_WRITE);
+}
+
+/* Historical ABI declarations retained for pager.c and external symbol users. */
 void pager_acquire_read_lock(Pager* pager, uint32_t page_num);
 void pager_release_read_lock(Pager* pager, uint32_t page_num);
 void pager_acquire_write_lock(Pager* pager, uint32_t page_num);
 void pager_release_write_lock(Pager* pager, uint32_t page_num);
+
+/*
+ * In-tree consumers compile against the eviction-safe source-compatible seam.
+ * pager.c itself sees the CMake pager_checkpoint rename and is intentionally
+ * excluded so its exported ABI definitions keep their original symbol names.
+ */
+#if !defined(pager_checkpoint)
+#define pager_acquire_read_lock  pager_acquire_read_lock_pinned_compat
+#define pager_release_read_lock  pager_release_read_lock_pinned_compat
+#define pager_acquire_write_lock pager_acquire_write_lock_pinned_compat
+#define pager_release_write_lock pager_release_write_lock_pinned_compat
+#endif
 
 #endif // PAGER_H
