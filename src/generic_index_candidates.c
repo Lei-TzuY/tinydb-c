@@ -14,7 +14,7 @@
 #endif
 
 #define CANDIDATE_INDEX_MAGIC 0x47495231u /* GIR1: shared typed range snapshot */
-#define CANDIDATE_INDEX_VERSION 1u
+#define CANDIDATE_INDEX_VERSION 2u
 #define CANDIDATE_FNV_OFFSET 1469598103934665603ULL
 #define CANDIDATE_FNV_PRIME 1099511628211ULL
 
@@ -94,6 +94,30 @@ static uint64_t decode_u64(const unsigned char in[8]) {
         value |= ((uint64_t)in[i]) << (i * 8u);
     }
     return value;
+}
+
+static uint64_t schema_layout_fingerprint(const TableSchema* schema) {
+    if (schema == NULL) return 0;
+
+    uint64_t hash = CANDIDATE_FNV_OFFSET;
+    unsigned char u32[4];
+    encode_u32(schema->num_columns, u32);
+    hash = fnv_update(hash, u32, sizeof(u32));
+    encode_u32(schema->row_size, u32);
+    hash = fnv_update(hash, u32, sizeof(u32));
+
+    for (uint32_t i = 0; i < schema->num_columns; i++) {
+        char name[MAX_NAME_SIZE] = {0};
+        snprintf(name, sizeof(name), "%s", schema->columns[i].name);
+        hash = fnv_update(hash, name, sizeof(name));
+        encode_u32((uint32_t)schema->columns[i].type, u32);
+        hash = fnv_update(hash, u32, sizeof(u32));
+        encode_u32(schema->columns[i].size, u32);
+        hash = fnv_update(hash, u32, sizeof(u32));
+        encode_u32(schema->columns[i].offset, u32);
+        hash = fnv_update(hash, u32, sizeof(u32));
+    }
+    return hash;
 }
 
 static bool write_bytes(FILE* file,
@@ -304,6 +328,7 @@ static bool write_snapshot(const TableSchema* schema,
               write_u32(file,
                         &hash,
                         (uint32_t)schema->columns[column_index].type) &&
+              write_u64(file, &hash, schema_layout_fingerprint(schema)) &&
               write_u32(file, &hash, snapshot->count) &&
               write_bytes(file, &hash, table_name, sizeof(table_name)) &&
               write_bytes(file, &hash, index_name, sizeof(index_name)) &&
@@ -344,6 +369,7 @@ static bool load_snapshot(Table* table,
     uint32_t root_page_num = 0;
     uint32_t stored_column_index = 0;
     uint32_t column_type = 0;
+    uint64_t stored_schema_fingerprint = 0;
     uint32_t count = 0;
     char table_name[MAX_NAME_SIZE] = {0};
     char index_name[MAX_NAME_SIZE] = {0};
@@ -355,6 +381,7 @@ static bool load_snapshot(Table* table,
               read_u32(file, &hash, &root_page_num) &&
               read_u32(file, &hash, &stored_column_index) &&
               read_u32(file, &hash, &column_type) &&
+              read_u64(file, &hash, &stored_schema_fingerprint) &&
               read_u32(file, &hash, &count) &&
               read_bytes(file, &hash, table_name, sizeof(table_name)) &&
               read_bytes(file, &hash, index_name, sizeof(index_name)) &&
@@ -371,6 +398,7 @@ static bool load_snapshot(Table* table,
         root_page_num != schema->root_page_num ||
         stored_column_index != column_index ||
         column_type != (uint32_t)schema->columns[column_index].type ||
+        stored_schema_fingerprint != schema_layout_fingerprint(schema) ||
         (uint64_t)count > max_entries ||
         !ci_equal(table_name, schema->name) ||
         !ci_equal(index_name, index->name) ||
