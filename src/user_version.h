@@ -19,4 +19,18 @@ bool db_try_get_user_version(Table* table,
                              char* message,
                              size_t message_size);
 
+/*
+ * Non-fatal write companion to the historical db_set_user_version() ABI.
+ *
+ * The setter only targets an already allocated root page. Buffer-pool
+ * backpressure is reported before mutation, so a BUSY result leaves the value
+ * unchanged. A successful call marks the root dirty but does not implicitly
+ * COMMIT or CHECKPOINT; durability remains controlled by the caller's normal
+ * transaction/checkpoint lifecycle.
+ */
+bool db_try_set_user_version(Table* table,
+                             uint32_t version,
+                             char* message,
+                             size_t message_size);
+
 #endif /* TINYDB_USER_VERSION_H */
