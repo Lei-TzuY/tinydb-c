@@ -115,29 +115,30 @@ static void print_table_stats(Table* table, const char* table_name) {
     printf("  Internal Pages: %u\n", stats.internal_pages);
 }
 
-static void print_global_stats(Table* table) {
-    uint32_t total_rows = 0;
-    uint32_t leaf_pages = 0;
-    uint32_t internal_pages = 0;
-
-    for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
-        TinyDBTreeStats stats;
-        if (get_table_stats(table, table->catalog.schemas[i].name, &stats)) {
-            total_rows += stats.total_rows;
-            leaf_pages += stats.leaf_pages;
-            internal_pages += stats.internal_pages;
-        }
+static bool print_global_stats(Table* table) {
+    TinyDBDatabaseTreeStats stats;
+    char message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+    if (!tinydb_get_database_tree_stats(table,
+                                        &stats,
+                                        message,
+                                        sizeof(message))) {
+        printf("Error: Unable to inspect database tree statistics: %s.\n",
+               message[0] != '\0'
+                   ? message
+                   : "catalog tree statistics unavailable");
+        return false;
     }
 
     /* Keep the long-standing field names for scripts/tests while extending
      * their meaning to all catalog roots in a multi-table database. */
     printf("Total Pages: %u\n", table->pager->num_pages);
-    printf("Leaf Pages: %u\n", leaf_pages);
-    printf("Internal Pages: %u\n", internal_pages);
+    printf("Leaf Pages: %u\n", stats.leaf_pages);
+    printf("Internal Pages: %u\n", stats.internal_pages);
     printf("Free Pages: %u\n", table->pager->free_page_count);
-    printf("Total Rows: %u\n", total_rows);
+    printf("Total Rows: %u\n", stats.total_rows);
     printf("In Transaction: %s\n", table->in_transaction ? "Yes" : "No");
     printf("Secondary Index: %s\n", table->username_index_enabled ? "Enabled" : "Disabled");
+    return true;
 }
 
 static void check_table(Table* table, const char* table_name) {
@@ -186,7 +187,9 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, TinyDB* database) {
         if (argument[0] != '\0') {
             print_table_stats(table, argument);
         } else {
-            print_global_stats(table);
+            if (!print_global_stats(table)) {
+                return META_COMMAND_SUCCESS;
+            }
             if (table->catalog.num_tables > 1) {
                 for (uint32_t i = 0; i < table->catalog.num_tables; i++) {
                     print_table_stats(table, table->catalog.schemas[i].name);
