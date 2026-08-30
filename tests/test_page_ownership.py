@@ -66,6 +66,9 @@ def main():
             "direct_ownership_busy=yes",
             "table_check_busy=yes",
             "one_free_frame_success=yes",
+            "page_inspect_busy=yes",
+            "tree_inspect_busy=yes",
+            "inspection_one_free_frame_success=yes",
         ):
             assert marker in direct.stdout, direct.stdout
 
@@ -100,9 +103,9 @@ def main():
         assert "page ownership:" in output, output
 
         print(
-            "PASS: page ownership catches orphan/shared pages, all public "
-            "tree/ownership diagnostics fail non-fatally when fully pinned, and "
-            "they make progress with exactly one free frame"
+            "PASS: page ownership catches orphan/shared pages, public tree/ownership "
+            "diagnostics plus .page/.btree inspection fail non-fatally when fully "
+            "pinned, and all inspection paths make progress with exactly one free frame"
         )
     finally:
         cleanup(probe_db)
