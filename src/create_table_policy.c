@@ -145,7 +145,7 @@ static TinyDBSqlStatus read_user_version_nonfatal(TinyDB* database,
         output->executed = false;
         snprintf(output->message,
                  sizeof(output->message),
-                 "PRAGMA user_version %s",
+                 "PRAGMA user_version %.235s",
                  message[0] != '\0' ? message : "read failed");
         return output->status;
     }
