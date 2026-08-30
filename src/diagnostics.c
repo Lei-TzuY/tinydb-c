@@ -1,4 +1,5 @@
 #include "diagnostics.h"
+#include "pager_try_pin.h"
 
 #include <stdarg.h>
 
@@ -53,6 +54,70 @@ static bool page_is_free(Pager* pager, uint32_t page_num) {
     return false;
 }
 
+static bool release_tree_handle(TreeWalkContext* context,
+                                PagerPageHandle* handle,
+                                uint32_t page_num) {
+    if (pager_release_page_handle(handle)) return true;
+    return diagnostic_fail(context,
+                           "unable to release diagnostic pin for page %u",
+                           page_num);
+}
+
+static bool validate_leaf_neighbor(TreeWalkContext* context,
+                                   uint32_t page_num,
+                                   uint32_t sibling_page_num,
+                                   bool previous_neighbor) {
+    if (sibling_page_num == 0u) return true;
+
+    Pager* pager = context->table->pager;
+    if (sibling_page_num >= pager->num_pages) {
+        return diagnostic_fail(context,
+                               "leaf page %u has invalid %s pointer %u",
+                               page_num,
+                               previous_neighbor ? "prev" : "next",
+                               sibling_page_num);
+    }
+    if (page_is_free(pager, sibling_page_num)) {
+        return diagnostic_fail(context,
+                               "leaf page %u links to free %s page %u",
+                               page_num,
+                               previous_neighbor ? "prev" : "next",
+                               sibling_page_num);
+    }
+
+    PagerPageHandle sibling_handle;
+    PagerTryPinStatus status = pager_try_pin_existing_page_handle(
+        pager, sibling_page_num, &sibling_handle);
+    if (status != PAGER_TRY_PIN_OK) {
+        return diagnostic_fail(context,
+                               "leaf page %u could not acquire %s page %u: %s",
+                               page_num,
+                               previous_neighbor ? "prev" : "next",
+                               sibling_page_num,
+                               pager_try_pin_status_string(status));
+    }
+
+    void* sibling = sibling_handle.data;
+    bool reciprocal_ok = get_node_type(sibling) == NODE_LEAF;
+    if (reciprocal_ok) {
+        reciprocal_ok = previous_neighbor
+            ? *leaf_node_next_leaf(sibling) == page_num
+            : *leaf_node_prev_leaf(sibling) == page_num;
+    }
+
+    if (!release_tree_handle(context, &sibling_handle, sibling_page_num)) {
+        return false;
+    }
+    if (!reciprocal_ok) {
+        return diagnostic_fail(context,
+                               "leaf page %u has a broken %s link to %u",
+                               page_num,
+                               previous_neighbor ? "prev" : "next",
+                               sibling_page_num);
+    }
+    return true;
+}
+
 static bool walk_tree(TreeWalkContext* context,
                       uint32_t page_num,
                       uint32_t expected_parent,
@@ -73,27 +138,41 @@ static bool walk_tree(TreeWalkContext* context,
                                "tree contains a cycle or duplicate child reference at page %u",
                                page_num);
     }
+
+    PagerPageHandle node_handle;
+    PagerTryPinStatus status = pager_try_pin_existing_page_handle(
+        pager, page_num, &node_handle);
+    if (status != PAGER_TRY_PIN_OK) {
+        return diagnostic_fail(context,
+                               "page %u could not be acquired: %s",
+                               page_num,
+                               pager_try_pin_status_string(status));
+    }
     context->visited[page_num] = true;
 
-    void* node = get_page(pager, page_num);
+    void* node = node_handle.data;
     bool is_root_page = page_num == context->root_page_num;
     if (is_root_page) {
         if (!is_node_root(node)) {
+            (void)pager_release_page_handle(&node_handle);
             return diagnostic_fail(context,
                                    "root page %u is not marked as root",
                                    page_num);
         }
     } else {
         if (is_node_root(node)) {
+            (void)pager_release_page_handle(&node_handle);
             return diagnostic_fail(context,
                                    "non-root page %u is marked as root",
                                    page_num);
         }
         if (*node_parent(node) != expected_parent) {
+            uint32_t actual_parent = *node_parent(node);
+            (void)pager_release_page_handle(&node_handle);
             return diagnostic_fail(context,
                                    "page %u parent is %u, expected %u",
                                    page_num,
-                                   *node_parent(node),
+                                   actual_parent,
                                    expected_parent);
         }
     }
@@ -106,6 +185,7 @@ static bool walk_tree(TreeWalkContext* context,
     if (type == NODE_LEAF) {
         uint32_t num_cells = *leaf_node_num_cells(node);
         if (num_cells > LEAF_NODE_MAX_CELLS) {
+            (void)pager_release_page_handle(&node_handle);
             return diagnostic_fail(context,
                                    "leaf page %u has %u cells, max is %u",
                                    page_num,
@@ -116,6 +196,7 @@ static bool walk_tree(TreeWalkContext* context,
             uint32_t previous = *leaf_node_key(node, i - 1);
             uint32_t current = *leaf_node_key(node, i);
             if (previous >= current) {
+                (void)pager_release_page_handle(&node_handle);
                 return diagnostic_fail(context,
                                        "leaf page %u keys are not strictly ordered (%u >= %u)",
                                        page_num,
@@ -126,45 +207,22 @@ static bool walk_tree(TreeWalkContext* context,
 
         uint32_t previous_leaf = *leaf_node_prev_leaf(node);
         uint32_t next_leaf = *leaf_node_next_leaf(node);
-        if (previous_leaf != 0) {
-            if (previous_leaf >= pager->num_pages) {
-                return diagnostic_fail(context,
-                                       "leaf page %u has invalid prev pointer %u",
-                                       page_num,
-                                       previous_leaf);
-            }
-            void* previous_node = get_page(pager, previous_leaf);
-            if (get_node_type(previous_node) != NODE_LEAF ||
-                *leaf_node_next_leaf(previous_node) != page_num) {
-                return diagnostic_fail(context,
-                                       "leaf page %u has a broken prev link to %u",
-                                       page_num,
-                                       previous_leaf);
-            }
-        }
-        if (next_leaf != 0) {
-            if (next_leaf >= pager->num_pages) {
-                return diagnostic_fail(context,
-                                       "leaf page %u has invalid next pointer %u",
-                                       page_num,
-                                       next_leaf);
-            }
-            void* next_node = get_page(pager, next_leaf);
-            if (get_node_type(next_node) != NODE_LEAF ||
-                *leaf_node_prev_leaf(next_node) != page_num) {
-                return diagnostic_fail(context,
-                                       "leaf page %u has a broken next link to %u",
-                                       page_num,
-                                       next_leaf);
-            }
-        }
-
         context->stats->leaf_pages++;
         context->stats->total_rows += num_cells;
-        return true;
+        if (!release_tree_handle(context, &node_handle, page_num)) return false;
+
+        return validate_leaf_neighbor(context,
+                                      page_num,
+                                      previous_leaf,
+                                      true) &&
+               validate_leaf_neighbor(context,
+                                      page_num,
+                                      next_leaf,
+                                      false);
     }
 
     if (type != NODE_INTERNAL) {
+        (void)pager_release_page_handle(&node_handle);
         return diagnostic_fail(context,
                                "page %u has unknown node type %u",
                                page_num,
@@ -173,6 +231,7 @@ static bool walk_tree(TreeWalkContext* context,
 
     uint32_t num_keys = *internal_node_num_keys(node);
     if (num_keys > INTERNAL_NODE_MAX_KEYS) {
+        (void)pager_release_page_handle(&node_handle);
         return diagnostic_fail(context,
                                "internal page %u has %u keys, max is %u",
                                page_num,
@@ -183,6 +242,7 @@ static bool walk_tree(TreeWalkContext* context,
         uint32_t previous = *internal_node_key(node, i - 1);
         uint32_t current = *internal_node_key(node, i);
         if (previous >= current) {
+            (void)pager_release_page_handle(&node_handle);
             return diagnostic_fail(context,
                                    "internal page %u separator keys are not strictly ordered (%u >= %u)",
                                    page_num,
@@ -191,12 +251,10 @@ static bool walk_tree(TreeWalkContext* context,
         }
     }
 
-    /* get_page() may evict the frame backing `node` while we recurse.
-     * Snapshot child page numbers before descending so the parent buffer
-     * pointer is never dereferenced after recursive page loads. */
     uint32_t child_count = num_keys + 1;
     uint32_t* child_pages = (uint32_t*)malloc(sizeof(uint32_t) * child_count);
     if (child_pages == NULL) {
+        (void)pager_release_page_handle(&node_handle);
         return diagnostic_fail(context,
                                "unable to allocate child snapshot for page %u",
                                page_num);
@@ -206,6 +264,11 @@ static bool walk_tree(TreeWalkContext* context,
     }
 
     context->stats->internal_pages++;
+    if (!release_tree_handle(context, &node_handle, page_num)) {
+        free(child_pages);
+        return false;
+    }
+
     for (uint32_t i = 0; i < child_count; i++) {
         if (!walk_tree(context, child_pages[i], page_num, depth + 1)) {
             free(child_pages);
@@ -333,6 +396,16 @@ static void ownership_message(OwnershipContext* context, const char* format, ...
     va_end(args);
 }
 
+static bool release_ownership_handle(OwnershipContext* context,
+                                     PagerPageHandle* handle,
+                                     uint32_t page_num) {
+    if (pager_release_page_handle(handle)) return true;
+    ownership_message(context,
+                      "unable to release ownership diagnostic pin for page %u",
+                      page_num);
+    return false;
+}
+
 static bool claim_tree_pages(OwnershipContext* context,
                              uint32_t page_num,
                              uint32_t table_index) {
@@ -369,10 +442,24 @@ static bool claim_tree_pages(OwnershipContext* context,
     context->owners[page_num] = table_index;
     context->stats->owned_pages++;
 
-    void* node = get_page(pager, page_num);
+    PagerPageHandle node_handle;
+    PagerTryPinStatus status = pager_try_pin_existing_page_handle(
+        pager, page_num, &node_handle);
+    if (status != PAGER_TRY_PIN_OK) {
+        ownership_message(context,
+                          "owned page %u could not be acquired: %s",
+                          page_num,
+                          pager_try_pin_status_string(status));
+        return false;
+    }
+
+    void* node = node_handle.data;
     NodeType type = get_node_type(node);
-    if (type == NODE_LEAF) return true;
+    if (type == NODE_LEAF) {
+        return release_ownership_handle(context, &node_handle, page_num);
+    }
     if (type != NODE_INTERNAL) {
+        (void)pager_release_page_handle(&node_handle);
         ownership_message(context,
                           "owned page %u has unknown node type %u",
                           page_num,
@@ -382,6 +469,7 @@ static bool claim_tree_pages(OwnershipContext* context,
 
     uint32_t num_keys = *internal_node_num_keys(node);
     if (num_keys > INTERNAL_NODE_MAX_KEYS) {
+        (void)pager_release_page_handle(&node_handle);
         ownership_message(context,
                           "internal page %u has invalid key count %u",
                           page_num,
@@ -392,6 +480,7 @@ static bool claim_tree_pages(OwnershipContext* context,
     uint32_t child_count = num_keys + 1;
     uint32_t* children = (uint32_t*)malloc(sizeof(uint32_t) * child_count);
     if (children == NULL) {
+        (void)pager_release_page_handle(&node_handle);
         ownership_message(context,
                           "unable to allocate ownership child snapshot for page %u",
                           page_num);
@@ -399,6 +488,11 @@ static bool claim_tree_pages(OwnershipContext* context,
     }
     for (uint32_t i = 0; i < child_count; i++) {
         children[i] = *internal_node_child(node, i);
+    }
+
+    if (!release_ownership_handle(context, &node_handle, page_num)) {
+        free(children);
+        return false;
     }
 
     bool ok = true;
