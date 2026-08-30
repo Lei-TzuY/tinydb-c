@@ -49,13 +49,20 @@ def main():
             "one_free_frame_success=yes",
             "value_preserved=yes",
             "optional_message=yes",
+            "set_busy_nonfatal=yes",
+            "set_no_mutation_on_busy=yes",
+            "set_one_free_frame_success=yes",
+            "set_dirty=yes",
+            "set_optional_message=yes",
+            "set_persisted=yes",
         ):
             assert marker in result.stdout, output
 
         print(
-            "PASS: linked db_try_get_user_version returns non-fatal backpressure, "
-            "zeros output on failure, preserves user_version=77 with one free frame, "
-            "and supports callers that omit the diagnostic buffer"
+            "PASS: linked user_version try-get/try-set APIs return non-fatal "
+            "buffer-pool backpressure, keep value 77 unchanged on BUSY, update and "
+            "dirty the root with one free frame, support omitted diagnostics, and "
+            "persist the successful value across checkpoint/reopen"
         )
     finally:
         cleanup(db_path)
