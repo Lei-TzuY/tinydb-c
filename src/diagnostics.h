@@ -26,6 +26,11 @@ typedef struct {
 } TinyDBDatabaseTreeStats;
 
 typedef struct {
+    TinyDBDatabaseTreeStats aggregate;
+    TinyDBTreeStats table_stats[MAX_TABLES];
+} TinyDBCatalogTreeStatsSnapshot;
+
+typedef struct {
     uint32_t total_pages;
     uint32_t owned_pages;
     uint32_t free_pages;
@@ -54,9 +59,84 @@ bool tinydb_get_tree_stats_diagnostic(Table* table,
                                       char* message,
                                       size_t message_size);
 
-/* Source-level catalog aggregate for diagnostics-aware callers. Accumulation
- * stays local until every catalog root has been walked successfully, so a
- * BUSY/corruption failure cannot publish a plausible-looking partial total. */
+/* Source-level catalog snapshot used by diagnostics-aware callers that need
+ * aggregate and per-table statistics from the same traversal. Accumulation
+ * stays local until every root succeeds, so BUSY/corruption/overflow cannot
+ * publish a prefix of per-table results or plausible-looking aggregate totals. */
+static inline bool tinydb_get_catalog_tree_stats_snapshot(
+    Table* table,
+    TinyDBCatalogTreeStatsSnapshot* snapshot,
+    char* message,
+    size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (snapshot != NULL) memset(snapshot, 0, sizeof(*snapshot));
+    if (table == NULL || snapshot == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid catalog tree-stat arguments");
+        }
+        return false;
+    }
+
+    TinyDBCatalogTreeStatsSnapshot collected;
+    memset(&collected, 0, sizeof(collected));
+    collected.aggregate.table_count = table->catalog.num_tables;
+
+    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
+        const char* table_name = table->catalog.schemas[i].name;
+        TinyDBTreeStats* tree_stats = &collected.table_stats[i];
+        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+        if (!tinydb_get_tree_stats_diagnostic(table,
+                                               table_name,
+                                               tree_stats,
+                                               tree_message,
+                                               sizeof(tree_message))) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "table '%s': %s",
+                         table_name,
+                         tree_message[0] != '\0'
+                             ? tree_message
+                             : "tree statistics unavailable");
+            }
+            return false;
+        }
+        if (UINT32_MAX - collected.aggregate.total_rows < tree_stats->total_rows ||
+            UINT32_MAX - collected.aggregate.leaf_pages < tree_stats->leaf_pages ||
+            UINT32_MAX - collected.aggregate.internal_pages < tree_stats->internal_pages) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "catalog tree statistics overflow at table '%s'",
+                         table_name);
+            }
+            return false;
+        }
+        collected.aggregate.total_rows += tree_stats->total_rows;
+        collected.aggregate.leaf_pages += tree_stats->leaf_pages;
+        collected.aggregate.internal_pages += tree_stats->internal_pages;
+        if (tree_stats->height > collected.aggregate.max_height) {
+            collected.aggregate.max_height = tree_stats->height;
+        }
+    }
+
+    *snapshot = collected;
+    if (message != NULL && message_size > 0u) {
+        snprintf(message,
+                 message_size,
+                 "ok: tables=%u rows=%u leaf_pages=%u internal_pages=%u max_height=%u",
+                 collected.aggregate.table_count,
+                 collected.aggregate.total_rows,
+                 collected.aggregate.leaf_pages,
+                 collected.aggregate.internal_pages,
+                 collected.aggregate.max_height);
+    }
+    return true;
+}
+
+/* Source-level catalog aggregate for diagnostics-aware callers. Preserve the
+ * historical aggregate-only API while delegating traversal/publication rules
+ * to the shared snapshot seam above. */
 static inline bool tinydb_get_database_tree_stats(
     Table* table,
     TinyDBDatabaseTreeStats* stats,
@@ -71,60 +151,14 @@ static inline bool tinydb_get_database_tree_stats(
         return false;
     }
 
-    TinyDBDatabaseTreeStats aggregate;
-    memset(&aggregate, 0, sizeof(aggregate));
-    aggregate.table_count = table->catalog.num_tables;
-
-    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
-        const char* table_name = table->catalog.schemas[i].name;
-        TinyDBTreeStats tree_stats;
-        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
-        if (!tinydb_get_tree_stats_diagnostic(table,
-                                               table_name,
-                                               &tree_stats,
-                                               tree_message,
-                                               sizeof(tree_message))) {
-            if (message != NULL && message_size > 0u) {
-                snprintf(message,
-                         message_size,
-                         "table '%s': %s",
-                         table_name,
-                         tree_message[0] != '\0'
-                             ? tree_message
-                             : "tree statistics unavailable");
-            }
-            return false;
-        }
-        if (UINT32_MAX - aggregate.total_rows < tree_stats.total_rows ||
-            UINT32_MAX - aggregate.leaf_pages < tree_stats.leaf_pages ||
-            UINT32_MAX - aggregate.internal_pages < tree_stats.internal_pages) {
-            if (message != NULL && message_size > 0u) {
-                snprintf(message,
-                         message_size,
-                         "catalog tree statistics overflow at table '%s'",
-                         table_name);
-            }
-            return false;
-        }
-        aggregate.total_rows += tree_stats.total_rows;
-        aggregate.leaf_pages += tree_stats.leaf_pages;
-        aggregate.internal_pages += tree_stats.internal_pages;
-        if (tree_stats.height > aggregate.max_height) {
-            aggregate.max_height = tree_stats.height;
-        }
+    TinyDBCatalogTreeStatsSnapshot snapshot;
+    if (!tinydb_get_catalog_tree_stats_snapshot(table,
+                                                &snapshot,
+                                                message,
+                                                message_size)) {
+        return false;
     }
-
-    *stats = aggregate;
-    if (message != NULL && message_size > 0u) {
-        snprintf(message,
-                 message_size,
-                 "ok: tables=%u rows=%u leaf_pages=%u internal_pages=%u max_height=%u",
-                 aggregate.table_count,
-                 aggregate.total_rows,
-                 aggregate.leaf_pages,
-                 aggregate.internal_pages,
-                 aggregate.max_height);
-    }
+    *stats = snapshot.aggregate;
     return true;
 }
 
