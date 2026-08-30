@@ -66,10 +66,10 @@ def read_bytes(path):
         return handle.read()
 
 
-def write_orphan_temp(epoch_path):
-    temporary = epoch_path + ".tmp"
+def write_orphan_temp(path, payload):
+    temporary = path + ".tmp"
     with open(temporary, "wb") as handle:
-        handle.write(b"interrupted-epoch-publication")
+        handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
     return temporary
@@ -106,8 +106,15 @@ def main():
         snapshots_before = set(glob.glob(db_path + "*.range"))
         if not snapshots_before:
             raise AssertionError("expected a persistent generic-index snapshot")
+        snapshot_path = next(iter(snapshots_before))
+        snapshot_bytes = read_bytes(snapshot_path)
 
-        orphan = write_orphan_temp(epoch_path)
+        orphan_epoch = write_orphan_temp(
+            epoch_path, b"interrupted-epoch-publication"
+        )
+        orphan_snapshot = write_orphan_temp(
+            snapshot_path, b"interrupted-range-publication"
+        )
         second = run_session(
             executable,
             db_path,
@@ -120,17 +127,25 @@ def main():
         if 20 not in projected_ids(second):
             raise AssertionError(second)
         require(second, "ok")
-        if os.path.exists(orphan):
+        if os.path.exists(orphan_epoch):
             raise AssertionError(
                 "read-side recovery must remove an orphan epoch publication temp file"
             )
+        if os.path.exists(orphan_snapshot):
+            raise AssertionError(
+                "read-side recovery must remove an orphan range publication temp file"
+            )
         if read_bytes(epoch_path) != before_read:
             raise AssertionError(
-                "discarding an orphan temp beside a valid epoch must not replace authority"
+                "discarding orphan temps beside valid metadata must not replace epoch authority"
+            )
+        if read_bytes(snapshot_path) != snapshot_bytes:
+            raise AssertionError(
+                "discarding a non-authoritative range temp must preserve the valid final snapshot"
             )
         if not snapshots_before.issubset(set(glob.glob(db_path + "*.range"))):
             raise AssertionError(
-                "valid snapshots must survive cleanup of a non-authoritative epoch temp"
+                "valid snapshots must survive cleanup of non-authoritative temp files"
             )
 
         before_interrupted_mutation = read_bytes(epoch_path)
@@ -184,7 +199,8 @@ def main():
                 "recovering a pre-replace interruption must retain the old epoch authority"
             )
 
-        orphan = write_orphan_temp(epoch_path)
+        orphan_epoch = write_orphan_temp(epoch_path, b"stale-epoch-temp")
+        orphan_snapshot = write_orphan_temp(snapshot_path, b"stale-range-temp")
         before_mutation = read_bytes(epoch_path)
         third = run_session(
             executable,
@@ -199,9 +215,13 @@ def main():
         if 20 not in projected_ids(third):
             raise AssertionError(third)
         require(third, "ok")
-        if os.path.exists(orphan):
+        if os.path.exists(orphan_epoch):
             raise AssertionError(
-                "mutation-side epoch barrier must remove an orphan publication temp"
+                "mutation-side epoch barrier must remove an orphan epoch publication temp"
+            )
+        if os.path.exists(orphan_snapshot):
+            raise AssertionError(
+                "mutation-side epoch barrier must remove an orphan range publication temp"
             )
         if read_bytes(epoch_path) == before_mutation:
             raise AssertionError("indexed mutation must still advance durable epoch authority")
@@ -220,9 +240,9 @@ def main():
         require(fourth, "ok")
 
         print(
-            "PASS: generic-index epoch publication fails closed before atomic replace; "
-            "orphan epoch temps are recovered without replacing valid authority, and "
-            "indexed rows remain correct across reopen."
+            "PASS: generic-index epoch barriers clean interrupted epoch and range snapshot "
+            "publications without replacing valid authority; failed epoch publication remains "
+            "fail-closed and indexed rows stay correct across reopen."
         )
     finally:
         cleanup(db_path)
