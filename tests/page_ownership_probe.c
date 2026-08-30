@@ -168,6 +168,14 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("whole-database diagnostics did not fail non-fatally under full pin pressure");
     }
+    if (tinydb_execute_sql(database, "PRAGMA table_info(archive);", &result) !=
+            TINYDB_SQL_SUCCESS ||
+        tinydb_execute_sql(database, "PRAGMA index_list(archive);", &result) !=
+            TINYDB_SQL_SUCCESS) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("catalog-only PRAGMAs unexpectedly required a free buffer frame");
+    }
     if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) !=
             TINYDB_SQL_EXECUTE_ERROR ||
         strstr(result.message, "buffer pool busy") == NULL) {
@@ -338,6 +346,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes catalog_stats_busy=yes catalog_check_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes catalog_stats_one_free_frame_success=yes catalog_check_one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes tree_stats_busy=yes catalog_stats_busy=yes catalog_check_busy=yes table_check_busy=yes one_free_frame_success=yes tree_stats_one_free_frame_success=yes catalog_stats_one_free_frame_success=yes catalog_check_one_free_frame_success=yes catalog_pragmas_full_pool_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
     return 0;
 }
