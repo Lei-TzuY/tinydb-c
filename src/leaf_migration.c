@@ -1,6 +1,7 @@
 #include "leaf_migration.h"
 
 #include "leaf_format.h"
+#include "row_envelope.h"
 #include "slotted_leaf_v2.h"
 
 #include <string.h>
@@ -176,6 +177,64 @@ bool tinydb_leaf_migrate_v1_to_v2(const void* source,
 
     if (tinydb_leaf_format_detect_page(scratch, sizeof(scratch)) !=
         TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        return false;
+    }
+
+    memcpy(destination, scratch, PAGE_USABLE_SIZE);
+    return true;
+}
+
+bool tinydb_leaf_migrate_v1_to_compact_v2(const void* source,
+                                           size_t source_capacity,
+                                           const TableSchema* schema,
+                                           void* destination,
+                                           size_t destination_capacity) {
+    char schema_message[TINYDB_RECORD_MESSAGE_MAX];
+    if (!full_page(source, source_capacity) ||
+        !full_page(destination, destination_capacity) ||
+        source == destination || schema == NULL || schema->row_size == 0u ||
+        schema->row_size > ROW_SIZE ||
+        !tinydb_record_payload_schema_supported(schema,
+                                                schema_message,
+                                                sizeof(schema_message)) ||
+        tinydb_leaf_format_detect_page(source, source_capacity) !=
+            TINYDB_LEAF_PAGE_FORMAT_FIXED_V1 ||
+        !v1_keys_strictly_increasing(source)) {
+        return false;
+    }
+
+    unsigned char scratch[PAGE_SIZE];
+    memset(scratch, 0, sizeof(scratch));
+    if (!tinydb_slotted_leaf_v2_init(scratch, sizeof(scratch))) return false;
+    copy_v1_identity_to_v2(source, scratch);
+
+    uint32_t count = v1_count(source);
+    for (uint32_t i = 0u; i < count; i++) {
+        TinyDBRecordPayload payload;
+        memset(&payload, 0, sizeof(payload));
+        payload.length = schema->row_size;
+        memcpy(payload.bytes, v1_value(source, i), payload.length);
+
+        unsigned char envelope[PAGE_SIZE];
+        uint32_t envelope_length = 0u;
+        if (!tinydb_row_envelope_encode_compact_v2(schema,
+                                                    &payload,
+                                                    envelope,
+                                                    sizeof(envelope),
+                                                    &envelope_length) ||
+            envelope_length == 0u || envelope_length > UINT16_MAX ||
+            !tinydb_slotted_leaf_v2_insert(scratch,
+                                           sizeof(scratch),
+                                           v1_key(source, i),
+                                           envelope,
+                                           (uint16_t)envelope_length)) {
+            return false;
+        }
+    }
+
+    if (tinydb_leaf_format_detect_page(scratch, sizeof(scratch)) !=
+        TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+        !tinydb_slotted_leaf_v2_validate(scratch, sizeof(scratch))) {
         return false;
     }
 
