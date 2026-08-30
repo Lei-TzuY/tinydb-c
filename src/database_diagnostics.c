@@ -288,3 +288,162 @@ bool tinydb_check_database(Table* table,
     }
     return true;
 }
+
+bool tinydb_get_catalog_tree_stats_snapshot(
+    Table* table,
+    TinyDBCatalogTreeStatsSnapshot* snapshot,
+    char* message,
+    size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (snapshot != NULL) memset(snapshot, 0, sizeof(*snapshot));
+    if (table == NULL || snapshot == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid catalog tree-stat arguments");
+        }
+        return false;
+    }
+
+    TinyDBCatalogTreeStatsSnapshot collected;
+    memset(&collected, 0, sizeof(collected));
+    collected.aggregate.table_count = table->catalog.num_tables;
+
+    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
+        const char* table_name = table->catalog.schemas[i].name;
+        TinyDBTreeStats* tree_stats = &collected.table_stats[i];
+        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+        if (!tinydb_get_tree_stats_diagnostic(table,
+                                               table_name,
+                                               tree_stats,
+                                               tree_message,
+                                               sizeof(tree_message))) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "table '%s': %s",
+                         table_name,
+                         tree_message[0] != '\0'
+                             ? tree_message
+                             : "tree statistics unavailable");
+            }
+            return false;
+        }
+        if (UINT32_MAX - collected.aggregate.total_rows < tree_stats->total_rows ||
+            UINT32_MAX - collected.aggregate.leaf_pages < tree_stats->leaf_pages ||
+            UINT32_MAX - collected.aggregate.internal_pages < tree_stats->internal_pages) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "catalog tree statistics overflow at table '%s'",
+                         table_name);
+            }
+            return false;
+        }
+        collected.aggregate.total_rows += tree_stats->total_rows;
+        collected.aggregate.leaf_pages += tree_stats->leaf_pages;
+        collected.aggregate.internal_pages += tree_stats->internal_pages;
+        if (tree_stats->height > collected.aggregate.max_height) {
+            collected.aggregate.max_height = tree_stats->height;
+        }
+    }
+
+    *snapshot = collected;
+    if (message != NULL && message_size > 0u) {
+        snprintf(message,
+                 message_size,
+                 "ok: tables=%u rows=%u leaf_pages=%u internal_pages=%u max_height=%u",
+                 collected.aggregate.table_count,
+                 collected.aggregate.total_rows,
+                 collected.aggregate.leaf_pages,
+                 collected.aggregate.internal_pages,
+                 collected.aggregate.max_height);
+    }
+    return true;
+}
+
+bool tinydb_get_database_tree_stats(
+    Table* table,
+    TinyDBDatabaseTreeStats* stats,
+    char* message,
+    size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (stats != NULL) memset(stats, 0, sizeof(*stats));
+    if (table == NULL || stats == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid database tree-stat arguments");
+        }
+        return false;
+    }
+
+    TinyDBCatalogTreeStatsSnapshot snapshot;
+    if (!tinydb_get_catalog_tree_stats_snapshot(table,
+                                                &snapshot,
+                                                message,
+                                                message_size)) {
+        return false;
+    }
+    *stats = snapshot.aggregate;
+    return true;
+}
+
+bool tinydb_check_catalog_trees(
+    Table* table,
+    TinyDBCatalogTreeCheck* result,
+    char* message,
+    size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (result != NULL) memset(result, 0, sizeof(*result));
+    if (table == NULL || result == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "invalid catalog tree-check arguments");
+        }
+        return false;
+    }
+    if (table->catalog.num_tables == 0u) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "catalog contains no table roots");
+        }
+        return false;
+    }
+
+    TinyDBCatalogTreeStatsSnapshot snapshot;
+    if (!tinydb_get_catalog_tree_stats_snapshot(table,
+                                                &snapshot,
+                                                message,
+                                                message_size)) {
+        return false;
+    }
+
+    TinyDBCatalogTreeCheck checked;
+    memset(&checked, 0, sizeof(checked));
+    checked.table_count = snapshot.aggregate.table_count;
+    memcpy(checked.table_stats,
+           snapshot.table_stats,
+           sizeof(checked.table_stats));
+
+    char ownership_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
+    if (!tinydb_check_page_ownership(table,
+                                     &checked.ownership,
+                                     ownership_message,
+                                     sizeof(ownership_message))) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message,
+                     message_size,
+                     "page ownership: %s",
+                     ownership_message[0] != '\0'
+                         ? ownership_message
+                         : "ownership validation failed");
+        }
+        return false;
+    }
+
+    *result = checked;
+    if (message != NULL && message_size > 0u) {
+        snprintf(message,
+                 message_size,
+                 "ok: tables=%u owned=%u free=%u",
+                 checked.table_count,
+                 checked.ownership.owned_pages,
+                 checked.ownership.free_pages);
+    }
+    return true;
+}
