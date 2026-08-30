@@ -54,6 +54,11 @@ static bool test_fail_before_catalog_persist(void) {
     return value != NULL && strcmp(value, "1") == 0;
 }
 
+static bool test_fail_after_storage_migration(void) {
+    const char* value = getenv("TINYDB_TEST_FAIL_ALTER_AFTER_STORAGE_MIGRATION");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
 static bool test_fail_catalog_save(void) {
     const char* value = getenv("TINYDB_TEST_FAIL_ALTER_CATALOG_SAVE");
     return value != NULL && strcmp(value, "1") == 0;
@@ -270,6 +275,17 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
         void* root = get_page(table->pager, target->root_page_num);
         memcpy(root, staged_root, PAGE_USABLE_SIZE);
         mark_page_dirty(table->pager, target->root_page_num);
+
+        /* The storage format upgrade is backward-readable with the old schema.
+         * Checkpoint it before the test interruption so recovery exercises the
+         * real crash window where physical migration is durable but catalog
+         * mutation has not started. */
+        if (test_fail_after_storage_migration()) {
+            db_checkpoint(table);
+            return fail_result(result,
+                               TINYDB_SQL_CATALOG_PERSIST_ERROR,
+                               "ALTER TABLE ADD COLUMN interrupted after physical row migration before schema mutation");
+        }
     }
 
     if (!table_add_column(table,
