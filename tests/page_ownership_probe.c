@@ -60,6 +60,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (tinydb_execute_sql(database, "PRAGMA user_version = 77;", &result) !=
+        TINYDB_SQL_SUCCESS) {
+        tinydb_close(database);
+        return fail("unable to seed user_version before pin-pressure test");
+    }
+
     Table* table = tinydb_table(database);
     pager_checkpoint(table->pager);
     if (table->pager->num_pages <= MAX_BUFFER_POOL_SIZE) {
@@ -133,6 +139,13 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("tree inspection unexpectedly completed with every frame pinned");
     }
+    if (tinydb_execute_sql(database, "PRAGMA user_version;", &result) !=
+            TINYDB_SQL_EXECUTE_ERROR ||
+        strstr(result.message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("PRAGMA user_version did not return non-fatal buffer-pool backpressure");
+    }
 
     if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
         (void)release_handles(owners, owner_count);
@@ -157,6 +170,13 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("tree inspection requires more than one free frame");
+    }
+    if (tinydb_execute_sql(database, "PRAGMA user_version;", &result) !=
+            TINYDB_SQL_SUCCESS ||
+        db_get_user_version(table) != 77u) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("PRAGMA user_version did not recover with one free frame");
     }
 
     if (!release_handles(owners, owner_count)) {
@@ -228,6 +248,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
     return 0;
 }
