@@ -20,6 +20,7 @@ set(TINYDB_CORE_SOURCES
     src/create_table_policy.c
     src/database_diagnostics.c
     src/diagnostics.c
+    src/diagnostics_inspection.c
     src/engine.c
     src/engine_open_guard.c
     src/generic_boolean.c
