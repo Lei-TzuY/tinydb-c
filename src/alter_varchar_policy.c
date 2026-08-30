@@ -124,9 +124,8 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
 
     TableSchema* target = find_schema(table, statement.alter_table.table_name);
     if (target == NULL) {
-        return fail_result(result,
-                           TINYDB_SQL_ROUTE_ERROR,
-                           "ALTER TABLE target table was not found");
+        /* Preserve the base ALTER route's public not-found diagnostic. */
+        return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
     if (ci_equal(target->name, "users") || fixed_row_shape(target)) {
         return fail_result(
