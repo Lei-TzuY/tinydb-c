@@ -6,17 +6,32 @@
 
 #define PAGE_COUNT (MAX_BUFFER_POOL_SIZE + 1u)
 #define MARKER_BASE 0x7A110000u
+#define DIRTY_MARKER 0xD17A5EEDu
 #define EXTRA_PAGE MAX_BUFFER_POOL_SIZE
 
 static uint32_t expected_marker(uint32_t page_num) {
     return MARKER_BASE ^ page_num;
 }
 
-static bool handle_marker_matches(PagerPageHandle* handle, uint32_t page_num) {
-    uint32_t marker = 0u;
+static bool handle_marker_equals(PagerPageHandle* handle, uint32_t marker) {
+    uint32_t actual = 0u;
     if (handle == NULL || !handle->pinned || handle->data == NULL) return false;
-    memcpy(&marker, handle->data, sizeof(marker));
-    return marker == expected_marker(page_num);
+    memcpy(&actual, handle->data, sizeof(actual));
+    return actual == marker;
+}
+
+static bool handle_marker_matches(PagerPageHandle* handle, uint32_t page_num) {
+    return handle_marker_equals(handle, expected_marker(page_num));
+}
+
+static bool spill_marker_equals(Pager* pager, uint32_t page_num, uint32_t marker) {
+    uint32_t actual = 0u;
+    if (pager == NULL || page_num >= pager->page_capacity ||
+        pager->dirty_page_spills[page_num] == NULL) {
+        return false;
+    }
+    memcpy(&actual, pager->dirty_page_spills[page_num], sizeof(actual));
+    return actual == marker;
 }
 
 int main(int argc, char** argv) {
@@ -110,12 +125,86 @@ int main(int argc, char** argv) {
     }
 
     if (!pager_try_close(pager)) {
-        fprintf(stderr, "try-pin exhaustion probe leaked ownership\n");
+        fprintf(stderr, "try-pin exhaustion phase leaked ownership\n");
+        return 1;
+    }
+
+    /*
+     * Reopen with an empty cache, make page zero the LRU victim, dirty it
+     * without touching its LRU position, then require the try-pin replacement
+     * path to preserve the uncommitted image in no-steal spill storage.
+     */
+    pager = pager_open(argv[1]);
+    pager_begin_transaction(pager);
+
+    void* dirty_page = get_page(pager, 0u);
+    for (uint32_t page_num = 1u; page_num < MAX_BUFFER_POOL_SIZE; page_num++) {
+        void* page = get_page(pager, page_num);
+        uint32_t marker = 0u;
+        memcpy(&marker, page, sizeof(marker));
+        if (marker != expected_marker(page_num)) {
+            fprintf(stderr, "reopen marker mismatch at page %u\n", page_num);
+            return 1;
+        }
+        pager_unpin_page(pager, page_num);
+    }
+    memcpy(dirty_page, &(uint32_t){DIRTY_MARKER}, sizeof(uint32_t));
+    mark_page_dirty(pager, 0u);
+    pager_unpin_page(pager, 0u);
+
+    evictions_before = pager->evictions;
+    PagerPageHandle spill_trigger;
+    if (pager_try_pin_existing_page_handle(pager, EXTRA_PAGE, &spill_trigger) !=
+            PAGER_TRY_PIN_OK ||
+        !handle_marker_matches(&spill_trigger, EXTRA_PAGE) ||
+        pager->evictions <= evictions_before ||
+        !spill_marker_equals(pager, 0u, DIRTY_MARKER)) {
+        fprintf(stderr, "try-pin did not preserve dirty LRU victim in spill storage\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&spill_trigger)) {
+        fprintf(stderr, "unable to release dirty-spill trigger handle\n");
+        return 1;
+    }
+
+    PagerPageHandle dirty_reload;
+    if (pager_try_pin_existing_page_handle(pager, 0u, &dirty_reload) !=
+            PAGER_TRY_PIN_OK ||
+        !handle_marker_equals(&dirty_reload, DIRTY_MARKER)) {
+        fprintf(stderr, "try-pin reloaded disk image instead of dirty spill\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&dirty_reload)) {
+        fprintf(stderr, "unable to release dirty reload handle\n");
+        return 1;
+    }
+
+    pager_rollback(pager);
+    if (pager->in_transaction) {
+        fprintf(stderr, "rollback did not finish after dirty spill phase\n");
+        return 1;
+    }
+
+    PagerPageHandle rolled_back;
+    if (pager_try_pin_existing_page_handle(pager, 0u, &rolled_back) !=
+            PAGER_TRY_PIN_OK ||
+        !handle_marker_matches(&rolled_back, 0u)) {
+        fprintf(stderr, "rollback did not restore persisted page-zero marker\n");
+        return 1;
+    }
+    if (!pager_release_page_handle(&rolled_back)) {
+        fprintf(stderr, "unable to release rollback verification handle\n");
+        return 1;
+    }
+
+    if (!pager_try_close(pager)) {
+        fprintf(stderr, "try-pin dirty-spill phase leaked ownership\n");
         return 1;
     }
 
     printf("PAGER_TRY_PIN_EXHAUSTION_OK all_pinned_busy=yes "
            "resident_hit=yes release_retry=yes invalid_page=yes "
-           "no_process_exit=yes checksum_marker=yes\n");
+           "no_process_exit=yes checksum_marker=yes dirty_spill=yes "
+           "spill_reload=yes rollback_restore=yes\n");
     return 0;
 }
