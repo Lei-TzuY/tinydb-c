@@ -52,6 +52,11 @@ static bool test_fail_before_catalog_persist(void) {
     return value != NULL && strcmp(value, "1") == 0;
 }
 
+static bool test_fail_catalog_save(void) {
+    const char* value = getenv("TINYDB_TEST_FAIL_ALTER_CATALOG_SAVE");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
 static bool fixed_row_shape(const TableSchema* schema) {
     return schema != NULL &&
            schema->num_columns == 3u &&
@@ -178,7 +183,6 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
 
     TableSchema* target = find_schema(table, statement.alter_table.table_name);
     if (target == NULL) {
-        /* Preserve the base ALTER route's public not-found diagnostic. */
         return tinydb_execute_sql_alter_delegate_base(database, sql, result);
     }
     if (ci_equal(target->name, "users") || fixed_row_shape(target)) {
@@ -202,16 +206,6 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
             "ALTER TABLE ADD COLUMN would exceed the schema-sized payload limit");
     }
 
-    /*
-     * Compact V2 rows carry their field count, logical length, and a schema
-     * fingerprint. For append-only evolution the decoder can reconstruct the
-     * historical schema from the current schema's unchanged prefix, verify the
-     * stored fingerprint, and materialize missing trailing columns as zero/empty
-     * defaults. Prove every existing row accepts the prospective schema before
-     * changing catalog metadata. Raw/migration-era rows, malformed envelopes,
-     * or non-prefix layouts fail the corruption-aware scan and keep ALTER
-     * fail-closed.
-     */
     if (target->row_size > ROW_SIZE) {
         char scan_message[TINYDB_RECORD_MESSAGE_MAX];
         if (!schema_rows_accept_appended_column(table,
@@ -243,17 +237,6 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
         }
     }
 
-    /*
-     * Generic secondary-index range snapshots are keyed by a durable mutation
-     * epoch. Schema evolution is a logical mutation even when existing compact
-     * V2 rows do not need to be rewritten: a later rebuild must decode those
-     * historical row generations through the new schema and materialize the
-     * appended defaults. Invalidate any snapshot for this table before the
-     * catalog mutation so no pre-ALTER sidecar can remain current under the new
-     * schema. A harmless extra invalidation is preferable to accepting stale
-     * candidates; failed DDL may therefore force a later rebuild without
-     * changing query results.
-     */
     if (!tinydb_generic_index_epoch_before_mutation(table, target)) {
         return fail_result(result,
                            TINYDB_SQL_EXECUTE_ERROR,
@@ -270,14 +253,6 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                            "ALTER TABLE ADD COLUMN failed");
     }
 
-    /*
-     * Keep an explicit rollback seam between the in-memory catalog mutation and
-     * durable catalog publication. This is also a deterministic crash-window
-     * injection point for regression tests. The index epoch may have advanced,
-     * which is safe: it only forces stale sidecars to rebuild. The authoritative
-     * table schema, however, must remain the pre-ALTER schema until publication
-     * is allowed to proceed.
-     */
     if (test_fail_before_catalog_persist()) {
         *target = schema_before_alter;
         return fail_result(result,
@@ -285,16 +260,18 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                            "ALTER TABLE ADD COLUMN interrupted before schema catalog publication");
     }
 
-    printf("Column '%s' added to table '%s'.\n",
-           statement.alter_table.new_col_name,
-           statement.alter_table.table_name);
-
     db_checkpoint(table);
-    if (!multitable_catalog_save(table, database->filename)) {
+    if (test_fail_catalog_save() ||
+        !multitable_catalog_save(table, database->filename)) {
+        *target = schema_before_alter;
         return fail_result(result,
                            TINYDB_SQL_CATALOG_PERSIST_ERROR,
                            "schema catalog could not be persisted");
     }
+
+    printf("Column '%s' added to table '%s'.\n",
+           statement.alter_table.new_col_name,
+           statement.alter_table.table_name);
 
     initialize_result(result, TINYDB_SQL_SUCCESS);
     if (result != NULL) {
