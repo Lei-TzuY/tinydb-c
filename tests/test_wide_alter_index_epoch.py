@@ -94,6 +94,10 @@ def corrupt_epoch(db_path):
         handle.write(b"corrupt-epoch")
 
 
+def remove_epoch(db_path):
+    os.remove(db_path + ".gidx.epoch")
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     executable = find_tinydb(repo_root)
@@ -214,15 +218,60 @@ def main():
         require_projected_id(sixth, 10)
         require_projected_id(sixth, 20)
         require(sixth, "ok")
+        snapshots_before_missing = range_snapshots(db_path)
+        if len(snapshots_before_missing) < 2:
+            raise AssertionError(
+                "both snapshots must exist before exercising the missing-epoch recovery path"
+            )
+
+        remove_epoch(db_path)
+        seventh = run_session(
+            executable,
+            db_path,
+            [
+                "SELECT id FROM wide_docs WHERE right_text = 'right-a';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+        )
+        require_projected_id(seventh, 10)
+        require(seventh, "ok")
+        read_epoch(db_path)
+
+        snapshots_after_missing = range_snapshots(db_path)
+        missing_removed = snapshots_before_missing - snapshots_after_missing
+        if not missing_removed:
+            raise AssertionError(
+                "recreating missing epoch metadata must purge unrelated stale generic-index snapshots "
+                "before publishing replacement epoch authority"
+            )
+        if not snapshots_after_missing:
+            raise AssertionError(
+                "the queried snapshot should rebuild after missing epoch authority is recreated"
+            )
+
+        eighth = run_session(
+            executable,
+            db_path,
+            [
+                "SELECT id FROM wide_docs WHERE tag = '';",
+                "SELECT id FROM wide_docs WHERE tag = 'new';",
+                "PRAGMA integrity_check;",
+                ".exit",
+            ],
+        )
+        require_projected_id(eighth, 10)
+        require_projected_id(eighth, 20)
+        require(eighth, "ok")
         if len(range_snapshots(db_path)) < 2:
             raise AssertionError(
-                "an unrelated purged snapshot must rebuild normally when its index is queried later"
+                "snapshots purged after missing epoch authority must rebuild normally on demand"
             )
 
         print(
-            "PASS: append-only wide schema evolution advances the generic index epoch, "
-            "and missing/corrupt epoch authority purges all persistent candidate snapshots "
-            "before a fresh epoch is published, preventing stale sidecar reuse."
+            "PASS: append-only wide schema evolution advances the generic index epoch; "
+            "missing/corrupt epoch authority purges every persistent candidate snapshot before "
+            "replacement authority is published, and snapshots rebuild safely on demand."
         )
     finally:
         cleanup(db_path)
