@@ -79,6 +79,14 @@ int main(int argc, char** argv) {
         return fail("clean database did not pass whole-database diagnostics");
     }
 
+    int archive_for_inspection = find_schema_index(table, "archive");
+    if (archive_for_inspection < 0) {
+        tinydb_close(database);
+        return fail("archive schema missing before inspection pressure test");
+    }
+    uint32_t archive_inspection_root =
+        table->catalog.schemas[archive_for_inspection].root_page_num;
+
     PagerPageHandle owners[MAX_BUFFER_POOL_SIZE];
     memset(owners, 0, sizeof(owners));
     uint32_t owner_count = 0u;
@@ -113,6 +121,18 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("whole-database diagnostics did not fail non-fatally under full pin pressure");
     }
+    if (tinydb_print_page_nonfatal(table, 0u)) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("page inspection unexpectedly succeeded with every frame pinned");
+    }
+    if (tinydb_print_tree_nonfatal(table->pager,
+                                   archive_inspection_root,
+                                   0u)) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("tree inspection unexpectedly completed with every frame pinned");
+    }
 
     if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
         (void)release_handles(owners, owner_count);
@@ -125,6 +145,18 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("diagnostics require more than one free frame");
+    }
+    if (!tinydb_print_page_nonfatal(table, 0u)) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("page inspection did not recover with one free frame");
+    }
+    if (!tinydb_print_tree_nonfatal(table->pager,
+                                    archive_inspection_root,
+                                    0u)) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("tree inspection requires more than one free frame");
     }
 
     if (!release_handles(owners, owner_count)) {
@@ -196,6 +228,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes\n");
     return 0;
 }
