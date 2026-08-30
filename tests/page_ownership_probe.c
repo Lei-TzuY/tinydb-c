@@ -127,6 +127,13 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return fail("whole-database diagnostics did not fail non-fatally under full pin pressure");
     }
+    if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) !=
+            TINYDB_SQL_EXECUTE_ERROR ||
+        strstr(result.message, "buffer pool busy") == NULL) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("PRAGMA integrity_check did not preserve non-fatal buffer-pool backpressure");
+    }
     if (tinydb_print_page_nonfatal(table, 0u)) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
@@ -158,6 +165,12 @@ int main(int argc, char** argv) {
         (void)release_handles(owners, owner_count);
         tinydb_close(database);
         return fail("diagnostics require more than one free frame");
+    }
+    if (tinydb_execute_sql(database, "PRAGMA integrity_check;", &result) !=
+        TINYDB_SQL_SUCCESS) {
+        (void)release_handles(owners, owner_count);
+        tinydb_close(database);
+        return fail("PRAGMA integrity_check did not recover with one free frame");
     }
     if (!tinydb_print_page_nonfatal(table, 0u)) {
         (void)release_handles(owners, owner_count);
@@ -248,6 +261,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
+    printf("PAGE_OWNERSHIP_OK diagnostic_pin_pressure=yes direct_ownership_busy=yes table_check_busy=yes one_free_frame_success=yes page_inspect_busy=yes tree_inspect_busy=yes inspection_one_free_frame_success=yes integrity_pragma_busy=yes integrity_pragma_one_free_frame_success=yes user_version_busy=yes user_version_one_free_frame_success=yes\n");
     return 0;
 }
