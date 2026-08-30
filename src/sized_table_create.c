@@ -85,6 +85,24 @@ static TableSchema* find_schema(Table* table, const char* name) {
     return NULL;
 }
 
+static void normalize_legacy_row_schema(TableSchema* schema) {
+    if (schema == NULL || schema->num_columns != 3u) return;
+
+    schema->columns[0].type = COL_TYPE_INT;
+    schema->columns[0].offset = ID_OFFSET;
+    schema->columns[0].size = ID_SIZE;
+
+    schema->columns[1].type = COL_TYPE_VARCHAR;
+    schema->columns[1].offset = USERNAME_OFFSET;
+    schema->columns[1].size = USERNAME_SIZE;
+
+    schema->columns[2].type = COL_TYPE_VARCHAR;
+    schema->columns[2].offset = EMAIL_OFFSET;
+    schema->columns[2].size = EMAIL_SIZE;
+
+    schema->row_size = ROW_SIZE;
+}
+
 static bool initialize_wide_v2_root(Table* table, const TableSchema* schema) {
     if (table == NULL || table->pager == NULL || schema == NULL ||
         schema->root_page_num >= table->pager->num_pages) {
@@ -130,13 +148,13 @@ bool table_create_table(Table* table,
         return false;
     }
 
+    const bool legacy_row = legacy_fixed_row_shape(num_cols,
+                                                    col_names,
+                                                    types,
+                                                    recognized_all);
     const bool executable_generic =
         recognized_all && ci_equal(col_names[0], "id") &&
-        types[0].type == COL_TYPE_INT &&
-        !legacy_fixed_row_shape(num_cols,
-                                col_names,
-                                types,
-                                recognized_all);
+        types[0].type == COL_TYPE_INT && !legacy_row;
     uint32_t validated_row_size = 0u;
     if (executable_generic) {
         for (uint32_t i = 0; i < num_cols; i++) {
@@ -166,7 +184,15 @@ bool table_create_table(Table* table,
     TableSchema* schema = find_schema(table, name);
     if (schema == NULL) return false;
 
-    if (has_explicit_width) {
+    if (legacy_row) {
+        /*
+         * The historical base creator records bare VARCHAR as 256 bytes for
+         * every text column, while the actual Row serializer is 4/33/256.
+         * Normalize the catalog immediately so routing and ALTER policy can
+         * recognize the ABI from physical metadata instead of column names.
+         */
+        normalize_legacy_row_schema(schema);
+    } else if (has_explicit_width) {
         uint32_t offset = 0;
         for (uint32_t i = 0; i < num_cols; i++) {
             if (recognized_all || types[i].storage_size != 0u) {
