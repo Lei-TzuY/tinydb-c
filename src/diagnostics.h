@@ -172,9 +172,10 @@ bool tinydb_check_page_ownership(Table* table,
                                  char* message,
                                  size_t message_size);
 
-/* Catalog-wide counterpart to tinydb_check_table_tree(). Every root is
- * structurally walked exactly once, page ownership is checked exactly once,
- * and results are published only after the complete catalog passes. */
+/* Catalog-wide counterpart to tinydb_check_table_tree(). Tree validation and
+ * per-table statistics reuse the same fail-closed catalog snapshot consumed by
+ * global .stats; page ownership is checked exactly once afterwards. Nothing is
+ * published until both phases have completed successfully. */
 static inline bool tinydb_check_catalog_trees(
     Table* table,
     TinyDBCatalogTreeCheck* result,
@@ -195,30 +196,20 @@ static inline bool tinydb_check_catalog_trees(
         return false;
     }
 
+    TinyDBCatalogTreeStatsSnapshot snapshot;
+    if (!tinydb_get_catalog_tree_stats_snapshot(table,
+                                                &snapshot,
+                                                message,
+                                                message_size)) {
+        return false;
+    }
+
     TinyDBCatalogTreeCheck checked;
     memset(&checked, 0, sizeof(checked));
-    checked.table_count = table->catalog.num_tables;
-
-    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
-        const char* table_name = table->catalog.schemas[i].name;
-        char tree_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
-        if (!tinydb_get_tree_stats_diagnostic(table,
-                                               table_name,
-                                               &checked.table_stats[i],
-                                               tree_message,
-                                               sizeof(tree_message))) {
-            if (message != NULL && message_size > 0u) {
-                snprintf(message,
-                         message_size,
-                         "table '%s': %s",
-                         table_name,
-                         tree_message[0] != '\0'
-                             ? tree_message
-                             : "tree validation failed");
-            }
-            return false;
-        }
-    }
+    checked.table_count = snapshot.aggregate.table_count;
+    memcpy(checked.table_stats,
+           snapshot.table_stats,
+           sizeof(checked.table_stats));
 
     char ownership_message[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
     if (!tinydb_check_page_ownership(table,
