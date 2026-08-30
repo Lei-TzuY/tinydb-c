@@ -237,7 +237,9 @@ TinyDBSqlStatus tinydb_execute_sql_prepared_delegate_base(
                     "ALTER TABLE ADD COLUMN cannot migrate this fixed root leaf to compact V2 without a split");
             }
             staged_fixed_root_migration = true;
-        } else if (root_format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2) {
+        } else if (root_format == TINYDB_LEAF_PAGE_FORMAT_SLOTTED_V2 ||
+                   (get_node_type(root) == NODE_INTERNAL &&
+                    is_node_root(root) && *node_parent(root) == 0u)) {
             char scan_message[TINYDB_RECORD_MESSAGE_MAX];
             if (!schema_rows_accept_appended_column(table,
                                                     target,
