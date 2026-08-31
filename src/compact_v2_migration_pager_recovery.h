@@ -7,16 +7,17 @@
 
 #include "compact_v2_migration_pager_reclaim.h"
 #include "compact_v2_migration_recovery.h"
+#include "fixed_v1_tree_reclaim.h"
 #include "pager.h"
 
 /*
  * Pager-backed adapter for the compact-V2 reopen recovery executor.
  *
  * Recovery starts with a fresh Pager transaction.  The staging-reclaim path is
- * implemented directly with the manifest-owned claimed-page primitive; the
- * old-tree path remains a topology-specific callback because reclaiming an old
- * arbitrary-depth tree requires a validated ownership walk rather than merely
- * freeing its root page.
+ * implemented directly with the manifest-owned claimed-page primitive.  The
+ * publication-success path now has a built-in fixed-V1 ownership walk for
+ * nonzero old roots; callers may still override it when a table uses a
+ * different topology or the reserved historical page-zero root.
  *
  * sync_reclaim is the durability boundary: it commits the allocator/tree
  * mutation and checkpoints it before manifest removal can begin.  If recovery
@@ -43,7 +44,7 @@ typedef struct TinyDBCompactV2MigrationPagerRecoveryAdapter {
 static inline bool tinydb_compact_v2_migration_pager_recovery_adapter_is_valid(
     const TinyDBCompactV2MigrationPagerRecoveryAdapter* adapter) {
     return adapter != NULL && adapter->pager != NULL &&
-           adapter->read_catalog != NULL && adapter->reclaim_old_tree != NULL &&
+           adapter->read_catalog != NULL &&
            adapter->remove_manifest != NULL && adapter->sync_parent != NULL;
 }
 
@@ -84,8 +85,11 @@ static inline bool tinydb_compact_v2_migration_pager_recovery_reclaim_old_tree(
         !adapter->pager->in_transaction) {
         return false;
     }
-    return adapter->reclaim_old_tree(
-        adapter->context, adapter->pager, old_root_page_num);
+    if (adapter->reclaim_old_tree != NULL) {
+        return adapter->reclaim_old_tree(
+            adapter->context, adapter->pager, old_root_page_num);
+    }
+    return tinydb_fixed_v1_tree_reclaim(adapter->pager, old_root_page_num);
 }
 
 static inline bool tinydb_compact_v2_migration_pager_recovery_sync_reclaim(
