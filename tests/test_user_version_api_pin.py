@@ -55,14 +55,20 @@ def main():
             "set_dirty=yes",
             "set_optional_message=yes",
             "set_persisted=yes",
+            "checkpoint_busy_nonfatal=yes",
+            "checkpoint_no_flush_on_busy=yes",
+            "checkpoint_dirty_spill=yes",
+            "checkpoint_one_free_frame_success=yes",
+            "checkpoint_optional_message=yes",
+            "checkpoint_persisted=yes",
         ):
             assert marker in result.stdout, output
 
         print(
-            "PASS: linked user_version try-get/try-set APIs return non-fatal "
-            "buffer-pool backpressure, keep value 77 unchanged on BUSY, update and "
-            "dirty the root with one free frame, support omitted diagnostics, and "
-            "persist the successful value across checkpoint/reopen"
+            "PASS: linked user_version try-get/try-set and Pager try-checkpoint "
+            "APIs return non-fatal buffer-pool backpressure, preserve a nonresident "
+            "dirty-spill root without flushing on BUSY, recover with exactly one "
+            "free frame, support omitted diagnostics, and persist successful values"
         )
     finally:
         cleanup(db_path)
