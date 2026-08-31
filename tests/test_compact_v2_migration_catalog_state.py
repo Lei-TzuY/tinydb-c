@@ -102,7 +102,19 @@ def main():
                 print("SKIP: C compiler not available")
                 return 0
             exe = os.path.join(tmp, "probe")
-            command = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", f"-I{src}", probe, "-o", exe]
+            command = [
+                compiler,
+                "-std=c11",
+                "-D_XOPEN_SOURCE=700",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pthread",
+                f"-I{src}",
+                probe,
+                "-o",
+                exe,
+            ]
 
         build = subprocess.run(command, capture_output=True, text=True, timeout=120)
         if build.returncode != 0:
