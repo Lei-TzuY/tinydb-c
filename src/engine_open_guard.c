@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "schema_catalog_authoritative_state.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,5 +28,18 @@ TinyDB* tinydb_open(const char* filename) {
         free(database);
         return NULL;
     }
+
+    TinyDBSchemaCatalogGenerationSnapshot authoritative_generation;
+    if (!tinydb_schema_catalog_load_authoritative_generation(
+            database->table,
+            database->filename,
+            &authoritative_generation)) {
+        printf("Error: authoritative schema generation state could not be loaded safely.\n");
+        db_close(database->table);
+        database->table = NULL;
+        free(database);
+        return NULL;
+    }
+
     return database;
 }
