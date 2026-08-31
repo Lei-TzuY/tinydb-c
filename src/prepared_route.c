@@ -3,6 +3,7 @@
 #include "engine.h"
 #include "generic_sql.h"
 #include "record_payload_try_find.h"
+#include "record_payload_try_scan.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -21,10 +22,10 @@ typedef struct {
 } TinyDBPreparedRouteEntry;
 
 typedef enum {
-    TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE = 0,
-    TINYDB_PK_SELECT_PREFLIGHT_READY,
-    TINYDB_PK_SELECT_PREFLIGHT_ERROR
-} TinyDBPkSelectPreflightStatus;
+    TINYDB_SELECT_PREFLIGHT_NOT_APPLICABLE = 0,
+    TINYDB_SELECT_PREFLIGHT_READY,
+    TINYDB_SELECT_PREFLIGHT_ERROR
+} TinyDBSelectPreflightStatus;
 
 static TinyDBPreparedRouteEntry prepared_routes[TINYDB_PREPARED_ROUTE_CAPACITY];
 static uint32_t prepared_route_count = 0;
@@ -68,6 +69,25 @@ static void initialize_pk_select_backpressure_error(TinyDBSqlResult* result,
                  : "unknown payload-read error");
 }
 
+static void initialize_scan_select_backpressure_error(TinyDBSqlResult* result,
+                                                      const char* detail) {
+    if (result == NULL) return;
+    memset(result, 0, sizeof(*result));
+    result->status = TINYDB_SQL_EXECUTE_ERROR;
+    result->prepare_result = PREPARE_SUCCESS;
+    result->execute_result = EXECUTE_SUCCESS;
+    result->route_result = MULTITABLE_ROUTE_NOT_APPLICABLE;
+    result->statement_type = STATEMENT_SELECT;
+    result->statement_type_valid = true;
+    result->executed = false;
+    snprintf(result->message,
+             sizeof(result->message),
+             "generic table-scan SELECT could not complete safely: %.160s",
+             detail != NULL && detail[0] != '\0'
+                 ? detail
+                 : "unknown payload-scan error");
+}
+
 static bool sql_starts_with_select(const char* sql) {
     if (sql == NULL) return false;
     while (isspace((unsigned char)*sql)) sql++;
@@ -106,51 +126,104 @@ static bool parse_plan_primary_key(const char* text, uint32_t* id) {
     return true;
 }
 
-static TinyDBPkSelectPreflightStatus preflight_generic_primary_key_select(
+static bool buffer_pool_has_replaceable_frame(Table* table) {
+    if (table == NULL || table->pager == NULL) return false;
+
+    Pager* pager = table->pager;
+    bool replaceable = false;
+    db_rwlock_rdlock(&pager->pager_lock);
+    for (int i = 0; i < MAX_BUFFER_POOL_SIZE; i++) {
+        if (pager->frames[i].page_num == INVALID_PAGE_NUM ||
+            pager->frames[i].pin_count == 0u) {
+            replaceable = true;
+            break;
+        }
+    }
+    db_rwlock_rdunlock(&pager->pager_lock);
+    return replaceable;
+}
+
+static TinyDBSelectPreflightStatus preflight_generic_select(
     Table* table,
     const char* sql,
     TinyDBSqlResult* result) {
-    if (table == NULL || !sql_starts_with_select(sql)) {
-        return TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE;
+    if (table == NULL || table->pager == NULL || !sql_starts_with_select(sql)) {
+        return TINYDB_SELECT_PREFLIGHT_NOT_APPLICABLE;
     }
 
     TinyDBGenericSelectPlan plan;
     TinyDBGenericSqlResult plan_result;
     TinyDBGenericSqlStatus plan_status = tinydb_generic_sql_build_select_plan(
         table, sql, &plan, &plan_result);
-    if (plan_status != TINYDB_GENERIC_SQL_SUCCESS || !plan.applicable ||
-        plan.kind != TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP) {
-        return TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE;
+    if (plan_status != TINYDB_GENERIC_SQL_SUCCESS || !plan.applicable) {
+        return TINYDB_SELECT_PREFLIGHT_NOT_APPLICABLE;
     }
 
     TableSchema* schema = find_plan_schema(table, plan.table_name);
-    uint32_t id = 0u;
     char message[TINYDB_RECORD_MESSAGE_MAX];
     if (schema == NULL ||
-        !parse_plan_primary_key(plan.filter_value, &id) ||
         !tinydb_record_payload_schema_supported(schema,
                                                 message,
                                                 sizeof(message))) {
-        return TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE;
+        return TINYDB_SELECT_PREFLIGHT_NOT_APPLICABLE;
     }
 
-    TinyDBRecordPayload payload;
+    if (plan.kind == TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP) {
+        uint32_t id = 0u;
+        if (!parse_plan_primary_key(plan.filter_value, &id)) {
+            return TINYDB_SELECT_PREFLIGHT_NOT_APPLICABLE;
+        }
+
+        TinyDBRecordPayload payload;
+        message[0] = '\0';
+        if (tinydb_record_payload_try_find(table,
+                                           schema,
+                                           id,
+                                           &payload,
+                                           message,
+                                           sizeof(message))) {
+            return TINYDB_SELECT_PREFLIGHT_READY;
+        }
+
+        if (strcmp(message, "primary key not found") == 0) {
+            return TINYDB_SELECT_PREFLIGHT_READY;
+        }
+
+        initialize_pk_select_backpressure_error(result, message);
+        return TINYDB_SELECT_PREFLIGHT_ERROR;
+    }
+
+    if (plan.kind != TINYDB_GENERIC_PLAN_FULL_SCAN) {
+        return TINYDB_SELECT_PREFLIGHT_NOT_APPLICABLE;
+    }
+
+    /*
+     * Avoid doubling every normal table scan. Historical get_page()-based
+     * traversal can make progress as long as at least one frame is replaceable,
+     * so only run the full non-fatal traversal proof when all resident frames
+     * are externally owned. Under that static pressure state the safe scan also
+     * catches the harder case where the root is resident but a later leaf miss
+     * would otherwise reach the fatal legacy fetch path.
+     */
+    if (buffer_pool_has_replaceable_frame(table)) {
+        return TINYDB_SELECT_PREFLIGHT_READY;
+    }
+
+    bool scan_complete = false;
     message[0] = '\0';
-    if (tinydb_record_payload_try_find(table,
-                                       schema,
-                                       id,
-                                       &payload,
-                                       message,
-                                       sizeof(message))) {
-        return TINYDB_PK_SELECT_PREFLIGHT_READY;
+    (void)tinydb_record_payload_try_scan(table,
+                                         schema,
+                                         NULL,
+                                         NULL,
+                                         &scan_complete,
+                                         message,
+                                         sizeof(message));
+    if (scan_complete) {
+        return TINYDB_SELECT_PREFLIGHT_READY;
     }
 
-    if (strcmp(message, "primary key not found") == 0) {
-        return TINYDB_PK_SELECT_PREFLIGHT_READY;
-    }
-
-    initialize_pk_select_backpressure_error(result, message);
-    return TINYDB_PK_SELECT_PREFLIGHT_ERROR;
+    initialize_scan_select_backpressure_error(result, message);
+    return TINYDB_SELECT_PREFLIGHT_ERROR;
 }
 
 static TinyDBSqlStatus map_analyze_result(
@@ -302,9 +375,9 @@ static TinyDBSqlStatus execute_with_prepared_routing(
         return map_analyze_result(analyze_status, &analyze_result, result);
     }
 
-    TinyDBPkSelectPreflightStatus preflight =
-        preflight_generic_primary_key_select(database->table, sql, result);
-    if (preflight == TINYDB_PK_SELECT_PREFLIGHT_ERROR) {
+    TinyDBSelectPreflightStatus preflight =
+        preflight_generic_select(database->table, sql, result);
+    if (preflight == TINYDB_SELECT_PREFLIGHT_ERROR) {
         return TINYDB_SQL_EXECUTE_ERROR;
     }
 
