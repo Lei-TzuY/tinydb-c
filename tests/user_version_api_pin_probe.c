@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "pager_try_checkpoint.h"
 #include "user_version.h"
 
 #include <stdio.h>
@@ -134,6 +135,60 @@ int main(int argc, char** argv) {
         return fail(database, "try-set value 88 was not observable after mutation");
     }
 
+    /* Refill the one replaceable frame with page 16. The dirty root is the
+     * only unpinned resident frame, so this must evict it through the no-steal
+     * spill path and leave all sixteen frames externally owned. */
+    if (!pager_pin_page_handle(table->pager,
+                               MAX_BUFFER_POOL_SIZE,
+                               &owners[MAX_BUFFER_POOL_SIZE - 1u])) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "unable to refill the final pressure frame");
+    }
+    if (table->pager->page_table[table->root_page_num] != -1 ||
+        table->pager->dirty_page_spills[table->root_page_num] == NULL ||
+        !pager_page_is_dirty(table->pager, table->root_page_num)) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "dirty root was not evicted into the no-steal spill");
+    }
+
+    memset(message, 0, sizeof(message));
+    if (pager_try_checkpoint(table->pager, message, sizeof(message))) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-checkpoint unexpectedly succeeded with every frame pinned");
+    }
+    if (strstr(message, "buffer pool busy") == NULL ||
+        !pager_page_is_dirty(table->pager, table->root_page_num) ||
+        table->pager->page_table[table->root_page_num] != -1) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-checkpoint did not fail closed before flushing dirty root");
+    }
+
+    if (!pager_release_page_handle(&owners[MAX_BUFFER_POOL_SIZE - 1u])) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "unable to release one checkpoint pressure owner");
+    }
+
+    memset(message, 0, sizeof(message));
+    if (!pager_try_checkpoint(table->pager, message, sizeof(message)) ||
+        message[0] != '\0') {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "try-checkpoint did not recover with one free frame");
+    }
+    if (pager_page_is_dirty(table->pager, table->root_page_num)) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "successful try-checkpoint left root dirty");
+    }
+
+    version = 0u;
+    if (!db_try_get_user_version(table,
+                                 &version,
+                                 message,
+                                 sizeof(message)) ||
+        version != 88u) {
+        (void)release_handles(owners, owner_count);
+        return fail(database, "checkpointed value 88 was not observable with one free frame");
+    }
+
     if (!release_handles(owners, owner_count)) {
         return fail(database, "unable to release pin-pressure owners");
     }
@@ -148,7 +203,9 @@ int main(int argc, char** argv) {
         return fail(database, "message-less try-set value 99 was not observable");
     }
 
-    pager_checkpoint(table->pager);
+    if (!pager_try_checkpoint(table->pager, NULL, 0u)) {
+        return fail(database, "message-less try-checkpoint failed without pin pressure");
+    }
     tinydb_close(database);
     database = tinydb_open(argv[1]);
     if (database == NULL) return fail(NULL, "unable to reopen checkpointed database");
@@ -160,6 +217,6 @@ int main(int argc, char** argv) {
     }
 
     tinydb_close(database);
-    printf("USER_VERSION_API_PIN_OK busy_nonfatal=yes zero_on_failure=yes one_free_frame_success=yes value_preserved=yes optional_message=yes set_busy_nonfatal=yes set_no_mutation_on_busy=yes set_one_free_frame_success=yes set_dirty=yes set_optional_message=yes set_persisted=yes\n");
+    printf("USER_VERSION_API_PIN_OK busy_nonfatal=yes zero_on_failure=yes one_free_frame_success=yes value_preserved=yes optional_message=yes set_busy_nonfatal=yes set_no_mutation_on_busy=yes set_one_free_frame_success=yes set_dirty=yes set_optional_message=yes set_persisted=yes checkpoint_busy_nonfatal=yes checkpoint_no_flush_on_busy=yes checkpoint_dirty_spill=yes checkpoint_one_free_frame_success=yes checkpoint_optional_message=yes checkpoint_persisted=yes\n");
     return 0;
 }
