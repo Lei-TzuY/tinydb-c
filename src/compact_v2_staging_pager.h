@@ -112,6 +112,59 @@ static inline bool tinydb_compact_v2_staging_pager_claims_match_hierarchy(
     return true;
 }
 
+/*
+ * Re-read every Pager-backed staging page before exposing its root identity.
+ * The private hierarchy has already passed full topology validation; exact
+ * byte equality therefore proves that the transaction-scoped Pager images
+ * preserve the same sibling, parent/child, separator, and compact-row bytes.
+ * This remains an in-transaction verification seam and performs no durable or
+ * catalog publication.
+ */
+static inline bool tinydb_compact_v2_staging_pager_verify_materialized_hierarchy(
+    Pager* pager,
+    const TinyDBCompactV2StagingHierarchy* hierarchy,
+    const uint32_t* claimed_pages,
+    uint32_t claimed_count) {
+    if (pager == NULL || !pager->in_transaction ||
+        !tinydb_compact_v2_staging_pager_claims_match_hierarchy(
+            hierarchy, claimed_pages, claimed_count)) {
+        return false;
+    }
+
+    for (uint32_t i = 0u; i < claimed_count; i++) {
+        uint32_t page_num = claimed_pages[i];
+        if (page_num >= pager->num_pages) return false;
+        for (uint32_t free_index = 0u;
+             free_index < pager->free_page_count;
+             free_index++) {
+            if (pager->free_pages[free_index] == page_num) return false;
+        }
+    }
+
+    for (uint32_t i = 0u; i < hierarchy->leaves->page_count; i++) {
+        uint32_t page_num = hierarchy->leaves->page_numbers[i];
+        const unsigned char* expected =
+            tinydb_compact_v2_staging_page_const(hierarchy->leaves, i);
+        const void* actual = get_page(pager, page_num);
+        if (expected == NULL || actual == NULL ||
+            memcmp(actual, expected, PAGE_SIZE) != 0) {
+            return false;
+        }
+    }
+
+    for (uint32_t i = 0u; i < hierarchy->internal_count; i++) {
+        uint32_t page_num = hierarchy->internal_page_numbers[i];
+        const unsigned char* expected =
+            tinydb_compact_v2_staging_internal_page_const(hierarchy, i);
+        const void* actual = get_page(pager, page_num);
+        if (expected == NULL || actual == NULL ||
+            memcmp(actual, expected, PAGE_SIZE) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static inline bool tinydb_compact_v2_staging_pager_materialize_hierarchy(
     Pager* pager,
     const TinyDBCompactV2StagingHierarchy* hierarchy,
@@ -155,6 +208,12 @@ static inline bool tinydb_compact_v2_staging_pager_materialize_hierarchy(
         if (source == NULL || destination == NULL) return false;
         memcpy(destination, source, PAGE_SIZE);
         mark_page_dirty(pager, page_num);
+    }
+
+    /* Never expose a root identity until Pager readback matches the private tree. */
+    if (!tinydb_compact_v2_staging_pager_verify_materialized_hierarchy(
+            pager, hierarchy, claimed_pages, claimed_count)) {
+        return false;
     }
 
     if (staged_root_page_num != NULL) {
