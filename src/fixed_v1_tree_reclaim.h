@@ -18,10 +18,11 @@
  * reclaim primitive.  This prevents a corrupt/cyclic old tree from being
  * partially freed before recovery discovers the corruption.
  *
- * Page zero is reserved by the Pager free-list format and therefore is not a
- * supported old-root identity for this built-in reclaim path.  Callers that
- * migrate the historical page-zero root must use a dedicated page-zero handoff
- * protocol rather than silently leaking or freeing the reserved page.
+ * Page zero is permanently reserved by the Pager free-list format.  Historical
+ * page-zero roots therefore use a retirement protocol: validate the complete
+ * old tree first, reclaim every nonzero descendant transactionally, then turn
+ * page zero into an empty rooted leaf tombstone.  The tombstone makes retries
+ * idempotent without ever inserting page zero into the durable free list.
  */
 
 typedef struct TinyDBFixedV1TreeOwnership {
@@ -42,6 +43,12 @@ static inline uint32_t tinydb_fixed_v1_read_u32(const void* page,
     uint32_t value = 0u;
     memcpy(&value, (const uint8_t*)page + offset, sizeof(value));
     return value;
+}
+
+static inline void tinydb_fixed_v1_write_u32(void* page,
+                                              uint32_t offset,
+                                              uint32_t value) {
+    memcpy((uint8_t*)page + offset, &value, sizeof(value));
 }
 
 static inline bool tinydb_fixed_v1_tree_page_is_free(Pager* pager,
@@ -71,9 +78,10 @@ static inline bool tinydb_fixed_v1_tree_unpin_read(PagerPageHandle* handle) {
     return unlocked && released;
 }
 
-static inline bool tinydb_fixed_v1_tree_collect_ownership(
+static inline bool tinydb_fixed_v1_tree_collect_ownership_impl(
     Pager* pager,
     uint32_t root_page_num,
+    bool allow_page_zero_root,
     TinyDBFixedV1TreeOwnership* ownership_out) {
     uint32_t num_pages;
     uint32_t* queue = NULL;
@@ -96,7 +104,8 @@ static inline bool tinydb_fixed_v1_tree_collect_ownership(
         ownership_out->page_count = 0u;
     }
     if (pager == NULL || ownership_out == NULL || !pager->in_transaction ||
-        root_page_num == 0u || root_page_num == INVALID_PAGE_NUM) {
+        root_page_num == INVALID_PAGE_NUM ||
+        (root_page_num == 0u && !allow_page_zero_root)) {
         return false;
     }
 
@@ -185,7 +194,7 @@ static inline bool tinydb_fixed_v1_tree_collect_ownership(
                 subtree_max[page_num] = key;
                 previous_key = key;
             }
-            if (cell_count > 0u) {
+            if (cell_count > 0u || page_num == root_page_num) {
                 resolved[page_num] = 1u;
                 resolved_count++;
             }
@@ -319,10 +328,15 @@ static inline bool tinydb_fixed_v1_tree_collect_ownership(
         if (leftmost_count != 1u) goto cleanup;
 
         uint32_t chain_count = 0u;
-        uint32_t current = leftmost;
-        while (current != 0u) {
-            if (++chain_count > leaf_count) goto cleanup;
-            current = leaf_next[current];
+        if (leftmost == 0u && root_page_num == 0u && leaf_count == 1u &&
+            node_type[0u] == (uint8_t)NODE_LEAF && leaf_next[0u] == 0u) {
+            chain_count = 1u;
+        } else {
+            uint32_t current = leftmost;
+            while (current != 0u) {
+                if (++chain_count > leaf_count) goto cleanup;
+                current = leaf_next[current];
+            }
         }
         if (chain_count != leaf_count) goto cleanup;
     }
@@ -346,12 +360,89 @@ cleanup:
     return valid;
 }
 
+static inline bool tinydb_fixed_v1_tree_collect_ownership(
+    Pager* pager,
+    uint32_t root_page_num,
+    TinyDBFixedV1TreeOwnership* ownership_out) {
+    return tinydb_fixed_v1_tree_collect_ownership_impl(
+        pager, root_page_num, false, ownership_out);
+}
+
+static inline bool tinydb_fixed_v1_page_zero_is_retired(Pager* pager) {
+    PagerPageHandle handle;
+    if (pager == NULL || pager->num_pages == 0u ||
+        !tinydb_fixed_v1_tree_pin_read(pager, 0u, &handle)) {
+        return false;
+    }
+    const uint8_t* page = (const uint8_t*)handle.data;
+    bool retired = page[NODE_TYPE_OFFSET] == (uint8_t)NODE_LEAF &&
+                   page[IS_ROOT_OFFSET] != 0u &&
+                   tinydb_fixed_v1_read_u32(page, PARENT_POINTER_OFFSET) == 0u &&
+                   tinydb_fixed_v1_read_u32(page, LEAF_NODE_NUM_CELLS_OFFSET) == 0u &&
+                   tinydb_fixed_v1_read_u32(page, LEAF_NODE_PREV_LEAF_OFFSET) == 0u &&
+                   tinydb_fixed_v1_read_u32(page, LEAF_NODE_NEXT_LEAF_OFFSET) == 0u;
+    if (!tinydb_fixed_v1_tree_unpin_read(&handle)) return false;
+    return retired;
+}
+
+static inline bool tinydb_fixed_v1_tree_retire_page_zero_root(Pager* pager) {
+    TinyDBFixedV1TreeOwnership ownership = {NULL, 0u};
+    PagerPageHandle root_handle;
+    bool reclaimed = true;
+    bool wrote_root = false;
+
+    if (pager == NULL || !pager->in_transaction || pager->num_pages == 0u) {
+        return false;
+    }
+
+    /* A checkpointed tombstone proves an earlier retirement already finished. */
+    if (tinydb_fixed_v1_page_zero_is_retired(pager)) return true;
+
+    if (!tinydb_fixed_v1_tree_collect_ownership_impl(
+            pager, 0u, true, &ownership) || ownership.page_count == 0u ||
+        ownership.pages[0] != 0u) {
+        tinydb_fixed_v1_tree_ownership_destroy(&ownership);
+        return false;
+    }
+
+    if (ownership.page_count > 1u) {
+        reclaimed = tinydb_compact_v2_migration_pager_reclaim_claims(
+            pager, ownership.pages + 1u, ownership.page_count - 1u);
+    }
+    if (!reclaimed || !pager_pin_page_handle(pager, 0u, &root_handle)) {
+        tinydb_fixed_v1_tree_ownership_destroy(&ownership);
+        return false;
+    }
+    if (!pager_page_handle_acquire_write(&root_handle)) {
+        (void)pager_release_page_handle(&root_handle);
+        tinydb_fixed_v1_tree_ownership_destroy(&ownership);
+        return false;
+    }
+
+    uint8_t* root = (uint8_t*)root_handle.data;
+    root[NODE_TYPE_OFFSET] = (uint8_t)NODE_LEAF;
+    root[IS_ROOT_OFFSET] = 1u;
+    tinydb_fixed_v1_write_u32(root, PARENT_POINTER_OFFSET, 0u);
+    tinydb_fixed_v1_write_u32(root, LEAF_NODE_NUM_CELLS_OFFSET, 0u);
+    tinydb_fixed_v1_write_u32(root, LEAF_NODE_NEXT_LEAF_OFFSET, 0u);
+    tinydb_fixed_v1_write_u32(root, LEAF_NODE_PREV_LEAF_OFFSET, 0u);
+    mark_page_dirty(pager, 0u);
+    wrote_root = pager_page_handle_release_write(&root_handle);
+    if (!pager_release_page_handle(&root_handle)) wrote_root = false;
+
+    tinydb_fixed_v1_tree_ownership_destroy(&ownership);
+    return wrote_root;
+}
+
 static inline bool tinydb_fixed_v1_tree_reclaim(Pager* pager,
                                                  uint32_t old_root_page_num) {
     TinyDBFixedV1TreeOwnership ownership = {NULL, 0u};
-    if (pager == NULL || !pager->in_transaction || old_root_page_num == 0u ||
+    if (pager == NULL || !pager->in_transaction ||
         old_root_page_num == INVALID_PAGE_NUM) {
         return false;
+    }
+    if (old_root_page_num == 0u) {
+        return tinydb_fixed_v1_tree_retire_page_zero_root(pager);
     }
 
     /* A previously checkpointed reclaim is an idempotent success on retry. */
