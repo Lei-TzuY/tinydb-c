@@ -1,8 +1,13 @@
 #include "analyze_sql.h"
 #include "diagnostics.h"
 #include "engine.h"
+#include "generic_sql.h"
+#include "record_payload_try_find.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TINYDB_PREPARED_ROUTE_CAPACITY 16u
@@ -14,6 +19,12 @@ typedef struct {
     char name[32];
     char sql_template[TINYDB_PREPARED_ROUTE_SQL_MAX];
 } TinyDBPreparedRouteEntry;
+
+typedef enum {
+    TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE = 0,
+    TINYDB_PK_SELECT_PREFLIGHT_READY,
+    TINYDB_PK_SELECT_PREFLIGHT_ERROR
+} TinyDBPkSelectPreflightStatus;
 
 static TinyDBPreparedRouteEntry prepared_routes[TINYDB_PREPARED_ROUTE_CAPACITY];
 static uint32_t prepared_route_count = 0;
@@ -36,6 +47,110 @@ static void initialize_error_result(TinyDBSqlResult* result,
     result->statement_type_valid = true;
     result->executed = false;
     snprintf(result->message, sizeof(result->message), "%s", message);
+}
+
+static void initialize_pk_select_backpressure_error(TinyDBSqlResult* result,
+                                                    const char* detail) {
+    if (result == NULL) return;
+    memset(result, 0, sizeof(*result));
+    result->status = TINYDB_SQL_EXECUTE_ERROR;
+    result->prepare_result = PREPARE_SUCCESS;
+    result->execute_result = EXECUTE_SUCCESS;
+    result->route_result = MULTITABLE_ROUTE_NOT_APPLICABLE;
+    result->statement_type = STATEMENT_SELECT;
+    result->statement_type_valid = true;
+    result->executed = false;
+    snprintf(result->message,
+             sizeof(result->message),
+             "generic primary-key SELECT could not complete safely: %.160s",
+             detail != NULL && detail[0] != '\0'
+                 ? detail
+                 : "unknown payload-read error");
+}
+
+static bool sql_starts_with_select(const char* sql) {
+    if (sql == NULL) return false;
+    while (isspace((unsigned char)*sql)) sql++;
+
+    const char* expected = "select";
+    while (*expected != '\0' && *sql != '\0' &&
+           tolower((unsigned char)*sql) == (unsigned char)*expected) {
+        sql++;
+        expected++;
+    }
+    if (*expected != '\0') return false;
+    return !isalnum((unsigned char)*sql) && *sql != '_';
+}
+
+static TableSchema* find_plan_schema(Table* table, const char* table_name) {
+    if (table == NULL || table_name == NULL || table_name[0] == '\0') {
+        return NULL;
+    }
+    for (uint32_t i = 0u; i < table->catalog.num_tables; i++) {
+        if (strcmp(table->catalog.schemas[i].name, table_name) == 0) {
+            return &table->catalog.schemas[i];
+        }
+    }
+    return NULL;
+}
+
+static bool parse_plan_primary_key(const char* text, uint32_t* id) {
+    if (text == NULL || text[0] == '\0' || id == NULL) return false;
+    errno = 0;
+    char* end = NULL;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || parsed > UINT32_MAX) return false;
+    while (isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return false;
+    *id = (uint32_t)parsed;
+    return true;
+}
+
+static TinyDBPkSelectPreflightStatus preflight_generic_primary_key_select(
+    Table* table,
+    const char* sql,
+    TinyDBSqlResult* result) {
+    if (table == NULL || !sql_starts_with_select(sql)) {
+        return TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE;
+    }
+
+    TinyDBGenericSelectPlan plan;
+    TinyDBGenericSqlResult plan_result;
+    TinyDBGenericSqlStatus plan_status = tinydb_generic_sql_build_select_plan(
+        table, sql, &plan, &plan_result);
+    if (plan_status != TINYDB_GENERIC_SQL_SUCCESS || !plan.applicable ||
+        plan.kind != TINYDB_GENERIC_PLAN_PRIMARY_KEY_LOOKUP) {
+        return TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE;
+    }
+
+    TableSchema* schema = find_plan_schema(table, plan.table_name);
+    uint32_t id = 0u;
+    char message[TINYDB_RECORD_MESSAGE_MAX];
+    if (schema == NULL ||
+        !parse_plan_primary_key(plan.filter_value, &id) ||
+        !tinydb_record_payload_schema_supported(schema,
+                                                message,
+                                                sizeof(message))) {
+        return TINYDB_PK_SELECT_PREFLIGHT_NOT_APPLICABLE;
+    }
+
+    TinyDBRecordPayload payload;
+    message[0] = '\0';
+    if (tinydb_record_payload_try_find(table,
+                                       schema,
+                                       id,
+                                       &payload,
+                                       message,
+                                       sizeof(message))) {
+        return TINYDB_PK_SELECT_PREFLIGHT_READY;
+    }
+
+    if (strcmp(message, "primary key not found") == 0) {
+        return TINYDB_PK_SELECT_PREFLIGHT_READY;
+    }
+
+    initialize_pk_select_backpressure_error(result, message);
+    return TINYDB_PK_SELECT_PREFLIGHT_ERROR;
 }
 
 static TinyDBSqlStatus map_analyze_result(
@@ -185,6 +300,12 @@ static TinyDBSqlStatus execute_with_prepared_routing(
         database->table, sql, &analyze_result);
     if (analyze_status != TINYDB_ANALYZE_NOT_APPLICABLE) {
         return map_analyze_result(analyze_status, &analyze_result, result);
+    }
+
+    TinyDBPkSelectPreflightStatus preflight =
+        preflight_generic_primary_key_select(database->table, sql, result);
+    if (preflight == TINYDB_PK_SELECT_PREFLIGHT_ERROR) {
+        return TINYDB_SQL_EXECUTE_ERROR;
     }
 
     Statement statement;
