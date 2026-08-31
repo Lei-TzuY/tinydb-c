@@ -1,3 +1,4 @@
+#include "pager_try_checkpoint.h"
 #include "pager_try_pin.h"
 
 #include <stdint.h>
@@ -81,6 +82,58 @@ void pager_checkpoint(Pager* pager) {
     free(overlap_images);
     free(overlap_pages);
     pager_checkpoint_legacy_base(pager);
+}
+
+bool pager_try_checkpoint(Pager* pager,
+                          char* message,
+                          size_t message_size) {
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (pager == NULL) {
+        if (message != NULL && message_size > 0u) {
+            snprintf(message, message_size, "%s", "invalid Pager handle");
+        }
+        return false;
+    }
+
+    /*
+     * Do not begin the historical checkpoint until every dirty logical page
+     * has proved that it can be materialized through the bounded buffer pool.
+     * Releasing each handle immediately keeps the preflight compatible with a
+     * single replaceable frame and preserves the no-steal dirty-spill path.
+     */
+    uint32_t num_pages = pager->num_pages;
+    for (uint32_t page_num = 0u; page_num < num_pages; page_num++) {
+        if (!pager_page_is_dirty(pager, page_num)) continue;
+
+        PagerPageHandle handle;
+        PagerTryPinStatus status = pager_try_pin_existing_page_handle(
+            pager,
+            page_num,
+            &handle);
+        if (status != PAGER_TRY_PIN_OK) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "checkpoint preflight could not acquire dirty page %u: %s",
+                         page_num,
+                         pager_try_pin_status_string(status));
+            }
+            return false;
+        }
+
+        if (!pager_release_page_handle(&handle)) {
+            if (message != NULL && message_size > 0u) {
+                snprintf(message,
+                         message_size,
+                         "checkpoint preflight could not release dirty page %u",
+                         page_num);
+            }
+            return false;
+        }
+    }
+
+    pager_checkpoint(pager);
+    return true;
 }
 
 /* ── Non-fatal existing-page acquisition ───────────────────────────────
