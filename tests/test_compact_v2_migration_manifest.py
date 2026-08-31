@@ -121,7 +121,7 @@ int main(void) {
     puts("recovery_classification=yes");
     return 0;
 }
-''',
+'''.replace(r'\"', '"'),
             encoding="utf-8",
         )
         cmake_lists = tmp_path / "CMakeLists.txt"
