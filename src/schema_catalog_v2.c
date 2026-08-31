@@ -1,4 +1,5 @@
 #include "multitable.h"
+#include "schema_catalog_shape_codec.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -15,30 +16,9 @@
 #define SCHEMA_CATALOG_V2_VERSION 2u
 #define SCHEMA_CATALOG_WAL_COMMIT_MAGIC 0x57435354u /* TSCW */
 #define SCHEMA_CATALOG_V2_HEADER_SIZE 20u
-#define SCHEMA_CATALOG_V2_MAX_PAYLOAD 32768u
+#define SCHEMA_CATALOG_V2_MAX_PAYLOAD TINYDB_SCHEMA_CATALOG_SHAPE_MAX_SIZE
 #define SCHEMA_CATALOG_FNV64_OFFSET 1469598103934665603ULL
 #define SCHEMA_CATALOG_FNV64_PRIME 1099511628211ULL
-
-typedef struct {
-    uint32_t num_tables;
-    uint32_t num_views;
-    TableSchema schemas[MAX_TABLES];
-    ViewSchema views[MAX_VIEWS];
-} SchemaCatalogSnapshot;
-
-typedef struct {
-    unsigned char* data;
-    size_t capacity;
-    size_t position;
-    bool ok;
-} ByteWriter;
-
-typedef struct {
-    const unsigned char* data;
-    size_t size;
-    size_t position;
-    bool ok;
-} ByteReader;
 
 typedef enum {
     SCHEMA_V2_NOT_V2 = 0,
@@ -103,253 +83,28 @@ static uint64_t fnv64(const unsigned char* data, size_t size) {
     return hash;
 }
 
-static void writer_bytes(ByteWriter* writer, const void* data, size_t size) {
-    if (!writer->ok || size > writer->capacity - writer->position) {
-        writer->ok = false;
-        return;
-    }
-    memcpy(writer->data + writer->position, data, size);
-    writer->position += size;
-}
-
-static void writer_u8(ByteWriter* writer, uint8_t value) {
-    writer_bytes(writer, &value, sizeof(value));
-}
-
-static void writer_u32(ByteWriter* writer, uint32_t value) {
-    unsigned char encoded[4];
-    encode_u32(value, encoded);
-    writer_bytes(writer, encoded, sizeof(encoded));
-}
-
-static void reader_bytes(ByteReader* reader, void* output, size_t size) {
-    if (!reader->ok || size > reader->size - reader->position) {
-        reader->ok = false;
-        return;
-    }
-    memcpy(output, reader->data + reader->position, size);
-    reader->position += size;
-}
-
-static uint8_t reader_u8(ByteReader* reader) {
-    uint8_t value = 0;
-    reader_bytes(reader, &value, sizeof(value));
-    return value;
-}
-
-static uint32_t reader_u32(ByteReader* reader) {
-    unsigned char encoded[4] = {0};
-    reader_bytes(reader, encoded, sizeof(encoded));
-    return reader->ok ? decode_u32(encoded) : 0;
-}
-
-static bool fixed_string_valid(const char* value, size_t capacity) {
-    return memchr(value, '\0', capacity) != NULL;
-}
-
-static bool schema_shape_valid(const SchemaCatalogSnapshot* snapshot) {
-    if (snapshot == NULL || snapshot->num_tables == 0 ||
-        snapshot->num_tables > MAX_TABLES || snapshot->num_views > MAX_VIEWS) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < snapshot->num_tables; i++) {
-        const TableSchema* schema = &snapshot->schemas[i];
-        if (!fixed_string_valid(schema->name, sizeof(schema->name)) ||
-            schema->num_columns == 0 || schema->num_columns > MAX_COLUMNS_PER_TABLE) {
-            return false;
-        }
-        for (uint32_t j = 0; j < schema->num_columns; j++) {
-            const TableColumn* column = &schema->columns[j];
-            if (!fixed_string_valid(column->name, sizeof(column->name)) ||
-                (column->type != COL_TYPE_INT && column->type != COL_TYPE_VARCHAR)) {
-                return false;
-            }
-            if (column->offset > schema->row_size ||
-                column->size > schema->row_size - column->offset) {
-                return false;
-            }
-        }
-        if (!fixed_string_valid(schema->fk_col, sizeof(schema->fk_col)) ||
-            !fixed_string_valid(schema->fk_parent_table,
-                                sizeof(schema->fk_parent_table)) ||
-            !fixed_string_valid(schema->fk_parent_col,
-                                sizeof(schema->fk_parent_col))) {
-            return false;
-        }
-    }
-
-    for (uint32_t i = 0; i < snapshot->num_views; i++) {
-        const ViewSchema* view = &snapshot->views[i];
-        if (!fixed_string_valid(view->name, sizeof(view->name)) ||
-            !fixed_string_valid(view->select_sql, sizeof(view->select_sql))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool schema_roots_valid(const Table* table,
-                               const SchemaCatalogSnapshot* snapshot) {
-    if (table == NULL || table->pager == NULL) return false;
-    for (uint32_t i = 0; i < snapshot->num_tables; i++) {
-        if (snapshot->schemas[i].root_page_num >= table->pager->num_pages) {
+static bool schema_roots_valid(const Table* table, const Catalog* catalog) {
+    if (table == NULL || table->pager == NULL || catalog == NULL) return false;
+    for (uint32_t i = 0; i < catalog->num_tables; i++) {
+        if (catalog->schemas[i].root_page_num >= table->pager->num_pages) {
             printf("Ignoring schema catalog with invalid root page %u for table '%s'.\n",
-                   snapshot->schemas[i].root_page_num,
-                   snapshot->schemas[i].name);
+                   catalog->schemas[i].root_page_num,
+                   catalog->schemas[i].name);
             return false;
         }
     }
     return true;
-}
-
-static void fill_snapshot(const Table* table, SchemaCatalogSnapshot* snapshot) {
-    memset(snapshot, 0, sizeof(*snapshot));
-    snapshot->num_tables = table->catalog.num_tables;
-    snapshot->num_views = table->catalog.num_views;
-    memcpy(snapshot->schemas,
-           table->catalog.schemas,
-           sizeof(TableSchema) * table->catalog.num_tables);
-    memcpy(snapshot->views,
-           table->catalog.views,
-           sizeof(ViewSchema) * table->catalog.num_views);
-}
-
-static void install_snapshot(Table* table, const SchemaCatalogSnapshot* snapshot) {
-    table->catalog.num_tables = snapshot->num_tables;
-    memset(table->catalog.schemas, 0, sizeof(table->catalog.schemas));
-    memcpy(table->catalog.schemas,
-           snapshot->schemas,
-           sizeof(TableSchema) * snapshot->num_tables);
-    table->catalog.num_views = snapshot->num_views;
-    memset(table->catalog.views, 0, sizeof(table->catalog.views));
-    memcpy(table->catalog.views,
-           snapshot->views,
-           sizeof(ViewSchema) * snapshot->num_views);
-}
-
-static bool encode_snapshot(const SchemaCatalogSnapshot* snapshot,
-                            unsigned char* payload,
-                            size_t payload_capacity,
-                            size_t* payload_size) {
-    if (!schema_shape_valid(snapshot)) return false;
-
-    ByteWriter writer;
-    writer.data = payload;
-    writer.capacity = payload_capacity;
-    writer.position = 0;
-    writer.ok = true;
-
-    writer_u32(&writer, snapshot->num_tables);
-    writer_u32(&writer, snapshot->num_views);
-    for (uint32_t i = 0; i < snapshot->num_tables; i++) {
-        const TableSchema* schema = &snapshot->schemas[i];
-        writer_bytes(&writer, schema->name, sizeof(schema->name));
-        writer_u32(&writer, schema->root_page_num);
-        writer_u32(&writer, schema->num_columns);
-        for (uint32_t j = 0; j < schema->num_columns; j++) {
-            const TableColumn* column = &schema->columns[j];
-            writer_bytes(&writer, column->name, sizeof(column->name));
-            writer_u32(&writer, (uint32_t)column->type);
-            writer_u32(&writer, column->size);
-            writer_u32(&writer, column->offset);
-        }
-        writer_u32(&writer, schema->row_size);
-        writer_u8(&writer, schema->has_fk ? 1u : 0u);
-        writer_bytes(&writer, schema->fk_col, sizeof(schema->fk_col));
-        writer_bytes(&writer,
-                     schema->fk_parent_table,
-                     sizeof(schema->fk_parent_table));
-        writer_bytes(&writer,
-                     schema->fk_parent_col,
-                     sizeof(schema->fk_parent_col));
-        writer_u8(&writer, schema->fk_on_delete_cascade ? 1u : 0u);
-    }
-
-    for (uint32_t i = 0; i < snapshot->num_views; i++) {
-        writer_bytes(&writer,
-                     snapshot->views[i].name,
-                     sizeof(snapshot->views[i].name));
-        writer_bytes(&writer,
-                     snapshot->views[i].select_sql,
-                     sizeof(snapshot->views[i].select_sql));
-    }
-
-    if (!writer.ok) return false;
-    *payload_size = writer.position;
-    return true;
-}
-
-static bool decode_snapshot(const unsigned char* payload,
-                            size_t payload_size,
-                            SchemaCatalogSnapshot* snapshot) {
-    memset(snapshot, 0, sizeof(*snapshot));
-    ByteReader reader;
-    reader.data = payload;
-    reader.size = payload_size;
-    reader.position = 0;
-    reader.ok = true;
-
-    snapshot->num_tables = reader_u32(&reader);
-    snapshot->num_views = reader_u32(&reader);
-    if (!reader.ok || snapshot->num_tables == 0 ||
-        snapshot->num_tables > MAX_TABLES || snapshot->num_views > MAX_VIEWS) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < snapshot->num_tables; i++) {
-        TableSchema* schema = &snapshot->schemas[i];
-        reader_bytes(&reader, schema->name, sizeof(schema->name));
-        schema->root_page_num = reader_u32(&reader);
-        schema->num_columns = reader_u32(&reader);
-        if (!reader.ok || schema->num_columns == 0 ||
-            schema->num_columns > MAX_COLUMNS_PER_TABLE) {
-            return false;
-        }
-        for (uint32_t j = 0; j < schema->num_columns; j++) {
-            TableColumn* column = &schema->columns[j];
-            reader_bytes(&reader, column->name, sizeof(column->name));
-            column->type = (ColumnType)reader_u32(&reader);
-            column->size = reader_u32(&reader);
-            column->offset = reader_u32(&reader);
-        }
-        schema->row_size = reader_u32(&reader);
-        uint8_t has_fk = reader_u8(&reader);
-        reader_bytes(&reader, schema->fk_col, sizeof(schema->fk_col));
-        reader_bytes(&reader,
-                     schema->fk_parent_table,
-                     sizeof(schema->fk_parent_table));
-        reader_bytes(&reader,
-                     schema->fk_parent_col,
-                     sizeof(schema->fk_parent_col));
-        uint8_t cascade = reader_u8(&reader);
-        if (!reader.ok || has_fk > 1u || cascade > 1u) return false;
-        schema->has_fk = has_fk != 0;
-        schema->fk_on_delete_cascade = cascade != 0;
-    }
-
-    for (uint32_t i = 0; i < snapshot->num_views; i++) {
-        reader_bytes(&reader,
-                     snapshot->views[i].name,
-                     sizeof(snapshot->views[i].name));
-        reader_bytes(&reader,
-                     snapshot->views[i].select_sql,
-                     sizeof(snapshot->views[i].select_sql));
-    }
-
-    return reader.ok && reader.position == reader.size &&
-           schema_shape_valid(snapshot);
 }
 
 static bool write_v2_stream(FILE* file,
-                            const SchemaCatalogSnapshot* snapshot,
+                            const Catalog* catalog,
                             bool include_commit_marker) {
     unsigned char payload[SCHEMA_CATALOG_V2_MAX_PAYLOAD];
     size_t payload_size = 0;
-    if (!encode_snapshot(snapshot,
-                         payload,
-                         sizeof(payload),
-                         &payload_size) ||
+    if (!tinydb_schema_catalog_shape_encode(catalog,
+                                            payload,
+                                            sizeof(payload),
+                                            &payload_size) ||
         payload_size > UINT32_MAX) {
         return false;
     }
@@ -374,9 +129,11 @@ static bool write_v2_stream(FILE* file,
 }
 
 static SchemaV2ReadStatus read_v2_stream(FILE* file,
-                                         SchemaCatalogSnapshot* snapshot,
+                                         Catalog* catalog,
                                          bool require_commit_marker) {
     unsigned char prefix[8];
+    if (catalog == NULL) return SCHEMA_V2_INVALID;
+    memset(catalog, 0, sizeof(*catalog));
     if (fread(prefix, 1, sizeof(prefix), file) != sizeof(prefix)) {
         return SCHEMA_V2_INVALID;
     }
@@ -399,7 +156,8 @@ static SchemaV2ReadStatus read_v2_stream(FILE* file,
     unsigned char payload[SCHEMA_CATALOG_V2_MAX_PAYLOAD];
     if (fread(payload, 1, payload_size, file) != payload_size ||
         fnv64(payload, payload_size) != expected_checksum ||
-        !decode_snapshot(payload, payload_size, snapshot)) {
+        !tinydb_schema_catalog_shape_decode(payload, payload_size, catalog)) {
+        memset(catalog, 0, sizeof(*catalog));
         return SCHEMA_V2_INVALID;
     }
 
@@ -407,19 +165,24 @@ static SchemaV2ReadStatus read_v2_stream(FILE* file,
         unsigned char commit[4];
         if (fread(commit, 1, sizeof(commit), file) != sizeof(commit) ||
             decode_u32(commit) != SCHEMA_CATALOG_WAL_COMMIT_MAGIC) {
+            memset(catalog, 0, sizeof(*catalog));
             return SCHEMA_V2_INVALID;
         }
     }
 
-    return fgetc(file) == EOF ? SCHEMA_V2_VALID : SCHEMA_V2_INVALID;
+    if (fgetc(file) != EOF) {
+        memset(catalog, 0, sizeof(*catalog));
+        return SCHEMA_V2_INVALID;
+    }
+    return SCHEMA_V2_VALID;
 }
 
 static bool write_v2_file(const char* path,
-                          const SchemaCatalogSnapshot* snapshot,
+                          const Catalog* catalog,
                           bool include_commit_marker) {
     FILE* file = fopen(path, "wb");
     if (file == NULL) return false;
-    bool ok = write_v2_stream(file, snapshot, include_commit_marker);
+    bool ok = write_v2_stream(file, catalog, include_commit_marker);
     if (ok) ok = sync_catalog_file(file);
     if (fclose(file) != 0) ok = false;
     return ok;
@@ -432,8 +195,8 @@ static bool recover_v2_wal(const char* main_path,
     FILE* wal = fopen(wal_path, "rb");
     if (wal == NULL) return true;
 
-    SchemaCatalogSnapshot snapshot;
-    SchemaV2ReadStatus status = read_v2_stream(wal, &snapshot, true);
+    Catalog catalog;
+    SchemaV2ReadStatus status = read_v2_stream(wal, &catalog, true);
     fclose(wal);
     if (status == SCHEMA_V2_NOT_V2) return true;
 
@@ -444,7 +207,7 @@ static bool recover_v2_wal(const char* main_path,
         return true;
     }
 
-    if (!write_v2_file(main_path, &snapshot, false)) {
+    if (!write_v2_file(main_path, &catalog, false)) {
         printf("Unable to recover checksummed schema catalog.\n");
         return false;
     }
@@ -485,8 +248,8 @@ bool multitable_catalog_load(Table* table, const char* database_filename) {
     FILE* file = fopen(main_path, "rb");
     if (file == NULL) return errno == ENOENT;
 
-    SchemaCatalogSnapshot snapshot;
-    SchemaV2ReadStatus status = read_v2_stream(file, &snapshot, false);
+    Catalog catalog;
+    SchemaV2ReadStatus status = read_v2_stream(file, &catalog, false);
     fclose(file);
     if (status == SCHEMA_V2_NOT_V2) {
         return multitable_catalog_load_v1_base(table, database_filename);
@@ -495,9 +258,9 @@ bool multitable_catalog_load(Table* table, const char* database_filename) {
         printf("Ignoring invalid checksummed schema catalog.\n");
         return false;
     }
-    if (!schema_roots_valid(table, &snapshot)) return false;
+    if (!schema_roots_valid(table, &catalog)) return false;
 
-    install_snapshot(table, &snapshot);
+    table->catalog = catalog;
     return true;
 }
 
@@ -517,18 +280,16 @@ bool multitable_catalog_save(Table* table, const char* database_filename) {
         return false;
     }
 
-    SchemaCatalogSnapshot snapshot;
-    fill_snapshot(table, &snapshot);
-    if (!schema_shape_valid(&snapshot)) {
+    if (!tinydb_schema_catalog_shape_valid(&table->catalog)) {
         printf("Refusing to persist invalid schema catalog state.\n");
         return false;
     }
 
-    if (!write_v2_file(wal_path, &snapshot, true)) {
+    if (!write_v2_file(wal_path, &table->catalog, true)) {
         printf("Unable to write checksummed schema catalog WAL.\n");
         return false;
     }
-    if (!write_v2_file(main_path, &snapshot, false)) {
+    if (!write_v2_file(main_path, &table->catalog, false)) {
         printf("Unable to write checksummed schema catalog.\n");
         return false;
     }
