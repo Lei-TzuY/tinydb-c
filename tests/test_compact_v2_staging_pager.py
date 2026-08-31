@@ -40,7 +40,24 @@ def test_claims_advance_allocator_identity_between_file_tail_pages():
     assert "get_unused_page_num() alone does not advance" in claim
 
 
-def test_materialization_requires_exact_claim_namespace_before_writes():
+def test_readback_verification_requires_exact_namespace_and_page_bytes():
+    text = source()
+    verify = text[
+        text.index(
+            "static inline bool tinydb_compact_v2_staging_pager_verify_materialized_hierarchy("
+        ) :
+        text.index("static inline bool tinydb_compact_v2_staging_pager_materialize_hierarchy(")
+    ]
+    assert "!pager->in_transaction" in verify
+    assert "tinydb_compact_v2_staging_pager_claims_match_hierarchy" in verify
+    assert "pager->free_pages[free_index] == page_num" in verify
+    assert verify.count("get_page(pager, page_num)") == 2
+    assert verify.count("memcmp(actual, expected, PAGE_SIZE) != 0") == 2
+    assert "tinydb_compact_v2_staging_page_const" in verify
+    assert "tinydb_compact_v2_staging_internal_page_const" in verify
+
+
+def test_materialization_requires_readback_before_root_exposure():
     text = source()
     materialize = text[
         text.index("static inline bool tinydb_compact_v2_staging_pager_materialize_hierarchy(") :
@@ -48,11 +65,14 @@ def test_materialization_requires_exact_claim_namespace_before_writes():
     assert "tinydb_compact_v2_staging_pager_claims_match_hierarchy" in materialize
     preflight = materialize.index("tinydb_compact_v2_staging_pager_claims_match_hierarchy")
     dirty = materialize.index("mark_page_dirty(pager, page_num)")
-    assert preflight < dirty
+    verify = materialize.index(
+        "tinydb_compact_v2_staging_pager_verify_materialized_hierarchy("
+    )
+    publish = materialize.index("*staged_root_page_num = hierarchy->root_page_num")
+    assert preflight < dirty < verify < publish
     assert "page_num >= pager->num_pages" in materialize
     assert "pager->free_pages[free_index] == page_num" in materialize
     assert "*staged_root_page_num = 0u" in materialize
-    assert "*staged_root_page_num = hierarchy->root_page_num" in materialize
 
 
 def test_pager_staging_stops_before_durable_or_catalog_publication():
@@ -84,7 +104,9 @@ def compile_header_on_active_toolchain():
             "    uint32_t* root) {\n"
             "  return tinydb_compact_v2_staging_pager_claim_pages(pager, count, pages) &&\n"
             "         tinydb_compact_v2_staging_pager_materialize_hierarchy(\n"
-            "             pager, hierarchy, pages, count, root);\n"
+            "             pager, hierarchy, pages, count, root) &&\n"
+            "         tinydb_compact_v2_staging_pager_verify_materialized_hierarchy(\n"
+            "             pager, hierarchy, pages, count);\n"
             "}\n",
             encoding="utf-8",
         )
@@ -129,13 +151,15 @@ def compile_header_on_active_toolchain():
 def main():
     test_claims_require_transaction_and_preflight_allocator_metadata()
     test_claims_advance_allocator_identity_between_file_tail_pages()
-    test_materialization_requires_exact_claim_namespace_before_writes()
+    test_readback_verification_requires_exact_namespace_and_page_bytes()
+    test_materialization_requires_readback_before_root_exposure()
     test_pager_staging_stops_before_durable_or_catalog_publication()
     compile_header_on_active_toolchain()
     print(
         "PASS: compact V2 pager staging claims unique transaction-scoped page identities, "
-        "requires exact hierarchy namespace ownership before dirtying pages, stops before "
-        "checkpoint/catalog publication, and compiles on the active CI toolchain"
+        "requires exact hierarchy namespace ownership, verifies Pager readback byte-for-byte "
+        "before exposing the staged root, stops before checkpoint/catalog publication, and "
+        "compiles on the active CI toolchain"
     )
 
 
