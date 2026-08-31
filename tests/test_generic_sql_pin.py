@@ -96,15 +96,19 @@ def main():
             "root_evicted=yes",
             "one_free_frame_success=yes",
             "precise_message=yes",
+            "scan_busy_nonfatal=yes",
+            "root_resident=yes",
+            "late_page_busy=yes",
+            "scan_one_free_frame_success=yes",
         ]
         missing = [marker for marker in required if marker not in output]
         if missing:
             raise AssertionError(f"missing markers {missing}:\n{output}")
 
     print(
-        "PASS: tinydb_execute_sql generic primary-key SELECT returns bounded "
-        "buffer-pool backpressure under 16/16 external pins and succeeds after "
-        "exactly one frame is released"
+        "PASS: tinydb_execute_sql generic primary-key and full-scan SELECTs return "
+        "bounded buffer-pool backpressure under 16/16 external pins, including "
+        "a resident-root/late-leaf miss, and succeed after exactly one frame is released"
     )
 
 
