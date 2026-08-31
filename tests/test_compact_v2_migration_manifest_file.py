@@ -36,6 +36,7 @@ def configure_and_build(tmp_path: Path, source: str):
         "set(CMAKE_C_STANDARD 99)\nset(CMAKE_C_STANDARD_REQUIRED TRUE)\n"
         "if(MSVC)\n  add_compile_options(/W4 /WX /utf-8)\nelse()\n  add_compile_options(-Wall -Wextra -Werror)\nendif()\n"
         "add_executable(manifest_file_probe probe.c)\n"
+        "if(MSVC)\n  target_compile_definitions(manifest_file_probe PRIVATE _CRT_SECURE_NO_WARNINGS)\nendif()\n"
         f'target_include_directories(manifest_file_probe PRIVATE "{(ROOT / "src").as_posix()}")\n'
     )
     (tmp_path / "CMakeLists.txt").write_text(cmake, encoding="utf-8")
