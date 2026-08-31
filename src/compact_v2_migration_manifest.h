@@ -99,7 +99,7 @@ static inline uint32_t tinydb_compact_v2_manifest_crc32(
 static inline bool tinydb_compact_v2_migration_manifest_is_valid(
     const TinyDBCompactV2MigrationManifest* manifest) {
     if (manifest == NULL || manifest->table_id == 0u ||
-        manifest->old_root_page_num == 0u || manifest->staged_root_page_num == 0u ||
+        manifest->staged_root_page_num == 0u ||
         manifest->old_root_page_num == manifest->staged_root_page_num ||
         manifest->old_schema_generation >= manifest->new_schema_generation ||
         manifest->claimed_page_count == 0u ||
