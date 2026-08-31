@@ -1,4 +1,6 @@
 #include "multitable.h"
+#include "schema_catalog_shape_codec.h"
+#include "schema_catalog_v3_store.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -84,6 +86,23 @@ static bool page_is_structural_root(const Table* table, uint32_t root_page_num) 
     return valid;
 }
 
+static bool catalog_has_invalid_root(const Table* table,
+                                     const Catalog* catalog,
+                                     uint32_t* bad_root) {
+    if (table == NULL || catalog == NULL || catalog->num_tables == 0u ||
+        catalog->num_tables > MAX_TABLES) {
+        return false;
+    }
+    for (uint32_t i = 0u; i < catalog->num_tables; i++) {
+        const uint32_t root = catalog->schemas[i].root_page_num;
+        if (!page_is_structural_root(table, root)) {
+            if (bad_root != NULL) *bad_root = root;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool payload_has_invalid_root(const Table* table,
                                      const unsigned char* payload,
                                      size_t payload_size,
@@ -131,6 +150,83 @@ static bool payload_has_invalid_root(const Table* table,
     }
 
     return false;
+}
+
+static bool discard_committed_v3_wal_with_invalid_root(
+    const Table* table,
+    const char* database_filename
+) {
+    char wal_path[768];
+    if (table == NULL || database_filename == NULL ||
+        !build_catalog_path(wal_path,
+                            sizeof(wal_path),
+                            database_filename,
+                            ".schema.wal")) {
+        return true;
+    }
+
+    FILE* probe = fopen(wal_path, "rb");
+    if (probe == NULL) return true;
+    unsigned char prefix[8];
+    const size_t prefix_size = fread(prefix, 1, sizeof(prefix), probe);
+    const bool probe_error = ferror(probe) != 0;
+    fclose(probe);
+    if (probe_error) return false;
+    if (prefix_size != sizeof(prefix) ||
+        tinydb_schema_catalog_v3_get_u32(prefix) !=
+            TINYDB_SCHEMA_CATALOG_V3_ENVELOPE_MAGIC ||
+        tinydb_schema_catalog_v3_get_u32(prefix + 4u) !=
+            TINYDB_SCHEMA_CATALOG_V3_ENVELOPE_VERSION) {
+        return true;
+    }
+
+    unsigned char envelope[TINYDB_SCHEMA_CATALOG_V3_ENVELOPE_MAX_SIZE];
+    size_t envelope_size = 0u;
+    const TinyDBSchemaCatalogV3StoreReadResult read_result =
+        tinydb_schema_catalog_v3_store_read(wal_path,
+                                            true,
+                                            envelope,
+                                            sizeof(envelope),
+                                            &envelope_size);
+    if (read_result != TINYDB_SCHEMA_CATALOG_V3_STORE_READ_OK) {
+        /* Malformed/uncommitted V3 WALs are handled by the checksummed base
+         * loader.  This guard is specifically for a fully committed WAL whose
+         * bytes are valid but whose claimed tree root is structurally unsafe. */
+        return true;
+    }
+
+    TinyDBSchemaCatalogV3EnvelopeView view;
+    tinydb_schema_catalog_v3_envelope_zero_view(&view);
+    Catalog catalog;
+    memset(&catalog, 0, sizeof(catalog));
+    TinyDBSchemaCatalogGenerationSnapshot snapshot;
+    tinydb_schema_catalog_generation_zero(&snapshot);
+    if (tinydb_schema_catalog_v3_envelope_decode(envelope,
+                                                  envelope_size,
+                                                  &view) !=
+            TINYDB_SCHEMA_CATALOG_V3_ENVELOPE_DECODE_OK ||
+        !tinydb_schema_catalog_shape_decode(view.shape,
+                                            view.shape_size,
+                                            &catalog) ||
+        tinydb_schema_catalog_v3_decode(&catalog,
+                                        view.identity,
+                                        view.identity_size,
+                                        &snapshot) !=
+            TINYDB_SCHEMA_CATALOG_V3_DECODE_OK) {
+        return true;
+    }
+
+    uint32_t bad_root = 0u;
+    if (!catalog_has_invalid_root(table, &catalog, &bad_root)) return true;
+
+    if (remove(wal_path) != 0 && errno != ENOENT) {
+        printf("Unable to discard schema catalog WAL with invalid root page %u.\n",
+               bad_root);
+        return false;
+    }
+    printf("Ignoring schema catalog WAL with invalid root page %u; preserving main catalog.\n",
+           bad_root);
+    return true;
 }
 
 static bool discard_committed_v2_wal_with_invalid_root(
@@ -267,6 +363,10 @@ static bool catalog_identity_valid(const Table* table) {
 }
 
 bool multitable_catalog_load(Table* table, const char* database_filename) {
+    if (!discard_committed_v3_wal_with_invalid_root(table,
+                                                    database_filename)) {
+        return false;
+    }
     if (!discard_committed_v2_wal_with_invalid_root(table,
                                                     database_filename)) {
         return false;
