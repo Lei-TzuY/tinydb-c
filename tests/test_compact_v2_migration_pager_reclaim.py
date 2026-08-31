@@ -147,6 +147,7 @@ int main(int argc, char** argv) {
             "endif()\n"
             f'add_executable(pager_reclaim_probe probe.c "{(ROOT / "src" / "pager.c").as_posix()}")\n'
             f'target_include_directories(pager_reclaim_probe PRIVATE "{(ROOT / "src").as_posix()}")\n'
+            f'set_source_files_properties("{(ROOT / "src" / "pager.c").as_posix()}" PROPERTIES COMPILE_DEFINITIONS "pager_checkpoint=pager_checkpoint_legacy_base")\n'
             "target_link_libraries(pager_reclaim_probe PRIVATE Threads::Threads)\n",
             encoding="utf-8",
         )
