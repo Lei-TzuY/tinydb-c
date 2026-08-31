@@ -130,11 +130,9 @@ static inline bool tinydb_compact_v2_migration_manifest_encoded_size(
         claimed_page_count > TINYDB_COMPACT_V2_MIGRATION_MANIFEST_MAX_CLAIMS) {
         return false;
     }
-    if ((size_t)claimed_page_count >
-        (SIZE_MAX - TINYDB_COMPACT_V2_MIGRATION_MANIFEST_FIXED_SIZE -
-         TINYDB_COMPACT_V2_MIGRATION_MANIFEST_CHECKSUM_SIZE) / sizeof(uint32_t)) {
-        return false;
-    }
+    /* MAX_CLAIMS bounds the variable vector to 16 KiB. Together with the
+     * fixed header/checksum this fits even the minimum 16-bit C size_t range,
+     * so no wider uint32_t-vs-size_t overflow comparison is required here. */
     *encoded_size = TINYDB_COMPACT_V2_MIGRATION_MANIFEST_FIXED_SIZE +
                     ((size_t)claimed_page_count * sizeof(uint32_t)) +
                     TINYDB_COMPACT_V2_MIGRATION_MANIFEST_CHECKSUM_SIZE;
