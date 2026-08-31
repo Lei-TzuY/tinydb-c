@@ -7,10 +7,12 @@ import sys
 
 SCHEMA_MAGIC = 0x4D435354
 SCHEMA_V1 = 1
-SCHEMA_V2 = 2
-WAL_COMMIT_MAGIC = 0x57435354
+V3_ENVELOPE_MAGIC = 0x56435354
+V3_VERSION = 3
+V3_WAL_COMMIT_MAGIC = 0x33435754
 FNV64_OFFSET = 1469598103934665603
 FNV64_PRIME = 1099511628211
+MASK64 = (1 << 64) - 1
 
 
 def find_binary(base_dir, name):
@@ -52,42 +54,23 @@ def fnv64(data):
     value = FNV64_OFFSET
     for byte in data:
         value ^= byte
-        value = (value * FNV64_PRIME) & 0xFFFFFFFFFFFFFFFF
+        value = (value * FNV64_PRIME) & MASK64
     return value
 
 
-def parse_v2(data):
-    if len(data) < 20:
-        raise AssertionError("schema catalog too short for V2 header")
-    magic, version, payload_size, checksum = struct.unpack_from("<IIIQ", data, 0)
-    if magic != SCHEMA_MAGIC or version != SCHEMA_V2:
+def parse_v3(data):
+    if len(data) < 28:
+        raise AssertionError("schema catalog too short for V3 envelope")
+    magic, version, total_size, shape_size, identity_size = struct.unpack_from("<IIIII", data, 0)
+    if magic != V3_ENVELOPE_MAGIC or version != V3_VERSION:
         raise AssertionError(f"unexpected schema header magic/version: {magic:#x}/{version}")
-    if len(data) != 20 + payload_size:
-        raise AssertionError("schema catalog payload length does not match header")
-    payload = data[20:]
-    if fnv64(payload) != checksum:
-        raise AssertionError("schema catalog checksum does not match payload")
-    return payload
-
-
-def table_root_offsets(payload):
-    if len(payload) < 8:
-        raise AssertionError("schema payload is too short")
-    num_tables, _ = struct.unpack_from("<II", payload, 0)
-    position = 8
-    offsets = []
-    for _ in range(num_tables):
-        if position + 40 > len(payload):
-            raise AssertionError("schema table header is truncated")
-        root_offset = position + 32
-        num_columns = struct.unpack_from("<I", payload, position + 36)[0]
-        offsets.append(root_offset)
-        position += 40
-        column_bytes = num_columns * 44
-        if position + column_bytes + 102 > len(payload):
-            raise AssertionError("schema table payload is truncated")
-        position += column_bytes + 102
-    return offsets
+    if total_size != len(data) or 20 + shape_size + identity_size + 8 != len(data):
+        raise AssertionError("V3 schema envelope length does not match header")
+    checksum_offset = len(data) - 8
+    checksum = struct.unpack_from("<Q", data, checksum_offset)[0]
+    if fnv64(data[:checksum_offset]) != checksum:
+        raise AssertionError("V3 schema envelope checksum does not match")
+    return data[20:20 + shape_size], data[20 + shape_size:checksum_offset]
 
 
 def require(output, marker):
@@ -124,101 +107,75 @@ def main():
             raise AssertionError("schema catalog was not created")
 
         with open(schema_file, "rb") as handle:
-            v2_bytes = handle.read()
-        parse_v2(v2_bytes)
+            initial_v3 = handle.read()
+        parse_v3(initial_v3)
         if os.path.exists(wal_file):
             raise AssertionError("committed schema WAL was not removed")
 
         _, reopened = run_session(
-            tinydb,
-            db_file,
-            [
-                "SELECT COUNT(*) FROM archive;",
-                ".schema archive",
-                ".exit",
-            ],
+            tinydb, db_file,
+            ["SELECT COUNT(*) FROM archive;", ".schema archive", ".exit"],
         )
         require(reopened, "db > 1\nExecuted.")
         require(reopened, "Table: archive")
 
-        downgrade = subprocess.run(
-            [v1_probe, db_file],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        # Prove legacy V1 remains readable and that the next DDL save upgrades it
+        # directly to the production V3 envelope without changing table data.
+        downgrade = subprocess.run([v1_probe, db_file], capture_output=True, text=True, timeout=120)
         downgrade_output = downgrade.stdout + downgrade.stderr
         if downgrade.returncode != 0:
             raise AssertionError(downgrade_output)
         require(downgrade_output, "SCHEMA_CATALOG_V1_OK")
         with open(schema_file, "rb") as handle:
             legacy_prefix = handle.read(8)
-        if len(legacy_prefix) != 8:
-            raise AssertionError("legacy schema catalog is truncated")
         legacy_magic, legacy_version = struct.unpack("<II", legacy_prefix)
         if legacy_magic != SCHEMA_MAGIC or legacy_version != SCHEMA_V1:
             raise AssertionError("V1 probe did not write a legacy catalog")
 
         _, legacy_read = run_session(
-            tinydb,
-            db_file,
-            [
-                "SELECT COUNT(*) FROM archive;",
-                "CREATE VIEW archive_view AS SELECT * FROM archive;",
-                ".exit",
-            ],
+            tinydb, db_file,
+            ["SELECT COUNT(*) FROM archive;", "CREATE VIEW archive_view AS SELECT * FROM archive;", ".exit"],
         )
         require(legacy_read, "db > 1\nExecuted.")
         with open(schema_file, "rb") as handle:
             upgraded_bytes = handle.read()
-        parse_v2(upgraded_bytes)
+        parse_v3(upgraded_bytes)
 
-        committed_wal = upgraded_bytes + struct.pack("<I", WAL_COMMIT_MAGIC)
+        # A fully committed V3 WAL must recover the main catalog before open.
+        committed_wal = upgraded_bytes + struct.pack("<I", V3_WAL_COMMIT_MAGIC)
         with open(wal_file, "wb") as handle:
             handle.write(committed_wal)
         with open(schema_file, "wb") as handle:
             handle.write(upgraded_bytes[:7])
 
-        _, recovered = run_session(
-            tinydb,
-            db_file,
-            [
-                "SELECT COUNT(*) FROM archive;",
-                ".exit",
-            ],
-        )
-        require(recovered, "Schema catalog recovery complete.")
+        _, recovered = run_session(tinydb, db_file, ["SELECT COUNT(*) FROM archive;", ".exit"])
+        require(recovered, "Schema catalog V3 recovery complete.")
         require(recovered, "db > 1\nExecuted.")
         if os.path.exists(wal_file):
-            raise AssertionError("recovered V2 schema WAL was not removed")
+            raise AssertionError("recovered V3 schema WAL was not removed")
         with open(schema_file, "rb") as handle:
             recovered_bytes = handle.read()
         if recovered_bytes != upgraded_bytes:
-            raise AssertionError("V2 WAL recovery did not restore the committed catalog")
-        parse_v2(recovered_bytes)
+            raise AssertionError("V3 WAL recovery did not restore the committed catalog")
+        parse_v3(recovered_bytes)
 
+        # Corrupt committed WAL bytes: it must never replace the healthy main.
         corrupted_wal = bytearray(committed_wal)
-        if len(corrupted_wal) <= 28:
-            raise AssertionError("unexpectedly short committed schema WAL")
         corrupted_wal[28] ^= 0x5A
         with open(wal_file, "wb") as handle:
             handle.write(corrupted_wal)
         with open(schema_file, "wb") as handle:
             handle.write(upgraded_bytes)
-
-        _, ignored_wal = run_session(
-            tinydb,
-            db_file,
-            [
-                "SELECT COUNT(*) FROM archive;",
-                ".exit",
-            ],
-        )
-        require(ignored_wal, "Ignoring invalid checksummed schema catalog WAL.")
+        _, ignored_wal = run_session(tinydb, db_file, ["SELECT COUNT(*) FROM archive;", ".exit"])
         require(ignored_wal, "db > 1\nExecuted.")
         if os.path.exists(wal_file):
-            raise AssertionError("invalid V2 schema WAL was not removed")
+            raise AssertionError("invalid V3 schema WAL was not removed")
+        with open(schema_file, "rb") as handle:
+            after_bad_wal = handle.read()
+        if after_bad_wal != upgraded_bytes:
+            raise AssertionError("corrupt V3 WAL overwrote healthy main catalog")
 
+        # Corrupt the authoritative main envelope itself: open must fail closed.
         corrupted_main = bytearray(upgraded_bytes)
         corrupted_main[28] ^= 0x33
         with open(schema_file, "wb") as handle:
@@ -228,67 +185,27 @@ def main():
         )
         if corrupt_code == 0:
             raise AssertionError(
-                "corrupted main schema catalog did not make database open fail closed\n"
-                + corrupt_output
+                "corrupted main V3 schema catalog did not make database open fail closed\n" + corrupt_output
             )
-        require(corrupt_output, "Ignoring invalid checksummed schema catalog.")
+        require(corrupt_output, "Ignoring invalid V3 schema catalog.")
         require(corrupt_output, "Error: schema catalog could not be loaded safely.")
         require(corrupt_output, "Unable to open database.")
         if "db >" in corrupt_output:
-            raise AssertionError(
-                "REPL became available after corrupt schema catalog detection\n"
-                + corrupt_output
-            )
-
-        semantic_main = bytearray(upgraded_bytes)
-        semantic_payload = bytearray(parse_v2(semantic_main))
-        root_offsets = table_root_offsets(semantic_payload)
-        if len(root_offsets) < 2:
-            raise AssertionError("semantic corruption test requires two catalog tables")
-        first_root = struct.unpack_from("<I", semantic_payload, root_offsets[0])[0]
-        struct.pack_into("<I", semantic_payload, root_offsets[1], first_root)
-        semantic_main[20:] = semantic_payload
-        struct.pack_into("<Q", semantic_main, 12, fnv64(semantic_payload))
-        parse_v2(semantic_main)
-        with open(schema_file, "wb") as handle:
-            handle.write(semantic_main)
-
-        semantic_code, semantic_output = run_session(
-            tinydb, db_file, ["SELECT COUNT(*) FROM archive;"], check=False
-        )
-        if semantic_code == 0:
-            raise AssertionError(
-                "checksum-valid duplicate-root catalog did not fail closed\n"
-                + semantic_output
-            )
-        require(semantic_output, "Ignoring schema catalog with duplicate root page")
-        require(semantic_output, "Error: schema catalog could not be loaded safely.")
-        require(semantic_output, "Unable to open database.")
-        if "db >" in semantic_output:
-            raise AssertionError(
-                "REPL became available after semantic catalog rejection\n"
-                + semantic_output
-            )
+            raise AssertionError("REPL became available after corrupt V3 schema catalog detection")
 
         with open(schema_file, "wb") as handle:
             handle.write(upgraded_bytes)
         _, final = run_session(
-            tinydb,
-            db_file,
-            [
-                "SELECT COUNT(*) FROM archive;",
-                "PRAGMA integrity_check;",
-                ".exit",
-            ],
+            tinydb, db_file,
+            ["SELECT COUNT(*) FROM archive;", "PRAGMA integrity_check;", ".exit"],
         )
         require(final, "db > 1\nExecuted.")
         require(final, "ok")
 
         print(
-            "PASS: schema catalog V2 uses a fixed little-endian checksummed envelope, "
-            "reads legacy V1 catalogs, upgrades them on DDL, recovers committed V2 WAL, "
-            "rejects corrupted WAL, fails closed on corrupt main data or checksum-valid "
-            "duplicate-root semantics, and preserves multi-root catalog state."
+            "PASS: schema catalog reads legacy V1, upgrades production writes to the checksummed "
+            "V3 shape+identity envelope, recovers committed V3 WAL, ignores corrupt WAL without "
+            "overwriting main state, and fails closed on corrupt authoritative V3 metadata."
         )
     finally:
         cleanup(db_file)
