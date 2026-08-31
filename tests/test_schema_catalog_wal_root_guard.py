@@ -4,9 +4,10 @@ import subprocess
 import sys
 
 
-SCHEMA_MAGIC = 0x4D435354
-SCHEMA_V2_VERSION = 2
-SCHEMA_WAL_COMMIT_MAGIC = 0x57435354
+V3_ENVELOPE_MAGIC = 0x56435354
+V3_VERSION = 3
+V3_IDENTITY_MAGIC = 0x33435354
+V3_WAL_COMMIT_MAGIC = 0x33435754
 FNV64_OFFSET = 1469598103934665603
 FNV64_PRIME = 1099511628211
 MASK64 = (1 << 64) - 1
@@ -55,25 +56,41 @@ def fnv64(data):
 
 
 def forge_committed_root_wal(schema_bytes, root_page_num):
-    if len(schema_bytes) < 20:
-        raise AssertionError('schema catalog is shorter than the V2 header')
+    if len(schema_bytes) < 28:
+        raise AssertionError('schema catalog is shorter than the V3 envelope')
+    magic, version, total_size, shape_size, identity_size = struct.unpack_from('<IIIII', schema_bytes, 0)
+    if magic != V3_ENVELOPE_MAGIC or version != V3_VERSION:
+        raise AssertionError('expected a V3 schema catalog')
+    if total_size != len(schema_bytes) or 20 + shape_size + identity_size + 8 != len(schema_bytes):
+        raise AssertionError('unexpected V3 schema envelope length')
 
-    magic, version, payload_size = struct.unpack_from('<III', schema_bytes, 0)
-    if magic != SCHEMA_MAGIC or version != SCHEMA_V2_VERSION:
-        raise AssertionError('expected a V2 schema catalog')
-    if len(schema_bytes) != 20 + payload_size:
-        raise AssertionError('unexpected schema catalog length')
+    forged = bytearray(schema_bytes)
+    shape_offset = 20
+    identity_offset = shape_offset + shape_size
+    checksum_offset = identity_offset + identity_size
 
-    payload = bytearray(schema_bytes[20:])
-    # V2 payload starts with num_tables, num_views, then the first table name.
-    # The first table root follows the fixed 32-byte name at payload offset 40.
-    if len(payload) < 44:
-        raise AssertionError('schema payload is too short for the first table root')
-    struct.pack_into('<I', payload, 40, root_page_num)
+    # Shape begins num_tables,num_views,then first table name. Root is offset 40.
+    if shape_size < 44:
+        raise AssertionError('schema shape too short for first root')
+    struct.pack_into('<I', forged, shape_offset + 40, root_page_num)
 
-    header = bytearray(schema_bytes[:20])
-    struct.pack_into('<Q', header, 12, fnv64(payload))
-    return bytes(header) + bytes(payload) + struct.pack('<I', SCHEMA_WAL_COMMIT_MAGIC)
+    if identity_size < 40:
+        raise AssertionError('V3 identity block too short')
+    identity_magic, identity_version, declared_identity, num_tables = struct.unpack_from(
+        '<IIII', forged, identity_offset
+    )
+    if identity_magic != V3_IDENTITY_MAGIC or identity_version != V3_VERSION or num_tables < 1:
+        raise AssertionError('unexpected V3 identity block')
+    if declared_identity != identity_size:
+        raise AssertionError('V3 identity length mismatch')
+
+    # First identity entry: table_id:u32, root:u32, generation:u64.
+    struct.pack_into('<I', forged, identity_offset + 16 + 4, root_page_num)
+    identity_checksum_offset = identity_offset + identity_size - 8
+    struct.pack_into('<Q', forged, identity_checksum_offset,
+                     fnv64(forged[identity_offset:identity_checksum_offset]))
+    struct.pack_into('<Q', forged, checksum_offset, fnv64(forged[:checksum_offset]))
+    return bytes(forged) + struct.pack('<I', V3_WAL_COMMIT_MAGIC)
 
 
 def find_non_root_tree_page(db_file):
@@ -84,10 +101,7 @@ def find_non_root_tree_page(db_file):
 
     for page_num in range(len(data) // PAGE_SIZE):
         page = data[page_num * PAGE_SIZE:(page_num + 1) * PAGE_SIZE]
-        if (
-            page[NODE_TYPE_OFFSET] in (NODE_INTERNAL, NODE_LEAF)
-            and page[IS_ROOT_OFFSET] == 0
-        ):
+        if page[NODE_TYPE_OFFSET] in (NODE_INTERNAL, NODE_LEAF) and page[IS_ROOT_OFFSET] == 0:
             return page_num
     raise AssertionError('expected a non-root B+ tree page after forcing a split')
 
@@ -132,19 +146,12 @@ def run_test():
     remove_database(db_file)
 
     commands = ['CREATE TABLE products (id INT, price INT);']
-    # The physical V1 leaf still uses the historical fixed value slot, so a few
-    # dozen rows are enough to force the generic table root to split and create
-    # at least one valid in-file page whose root bit is clear.
     commands.extend(
         f'INSERT INTO products VALUES ({row_id}, {row_id * 10});'
         for row_id in range(1, 41)
     )
     commands.append('.exit')
-    rc, stdout, stderr = run_commands(
-        executable,
-        db_file,
-        '\n'.join(commands) + '\n',
-    )
+    rc, stdout, stderr = run_commands(executable, db_file, '\n'.join(commands) + '\n')
     if rc != 0 or 'Error:' in stdout or 'Syntax error' in stdout:
         print('FAIL: failed to create a split database with a persisted schema catalog.')
         print(stdout)
@@ -157,30 +164,15 @@ def run_test():
     with open(schema_file, 'rb') as handle:
         healthy_main = handle.read()
 
-    reject_forged_wal(
-        executable,
-        db_file,
-        schema_file,
-        schema_wal,
-        healthy_main,
-        0xFFFFFFFF,
-        'impossible-root schema',
-    )
+    reject_forged_wal(executable, db_file, schema_file, schema_wal,
+                      healthy_main, 0xFFFFFFFF, 'impossible-root schema')
 
     child_page = find_non_root_tree_page(db_file)
-    reject_forged_wal(
-        executable,
-        db_file,
-        schema_file,
-        schema_wal,
-        healthy_main,
-        child_page,
-        'non-root-page schema',
-    )
+    reject_forged_wal(executable, db_file, schema_file, schema_wal,
+                      healthy_main, child_page, 'non-root-page schema')
 
     rc, stdout, stderr = run_commands(
-        executable,
-        db_file,
+        executable, db_file,
         'SELECT COUNT(*) FROM products;\nPRAGMA integrity_check;\n.exit\n',
     )
     if rc != 0:
@@ -194,8 +186,8 @@ def run_test():
         sys.exit(1)
 
     print(
-        'PASS: schema WAL roots outside the file or targeting existing non-root '
-        'B+ tree pages are discarded before they can replace the healthy catalog.'
+        'PASS: checksum-valid V3 schema WAL roots outside the file or targeting existing '
+        'non-root B+ tree pages are discarded before they can replace the healthy catalog.'
     )
     remove_database(db_file)
 
