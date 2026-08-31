@@ -31,17 +31,13 @@ def compile_and_run_manifest_probe():
     if shutil.which("cmake") is None:
         raise AssertionError("cmake is required for migration manifest regression")
 
-    with tempfile.TemporaryDirectory(prefix="tinydb-migration-manifest-") as tmp:
-        tmp_path = Path(tmp)
-        probe = tmp_path / "probe.c"
-        probe.write_text(
-            r'''#include "compact_v2_migration_manifest.h"
+    c_source = '''#include "compact_v2_migration_manifest.h"
 #include <stdio.h>
 #include <string.h>
 
 static int expect(int condition, const char* message) {
     if (condition) return 1;
-    fprintf(stderr, "%s\n", message);
+    fprintf(stderr, "%s\\n", message);
     return 0;
 }
 
@@ -121,11 +117,12 @@ int main(void) {
     puts("recovery_classification=yes");
     return 0;
 }
-'''.replace(r'\"', '"'),
-            encoding="utf-8",
-        )
-        cmake_lists = tmp_path / "CMakeLists.txt"
-        cmake_lists.write_text(
+'''
+
+    with tempfile.TemporaryDirectory(prefix="tinydb-migration-manifest-") as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "probe.c").write_text(c_source, encoding="utf-8")
+        (tmp_path / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.10)\n"
             "project(TinyDBMigrationManifestProbe C)\n"
             "set(CMAKE_C_STANDARD 99)\n"
