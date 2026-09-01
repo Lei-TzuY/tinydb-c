@@ -19,6 +19,12 @@
  * sidecar therefore fails closed without opening a Pager transaction or
  * reclaiming any page.
  *
+ * Production callers may additionally supply a manifest preflight callback.
+ * It runs after bounded decode but before Pager recovery starts, allowing
+ * multi-table catalog ownership invariants to reject a semantically valid yet
+ * cross-table-dangerous manifest without changing the historical recovery
+ * adapter aggregate ABI.
+ *
  * The workspace is caller-owned so database open does not place the bounded
  * ~32 KiB decode buffers on a small stack.  The decoded manifest borrows the
  * workspace claim array only for the duration of this call.
@@ -39,6 +45,10 @@ typedef struct TinyDBCompactV2MigrationOpenRecoveryWorkspace {
     unsigned char encoded[TINYDB_COMPACT_V2_MIGRATION_MANIFEST_MAX_ENCODED_SIZE];
 } TinyDBCompactV2MigrationOpenRecoveryWorkspace;
 
+typedef bool (*TinyDBCompactV2MigrationManifestPreflightFn)(
+    void* context,
+    const TinyDBCompactV2MigrationManifest* manifest);
+
 static inline void tinydb_compact_v2_migration_open_recovery_message(
     char* message,
     size_t message_capacity,
@@ -49,11 +59,13 @@ static inline void tinydb_compact_v2_migration_open_recovery_message(
 }
 
 static inline TinyDBCompactV2MigrationOpenRecoveryStatus
- tinydb_compact_v2_migration_recover_open_file(
+ tinydb_compact_v2_migration_recover_open_file_with_preflight(
     const char* database_filename,
     TinyDBCompactV2MigrationPagerRecoveryAdapter* adapter,
     TinyDBCompactV2MigrationOpenRecoveryWorkspace* workspace,
     TinyDBCompactV2MigrationRecoveryResult* recovery_result_out,
+    void* preflight_context,
+    TinyDBCompactV2MigrationManifestPreflightFn preflight,
     char* message,
     size_t message_capacity) {
     TinyDBCompactV2MigrationManifestLoadResult load_result;
@@ -98,6 +110,13 @@ static inline TinyDBCompactV2MigrationOpenRecoveryStatus
         return TINYDB_COMPACT_V2_MIGRATION_OPEN_MANIFEST_IO_ERROR;
     }
 
+    if (preflight != NULL && !preflight(preflight_context, &workspace->manifest)) {
+        memset(recovery_result_out, 0, sizeof(*recovery_result_out));
+        tinydb_compact_v2_migration_open_recovery_message(
+            message, message_capacity, "compact V2 migration manifest violates catalog ownership");
+        return TINYDB_COMPACT_V2_MIGRATION_OPEN_RECOVERY_FAILED;
+    }
+
     memset(&recovered, 0, sizeof(recovered));
     if (!tinydb_compact_v2_migration_pager_recover_reopen(
             &workspace->manifest, adapter, &recovered)) {
@@ -111,6 +130,25 @@ static inline TinyDBCompactV2MigrationOpenRecoveryStatus
     tinydb_compact_v2_migration_open_recovery_message(
         message, message_capacity, "compact V2 migration recovered");
     return TINYDB_COMPACT_V2_MIGRATION_OPEN_RECOVERED;
+}
+
+static inline TinyDBCompactV2MigrationOpenRecoveryStatus
+ tinydb_compact_v2_migration_recover_open_file(
+    const char* database_filename,
+    TinyDBCompactV2MigrationPagerRecoveryAdapter* adapter,
+    TinyDBCompactV2MigrationOpenRecoveryWorkspace* workspace,
+    TinyDBCompactV2MigrationRecoveryResult* recovery_result_out,
+    char* message,
+    size_t message_capacity) {
+    return tinydb_compact_v2_migration_recover_open_file_with_preflight(
+        database_filename,
+        adapter,
+        workspace,
+        recovery_result_out,
+        NULL,
+        NULL,
+        message,
+        message_capacity);
 }
 
 #endif
