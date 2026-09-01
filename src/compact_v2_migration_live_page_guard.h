@@ -148,6 +148,35 @@ static inline bool tinydb_compact_v2_migration_build_catalog_live_page_map(
     return true;
 }
 
+/*
+ * Rebuild the complete authoritative live-page map after a successful reopen
+ * recovery before publishing the database handle. This closes the recovery
+ * loop: preflight proves the intended reclaim is disjoint from live trees,
+ * while this postcondition proves the committed reclaim/checkpoint did not
+ * leave any catalog root, internal child, or leaf marked free/corrupt/shared.
+ */
+static inline bool tinydb_compact_v2_migration_validate_catalog_live_pages(
+    const Catalog* catalog,
+    Pager* pager) {
+    uint8_t* owned = NULL;
+    uint32_t page_count;
+    bool ok;
+
+    if (catalog == NULL || pager == NULL) return false;
+
+    db_rwlock_rdlock(&pager->pager_lock);
+    page_count = pager->num_pages;
+    db_rwlock_rdunlock(&pager->pager_lock);
+    if (page_count == 0u) return false;
+
+    owned = (uint8_t*)calloc(page_count, sizeof(uint8_t));
+    if (owned == NULL) return false;
+    ok = tinydb_compact_v2_migration_build_catalog_live_page_map(
+        catalog, pager, owned, page_count);
+    free(owned);
+    return ok;
+}
+
 static inline bool tinydb_compact_v2_migration_detached_tree_disjoint_from_live(
     Pager* pager,
     uint32_t detached_root,
