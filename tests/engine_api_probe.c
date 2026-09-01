@@ -1,6 +1,7 @@
 #include "diagnostics.h"
 #include "engine.h"
 #include "compact_v2_migration_live_page_guard.h"
+#include "schema_repack_table_scan.h"
 
 static bool execute_ok(TinyDB* database, const char* sql) {
     TinyDBSqlResult result;
@@ -15,6 +16,142 @@ static bool execute_ok(TinyDB* database, const char* sql) {
                 (int)result.route_result);
         return false;
     }
+    return true;
+}
+
+static bool verify_private_repack_rows(
+    const TinyDBCompactV2StagingLeafChain* leaves,
+    const TableSchema* schema,
+    uint32_t expected_rows) {
+    uint32_t expected_key = 1u;
+    for (uint32_t page_index = 0u; page_index < leaves->page_count; page_index++) {
+        const unsigned char* page =
+            tinydb_compact_v2_staging_page_const(leaves, page_index);
+        uint32_t count = 0u;
+        if (page == NULL || !tinydb_leaf_page_count(page, PAGE_SIZE, &count)) {
+            return false;
+        }
+        for (uint32_t cell = 0u; cell < count; cell++) {
+            uint32_t key = 0u;
+            const void* value = NULL;
+            uint32_t value_length = 0u;
+            TinyDBRecordPayload payload;
+            char expected_title[32];
+            char expected_body[32];
+            if (!tinydb_leaf_page_key_at(page, PAGE_SIZE, cell, &key) ||
+                !tinydb_leaf_page_value_at(page, PAGE_SIZE, cell,
+                                           &value, &value_length) ||
+                key != expected_key ||
+                !tinydb_row_envelope_decode_compact_v2(
+                    schema,
+                    (const unsigned char*)value,
+                    value_length,
+                    &payload)) {
+                return false;
+            }
+            snprintf(expected_title, sizeof(expected_title), "source-title-%u", key);
+            snprintf(expected_body, sizeof(expected_body), "source-body-%u", key);
+            if (strcmp((const char*)payload.bytes + schema->columns[1].offset,
+                       expected_title) != 0 ||
+                strcmp((const char*)payload.bytes + schema->columns[2].offset,
+                       expected_body) != 0) {
+                return false;
+            }
+            expected_key++;
+        }
+    }
+    return expected_key == expected_rows + 1u;
+}
+
+static bool repack_real_authoritative_table(TinyDB* database) {
+    if (!execute_ok(database,
+                    "CREATE TABLE repack_source (id INT, title VARCHAR(31), body VARCHAR(63));")) {
+        return false;
+    }
+
+    char sql[512];
+    for (uint32_t id = 1u; id <= 120u; id++) {
+        snprintf(sql,
+                 sizeof(sql),
+                 "INSERT INTO repack_source VALUES (%u, 'source-title-%u', 'source-body-%u');",
+                 id,
+                 id,
+                 id);
+        if (!execute_ok(database, sql)) return false;
+    }
+
+    Table* table = tinydb_table(database);
+    const TableSchema* source = tinydb_find_table_schema(table, "repack_source");
+    TinyDBTreeStats source_stats;
+    if (source == NULL || source->row_size != 100u ||
+        source->columns[1].size != 32u || source->columns[2].size != 64u ||
+        !tinydb_get_tree_stats(table, "repack_source", &source_stats) ||
+        source_stats.total_rows != 120u || source_stats.leaf_pages < 2u ||
+        source_stats.internal_pages < 1u) {
+        fprintf(stderr, "real repack source did not form the expected multi-leaf V2 tree\n");
+        return false;
+    }
+
+    TableSchema destination = *source;
+    destination.columns[1].size = 128u;
+    destination.columns[2].offset = 132u;
+    destination.columns[2].size = 256u;
+    destination.row_size = 388u;
+
+    enum { PRIVATE_PAGE_CAPACITY = 32 };
+    unsigned char leaf_images[PRIVATE_PAGE_CAPACITY * PAGE_SIZE];
+    unsigned char internal_images[PRIVATE_PAGE_CAPACITY * PAGE_SIZE];
+    uint32_t leaf_page_numbers[PRIVATE_PAGE_CAPACITY];
+    uint32_t internal_page_numbers[PRIVATE_PAGE_CAPACITY];
+    for (uint32_t i = 0u; i < PRIVATE_PAGE_CAPACITY; i++) {
+        leaf_page_numbers[i] = 1001u + i;
+        internal_page_numbers[i] = 2001u + i;
+    }
+    memset(leaf_images, 0, sizeof(leaf_images));
+    memset(internal_images, 0, sizeof(internal_images));
+
+    TinyDBCompactV2StagingLeafChain leaves;
+    TinyDBSchemaRepackStaging staging;
+    TinyDBCompactV2StagingHierarchy hierarchy;
+    TinyDBSchemaRepackStagingTreeResult result;
+    char message[192];
+    if (!tinydb_compact_v2_staging_leaf_chain_init(
+            &leaves,
+            leaf_images,
+            leaf_page_numbers,
+            PRIVATE_PAGE_CAPACITY) ||
+        !tinydb_schema_repack_stage_table_scan(
+            table,
+            source,
+            &destination,
+            &leaves,
+            &staging,
+            &hierarchy,
+            internal_images,
+            internal_page_numbers,
+            PRIVATE_PAGE_CAPACITY,
+            &result,
+            message,
+            sizeof(message))) {
+        fprintf(stderr, "real authoritative repack scan failed: %s\n", message);
+        return false;
+    }
+
+    if (!result.ready || result.row_count != 120u ||
+        result.leaf_page_count < 2u || result.internal_page_count < 1u ||
+        result.root_page_num != hierarchy.root_page_num ||
+        staging.rows_staged != 120u || leaves.row_count != 120u ||
+        !verify_private_repack_rows(&leaves, &destination, 120u)) {
+        fprintf(stderr, "real authoritative repack result failed validation\n");
+        return false;
+    }
+
+    printf("REAL_REPACK_SCAN_OK source_root=%u source_rows=%u private_root=%u private_leaves=%u row_size=%u\n",
+           source_stats.root_page_num,
+           source_stats.total_rows,
+           result.root_page_num,
+           result.leaf_page_count,
+           destination.row_size);
     return true;
 }
 
@@ -53,6 +190,11 @@ int main(int argc, char** argv) {
             tinydb_close(database);
             return 1;
         }
+    }
+
+    if (!repack_real_authoritative_table(database)) {
+        tinydb_close(database);
+        return 1;
     }
 
     Table* table = tinydb_table(database);
@@ -105,7 +247,8 @@ int main(int argc, char** argv) {
 
     char diagnostic[TINYDB_DIAGNOSTIC_MESSAGE_MAX];
     if (!tinydb_check_table_tree(table, "users", diagnostic, sizeof(diagnostic)) ||
-        !tinydb_check_table_tree(table, "archive", diagnostic, sizeof(diagnostic))) {
+        !tinydb_check_table_tree(table, "archive", diagnostic, sizeof(diagnostic)) ||
+        !tinydb_check_table_tree(table, "repack_source", diagnostic, sizeof(diagnostic))) {
         fprintf(stderr, "tree integrity failed: %s\n", diagnostic);
         tinydb_close(database);
         return 1;
@@ -121,15 +264,18 @@ int main(int argc, char** argv) {
     table = tinydb_table(database);
     users_schema = tinydb_find_table_schema(table, "users");
     archive_schema = tinydb_find_table_schema(table, "archive");
-    if (users_schema == NULL || archive_schema == NULL ||
+    const TableSchema* repack_source_schema =
+        tinydb_find_table_schema(table, "repack_source");
+    if (users_schema == NULL || archive_schema == NULL || repack_source_schema == NULL ||
         archive_schema->root_page_num != archive_root) {
         fprintf(stderr, "catalog schemas or archive root did not persist across reopen\n");
         tinydb_close(database);
         return 1;
     }
     if (archive_schema->num_columns != 3 || archive_schema->row_size != 516 ||
-        archive_schema->columns[1].size != 256 || archive_schema->columns[2].size != 256) {
-        fprintf(stderr, "wide archive schema layout did not persist across reopen\n");
+        archive_schema->columns[1].size != 256 || archive_schema->columns[2].size != 256 ||
+        repack_source_schema->row_size != 100u) {
+        fprintf(stderr, "wide or repack-source schema layout did not persist across reopen\n");
         tinydb_close(database);
         return 1;
     }
@@ -142,6 +288,14 @@ int main(int argc, char** argv) {
     if (!tinydb_get_tree_stats(table, "users", &users_stats) ||
         users_stats.total_rows != 1) {
         fprintf(stderr, "users rows changed across reopen\n");
+        tinydb_close(database);
+        return 1;
+    }
+
+    TinyDBTreeStats repack_source_stats;
+    if (!tinydb_get_tree_stats(table, "repack_source", &repack_source_stats) ||
+        repack_source_stats.total_rows != 120u || repack_source_stats.leaf_pages < 2u) {
+        fprintf(stderr, "repack source rows changed across reopen\n");
         tinydb_close(database);
         return 1;
     }
