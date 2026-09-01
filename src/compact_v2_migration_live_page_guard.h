@@ -12,7 +12,7 @@
 
 /*
  * Build a fail-closed reachability map for every page reachable through the
- * authoritative catalog roots.  Migration recovery must protect complete live
+ * authoritative catalog roots. Migration recovery must protect complete live
  * trees, not merely their roots: a corrupt sidecar that reclaims a live leaf or
  * internal child is just as destructive as reclaiming the root itself.
  *
@@ -86,13 +86,15 @@ static inline bool tinydb_compact_v2_migration_collect_tree_pages(
         const NodeType type = get_node_type(node);
         if (type == NODE_INTERNAL) {
             const uint32_t key_count = *internal_node_num_keys((void*)node);
+            const uint32_t child_count = key_count + 1u;
             if (key_count == 0u || key_count > INTERNAL_NODE_MAX_KEYS ||
-                queue_count > owned_capacity - (key_count + 1u)) {
+                child_count > owned_capacity ||
+                queue_count > owned_capacity - child_count) {
                 (void)pager_page_handle_release_read(&handle);
                 (void)pager_release_page_handle(&handle);
                 goto cleanup;
             }
-            for (uint32_t i = 0u; i <= key_count; i++) {
+            for (uint32_t i = 0u; i < child_count; i++) {
                 const uint32_t child = *internal_node_child((void*)node, i);
                 if (child == INVALID_PAGE_NUM || child >= owned_capacity ||
                     owned[child] != 0u ||
