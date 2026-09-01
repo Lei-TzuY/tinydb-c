@@ -14,10 +14,13 @@
  * Pager-backed adapter for the compact-V2 reopen recovery executor.
  *
  * Recovery starts with a fresh Pager transaction.  The staging-reclaim path is
- * implemented directly with the manifest-owned claimed-page primitive.  The
- * publication-success path now has a built-in fixed-V1 ownership walk for
- * nonzero old roots; callers may still override it when a table uses a
- * different topology or the reserved historical page-zero root.
+ * implemented directly with the manifest-owned claimed-page primitive unless
+ * the caller supplies a stricter reclaim_staging_pages hook.  Production open
+ * uses that hook to protect every currently authoritative catalog root from a
+ * malformed cross-table migration claim.  The publication-success path has a
+ * built-in fixed-V1 ownership walk for nonzero old roots; callers may still
+ * override it when a table uses a different topology, the reserved historical
+ * page-zero root, or needs stronger catalog ownership checks.
  *
  * sync_reclaim is the durability boundary: it commits the allocator/tree
  * mutation and checkpoints it before manifest removal can begin.  If recovery
@@ -35,6 +38,7 @@ typedef struct TinyDBCompactV2MigrationPagerRecoveryAdapter {
     Pager* pager;
     void* context;
     TinyDBCompactV2MigrationReadCatalogFn read_catalog;
+    TinyDBCompactV2MigrationReclaimStagingFn reclaim_staging_pages;
     TinyDBCompactV2MigrationPagerReclaimOldTreeFn reclaim_old_tree;
     TinyDBCompactV2MigrationRecoveryStepFn remove_manifest;
     TinyDBCompactV2MigrationRecoveryStepFn sync_parent;
@@ -71,6 +75,10 @@ static inline bool tinydb_compact_v2_migration_pager_recovery_reclaim_staging(
     if (!tinydb_compact_v2_migration_pager_recovery_adapter_is_valid(adapter) ||
         !adapter->pager->in_transaction) {
         return false;
+    }
+    if (adapter->reclaim_staging_pages != NULL) {
+        return adapter->reclaim_staging_pages(
+            adapter->context, claimed_pages, claimed_page_count);
     }
     return tinydb_compact_v2_migration_pager_reclaim_claims(
         adapter->pager, claimed_pages, claimed_page_count);
