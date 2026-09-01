@@ -6,22 +6,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "src" / "compact_v2_migration_open_adapter.h"
-PAGER_RECOVERY = ROOT / "src" / "compact_v2_migration_pager_recovery.h"
+OPEN_RECOVERY = ROOT / "src" / "compact_v2_migration_open_recovery.h"
+ENGINE_GUARD = ROOT / "src" / "engine_open_guard.c"
 
 
 def test_source_contract():
     adapter = HEADER.read_text(encoding="utf-8")
-    pager_recovery = PAGER_RECOVERY.read_text(encoding="utf-8")
+    open_recovery = OPEN_RECOVERY.read_text(encoding="utf-8")
+    engine = ENGINE_GUARD.read_text(encoding="utf-8")
     for token in [
         "tinydb_compact_v2_migration_open_adapter_is_authoritative_root(",
-        "tinydb_compact_v2_migration_open_adapter_reclaim_staging(",
-        "tinydb_compact_v2_migration_open_adapter_reclaim_old_tree(",
-        "adapter_out->reclaim_staging_pages =",
-        "adapter_out->reclaim_old_tree =",
+        "tinydb_compact_v2_migration_open_adapter_manifest_is_safe(",
+        "TINYDB_COMPACT_V2_MIGRATION_STRICT_RECLAIM_STAGING",
+        "TINYDB_COMPACT_V2_MIGRATION_STRICT_KEEP_NEW_RECLAIM_OLD",
     ]:
         assert token in adapter, f"missing cross-table recovery guard: {token}"
-    assert "TinyDBCompactV2MigrationReclaimStagingFn reclaim_staging_pages;" in pager_recovery
-    assert "if (adapter->reclaim_staging_pages != NULL)" in pager_recovery
+    assert "tinydb_compact_v2_migration_recover_open_file_with_preflight(" in open_recovery
+    assert "preflight(preflight_context, &workspace->manifest)" in open_recovery
+    assert "tinydb_compact_v2_migration_recover_open_file_with_preflight(" in engine
+    assert "tinydb_compact_v2_migration_open_adapter_manifest_is_safe" in engine
 
 
 def configure_and_build(tmp_path: Path):
@@ -45,21 +48,13 @@ def configure_and_build(tmp_path: Path):
     build = tmp_path / "build"
     configure = subprocess.run(
         ["cmake", "-S", str(tmp_path), "-B", str(build)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        timeout=60,
+        capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=60,
     )
     if configure.returncode != 0:
         raise AssertionError(configure.stdout + configure.stderr)
     compiled = subprocess.run(
         ["cmake", "--build", str(build), "--config", "Debug"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=120,
     )
     if compiled.returncode != 0:
         raise AssertionError(compiled.stdout + compiled.stderr)
@@ -97,8 +92,9 @@ int main(void) {
     Pager pager;
     TinyDBSchemaCatalogGenerationSnapshot snapshot;
     TinyDBCompactV2MigrationOpenAdapterContext context;
-    TinyDBCompactV2MigrationPagerRecoveryAdapter adapter;
-    uint32_t claims[2] = { 9u, 17u };
+    uint32_t bad_claims[2] = {9u, 17u};
+    uint32_t safe_claims[2] = {9u, 10u};
+    TinyDBCompactV2MigrationManifest manifest;
 
     memset(&catalog, 0, sizeof(catalog));
     memset(&pager, 0, sizeof(pager));
@@ -106,37 +102,42 @@ int main(void) {
     init_schema(&catalog.schemas[0], "orders", 4u);
     init_schema(&catalog.schemas[1], "audit", 17u);
     pager.num_pages = 32u;
-
     if (!tinydb_schema_catalog_generation_bootstrap_legacy(&catalog, &snapshot)) return 100;
     snapshot.entries[0].schema_generation = UINT64_C(7);
     snapshot.entries[1].schema_generation = UINT64_C(3);
-
     if (!tinydb_compact_v2_migration_open_adapter_init(
             &context, "cross-table.db", &catalog, &snapshot, &pager)) return 101;
-    if (!tinydb_compact_v2_migration_open_adapter_build(&context, &adapter)) return 102;
 
-    if (!expect(tinydb_compact_v2_migration_open_adapter_is_authoritative_root(&context, 4u),
-                "target root was not recognized")) return 1;
-    if (!expect(tinydb_compact_v2_migration_open_adapter_is_authoritative_root(&context, 17u),
-                "other table root was not recognized")) return 2;
-    if (!expect(!tinydb_compact_v2_migration_open_adapter_is_authoritative_root(&context, 9u),
-                "non-root page was misclassified")) return 3;
+    memset(&manifest, 0, sizeof(manifest));
+    manifest.table_id = 1u;
+    manifest.old_root_page_num = 4u;
+    manifest.staged_root_page_num = 9u;
+    manifest.old_schema_generation = UINT64_C(7);
+    manifest.new_schema_generation = UINT64_C(8);
+    manifest.phase = TINYDB_COMPACT_V2_MIGRATION_PHASE_DURABLE_UNPUBLISHED;
+    manifest.claimed_page_count = 2u;
+    manifest.claimed_pages = bad_claims;
+    if (!expect(!tinydb_compact_v2_migration_open_adapter_manifest_is_safe(&context, &manifest),
+                "staging manifest was allowed to claim another live table root")) return 1;
+    manifest.claimed_pages = safe_claims;
+    if (!expect(tinydb_compact_v2_migration_open_adapter_manifest_is_safe(&context, &manifest),
+                "safe unpublished staging manifest was rejected")) return 2;
 
-    pager.in_transaction = true;
-    if (!expect(!adapter.reclaim_staging_pages(adapter.context, claims, 2u),
-                "staging claims were allowed to contain another table root")) return 4;
-    if (!expect(pager.free_page_count == 0u,
-                "cross-table staging rejection mutated allocator state")) return 5;
+    catalog.schemas[0].root_page_num = 9u;
+    snapshot.entries[0].root_page_num = 9u;
+    snapshot.entries[0].schema_generation = UINT64_C(8);
+    manifest.phase = TINYDB_COMPACT_V2_MIGRATION_PHASE_CATALOG_PUBLISHED;
+    manifest.old_root_page_num = 17u;
+    if (!expect(!tinydb_compact_v2_migration_open_adapter_manifest_is_safe(&context, &manifest),
+                "retired root was allowed to target another live table root")) return 3;
+    manifest.old_root_page_num = 12u;
+    if (!expect(tinydb_compact_v2_migration_open_adapter_manifest_is_safe(&context, &manifest),
+                "safe published migration manifest was rejected")) return 4;
 
-    if (!expect(!adapter.reclaim_old_tree(adapter.context, &pager, 17u),
-                "retired-root reclaim was allowed to target another live table root")) return 6;
-    if (!expect(pager.free_page_count == 0u,
-                "cross-table old-root rejection mutated allocator state")) return 7;
-
-    puts("all_catalog_roots_recognized=yes");
     puts("staging_cross_table_root_rejected=yes");
+    puts("safe_staging_allowed=yes");
     puts("old_tree_cross_table_root_rejected=yes");
-    puts("allocator_unmodified=yes");
+    puts("safe_old_tree_allowed=yes");
     return 0;
 }
 '''
@@ -151,20 +152,15 @@ int main(void) {
             else "cross_table_root_guard_probe"
         )
         run = subprocess.run(
-            [str(exe)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=30,
+            [str(exe)], capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=30,
         )
         if run.returncode != 0:
             raise AssertionError(run.stdout + run.stderr)
         for marker in [
-            "all_catalog_roots_recognized=yes",
             "staging_cross_table_root_rejected=yes",
+            "safe_staging_allowed=yes",
             "old_tree_cross_table_root_rejected=yes",
-            "allocator_unmodified=yes",
+            "safe_old_tree_allowed=yes",
         ]:
             assert marker in run.stdout, f"missing {marker}: {run.stdout}"
 
@@ -172,7 +168,7 @@ int main(void) {
 def main():
     test_source_contract()
     run_probe()
-    print("PASS: compact V2 reopen recovery protects every authoritative multi-table root")
+    print("PASS: compact V2 reopen recovery preflights all authoritative multi-table roots")
 
 
 if __name__ == "__main__":
