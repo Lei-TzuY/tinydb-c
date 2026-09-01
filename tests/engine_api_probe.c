@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
     }
 
     if (!execute_ok(database,
-                    "CREATE TABLE archive (id INT, title VARCHAR(128), body VARCHAR(384));")) {
+                    "CREATE TABLE archive (id INT, title VARCHAR(255), body VARCHAR(255));")) {
         tinydb_close(database);
         return 1;
     }
@@ -67,9 +67,9 @@ int main(int argc, char** argv) {
     if (archive_schema->num_columns != 3 || archive_schema->row_size != 516 ||
         archive_schema->columns[0].offset != 0 ||
         archive_schema->columns[1].offset != 4 ||
-        archive_schema->columns[1].size != 128 ||
-        archive_schema->columns[2].offset != 132 ||
-        archive_schema->columns[2].size != 384) {
+        archive_schema->columns[1].size != 256 ||
+        archive_schema->columns[2].offset != 260 ||
+        archive_schema->columns[2].size != 256) {
         fprintf(stderr,
                 "wide archive schema layout is wrong: columns=%u row_size=%u\n",
                 archive_schema->num_columns,
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (archive_schema->num_columns != 3 || archive_schema->row_size != 516 ||
-        archive_schema->columns[1].size != 128 || archive_schema->columns[2].size != 384) {
+        archive_schema->columns[1].size != 256 || archive_schema->columns[2].size != 256) {
         fprintf(stderr, "wide archive schema layout did not persist across reopen\n");
         tinydb_close(database);
         return 1;
