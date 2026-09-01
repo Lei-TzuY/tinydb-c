@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "compact_v2_migration_pager_reclaim.h"
+#include "fixed_v1_tree_reclaim.h"
 #include "pager_try_pin.h"
 #include "table.h"
 
@@ -162,8 +163,9 @@ static inline bool tinydb_compact_v2_migration_detached_tree_disjoint_from_live(
     }
 
     /* A checkpointed previous reclaim is an idempotent success on retry. */
-    if (detached_root != 0u &&
-        tinydb_compact_v2_migration_live_page_is_free(pager, detached_root)) {
+    if ((detached_root != 0u &&
+         tinydb_compact_v2_migration_live_page_is_free(pager, detached_root)) ||
+        (detached_root == 0u && tinydb_fixed_v1_page_zero_is_retired(pager))) {
         return true;
     }
 
