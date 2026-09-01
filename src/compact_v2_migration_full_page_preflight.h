@@ -18,6 +18,21 @@
  * reachability map first, then prove that every page recovery may reclaim is
  * disjoint from every live tree.
  */
+static inline bool tinydb_compact_v2_migration_claims_are_disjoint_from_live(
+    const TinyDBCompactV2MigrationManifest* manifest,
+    const uint8_t* live,
+    uint32_t live_capacity) {
+    if (manifest == NULL || live == NULL || live_capacity == 0u ||
+        !tinydb_compact_v2_migration_manifest_is_valid(manifest)) {
+        return false;
+    }
+    for (uint32_t i = 0u; i < manifest->claimed_page_count; i++) {
+        const uint32_t page_num = manifest->claimed_pages[i];
+        if (page_num >= live_capacity || live[page_num] != 0u) return false;
+    }
+    return true;
+}
+
 static inline bool tinydb_compact_v2_migration_open_adapter_manifest_pages_are_safe(
     void* opaque,
     const TinyDBCompactV2MigrationManifest* manifest) {
@@ -66,11 +81,8 @@ static inline bool tinydb_compact_v2_migration_open_adapter_manifest_pages_are_s
     }
 
     if (action == TINYDB_COMPACT_V2_MIGRATION_STRICT_RECLAIM_STAGING) {
-        for (uint32_t i = 0u; i < manifest->claimed_page_count; i++) {
-            const uint32_t page_num = manifest->claimed_pages[i];
-            if (page_num >= num_pages || live[page_num] != 0u) goto cleanup;
-        }
-        safe = true;
+        safe = tinydb_compact_v2_migration_claims_are_disjoint_from_live(
+            manifest, live, num_pages);
         goto cleanup;
     }
 
