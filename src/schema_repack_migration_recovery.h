@@ -34,12 +34,10 @@ static inline bool tinydb_schema_repack_recover_durable_unpublished(
     const TinyDBCompactV2MigrationManifest* manifest,
     const TinyDBCompactV2MigrationRecoveryOps* ops,
     TinyDBSchemaRepackPreCatalogRecoveryResult* result_out) {
-    TinyDBCompactV2MigrationRecoveryResult recovered;
     uint32_t authoritative_root = 0u;
     uint64_t authoritative_generation = UINT64_C(0);
 
     if (result_out != NULL) memset(result_out, 0, sizeof(*result_out));
-    memset(&recovered, 0, sizeof(recovered));
 
     if (manifest == NULL || result_out == NULL ||
         !tinydb_compact_v2_migration_manifest_is_valid(manifest) ||
@@ -50,9 +48,9 @@ static inline bool tinydb_schema_repack_recover_durable_unpublished(
     }
 
     /*
-     * Preflight the catalog before any reclaim side effect.  This intentionally
-     * rejects the new-root/new-generation state; that belongs to the later
-     * post-publication recovery path.
+     * Observe catalog state exactly once before any reclaim side effect.  This
+     * intentionally rejects the new-root/new-generation state; that belongs to
+     * the later post-publication recovery path.
      */
     if (!ops->read_catalog(
             ops->context,
@@ -64,14 +62,15 @@ static inline bool tinydb_schema_repack_recover_durable_unpublished(
         return false;
     }
 
-    if (!tinydb_compact_v2_migration_recover_reopen(
-            manifest, ops, &recovered) ||
-        recovered.action !=
-            TINYDB_COMPACT_V2_MIGRATION_STRICT_RECLAIM_STAGING ||
-        recovered.authoritative_root_page_num != authoritative_root ||
-        recovered.authoritative_schema_generation != authoritative_generation) {
+    if (!ops->reclaim_staging_pages(
+            ops->context,
+            manifest->claimed_pages,
+            manifest->claimed_page_count)) {
         return false;
     }
+    if (!ops->sync_reclaim(ops->context)) return false;
+    if (!ops->remove_manifest(ops->context)) return false;
+    if (!ops->sync_parent(ops->context)) return false;
 
     result_out->authoritative_root_page_num = authoritative_root;
     result_out->authoritative_schema_generation = authoritative_generation;
