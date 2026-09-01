@@ -10,6 +10,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -18,16 +19,7 @@
 #include "compact_v2_migration_manifest_file.h"
 #include "compact_v2_migration_pager_recovery.h"
 
-/*
- * Production file/catalog adapter used by tinydb_open().  Recovery needs one
- * context for both authoritative catalog lookup and durable sidecar cleanup.
- * Keeping those operations together prevents an open path from accidentally
- * consulting one Catalog while deleting a manifest belonging to another DB.
- *
- * Before Pager recovery starts, production open also validates migration page
- * ownership against the complete authoritative multi-table catalog.  A stale
- * or malicious sidecar must never be able to free another table's live root.
- */
+/* Production file/catalog adapter used by tinydb_open(). */
 typedef struct TinyDBCompactV2MigrationOpenAdapterContext {
     TinyDBCompactV2MigrationCatalogState catalog_state;
     char database_filename[TINYDB_COMPACT_V2_MIGRATION_MANIFEST_PATH_MAX];
@@ -44,20 +36,15 @@ static inline bool tinydb_compact_v2_migration_open_adapter_init(
     const TinyDBSchemaCatalogGenerationSnapshot* snapshot,
     Pager* pager) {
     size_t filename_length;
-
     if (context == NULL) return false;
     memset(context, 0, sizeof(*context));
     if (database_filename == NULL || database_filename[0] == '\0' ||
-        catalog == NULL || snapshot == NULL || pager == NULL) {
-        return false;
-    }
+        catalog == NULL || snapshot == NULL || pager == NULL) return false;
     filename_length = strlen(database_filename);
     if (filename_length + 1u > sizeof(context->database_filename)) return false;
     memcpy(context->database_filename, database_filename, filename_length + 1u);
     if (!tinydb_compact_v2_migration_manifest_file_path(
-            database_filename,
-            context->manifest_path,
-            sizeof(context->manifest_path))) {
+            database_filename, context->manifest_path, sizeof(context->manifest_path))) {
         memset(context, 0, sizeof(*context));
         return false;
     }
@@ -84,28 +71,20 @@ static inline bool tinydb_compact_v2_migration_open_adapter_init(
 }
 
 static inline bool tinydb_compact_v2_migration_open_adapter_read_catalog(
-    void* opaque,
-    uint32_t table_id,
-    uint32_t* root_page_num_out,
+    void* opaque, uint32_t table_id, uint32_t* root_page_num_out,
     uint64_t* schema_generation_out) {
     TinyDBCompactV2MigrationOpenAdapterContext* context =
         (TinyDBCompactV2MigrationOpenAdapterContext*)opaque;
     if (context == NULL) return false;
     return tinydb_compact_v2_migration_catalog_state_read(
-        &context->catalog_state,
-        table_id,
-        root_page_num_out,
-        schema_generation_out);
+        &context->catalog_state, table_id, root_page_num_out, schema_generation_out);
 }
 
 static inline bool tinydb_compact_v2_migration_open_adapter_is_authoritative_root(
-    const TinyDBCompactV2MigrationOpenAdapterContext* context,
-    uint32_t page_num) {
+    const TinyDBCompactV2MigrationOpenAdapterContext* context, uint32_t page_num) {
     const Catalog* catalog;
     if (context == NULL ||
-        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) {
-        return false;
-    }
+        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) return false;
     catalog = context->catalog_state.catalog;
     for (uint32_t i = 0u; i < catalog->num_tables; i++) {
         if (catalog->schemas[i].root_page_num == page_num) return true;
@@ -113,47 +92,25 @@ static inline bool tinydb_compact_v2_migration_open_adapter_is_authoritative_roo
     return false;
 }
 
-/*
- * Validate the already checksummed/decoded migration manifest against every
- * current table root before any recovery transaction begins.
- *
- * If the old catalog state is authoritative, recovery will reclaim staging
- * claims, so none of those claims may be a live catalog root.  If the new
- * catalog state is authoritative, recovery will reclaim the retired old tree,
- * so that old root may not currently belong to any table.  This closes a
- * cross-table corruption hole that per-table root/generation classification
- * alone cannot detect.
- */
 static inline bool tinydb_compact_v2_migration_open_adapter_manifest_is_safe(
-    void* opaque,
-    const TinyDBCompactV2MigrationManifest* manifest) {
+    void* opaque, const TinyDBCompactV2MigrationManifest* manifest) {
     TinyDBCompactV2MigrationOpenAdapterContext* context =
         (TinyDBCompactV2MigrationOpenAdapterContext*)opaque;
     uint32_t authoritative_root = 0u;
     uint64_t authoritative_generation = UINT64_C(0);
     TinyDBCompactV2MigrationStrictRecoveryAction action;
-
     if (context == NULL || manifest == NULL ||
         !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state) ||
-        !tinydb_compact_v2_migration_manifest_is_valid(manifest)) {
-        return false;
-    }
+        !tinydb_compact_v2_migration_manifest_is_valid(manifest)) return false;
     if (!tinydb_compact_v2_migration_catalog_state_read(
-            &context->catalog_state,
-            manifest->table_id,
-            &authoritative_root,
-            &authoritative_generation)) {
-        return false;
-    }
-
+            &context->catalog_state, manifest->table_id,
+            &authoritative_root, &authoritative_generation)) return false;
     action = tinydb_compact_v2_migration_manifest_classify_recovery_strict(
         manifest, authoritative_root, authoritative_generation);
     if (action == TINYDB_COMPACT_V2_MIGRATION_STRICT_RECLAIM_STAGING) {
         for (uint32_t i = 0u; i < manifest->claimed_page_count; i++) {
             if (tinydb_compact_v2_migration_open_adapter_is_authoritative_root(
-                    context, manifest->claimed_pages[i])) {
-                return false;
-            }
+                    context, manifest->claimed_pages[i])) return false;
         }
         return true;
     }
@@ -164,18 +121,17 @@ static inline bool tinydb_compact_v2_migration_open_adapter_manifest_is_safe(
     return false;
 }
 
-static inline bool tinydb_compact_v2_migration_open_adapter_remove_manifest(
-    void* opaque) {
+/*
+ * Manifest removal is deliberately idempotent. Recovery may be retried after
+ * the active name was already removed (for example after a failure at the
+ * parent-directory durability boundary), so ENOENT/FILE_NOT_FOUND means the
+ * removal step itself is already satisfied rather than a new recovery error.
+ */
+static inline bool tinydb_compact_v2_migration_open_adapter_remove_manifest(void* opaque) {
     TinyDBCompactV2MigrationOpenAdapterContext* context =
         (TinyDBCompactV2MigrationOpenAdapterContext*)opaque;
     if (context == NULL || context->manifest_path[0] == '\0') return false;
 #ifdef _WIN32
-    /*
-     * MOVEFILE_WRITE_THROUGH makes disappearance of the active name the
-     * durability boundary.  A leftover tombstone is harmless and can be
-     * replaced by a later recovery attempt; correctness never depends on its
-     * deletion succeeding.
-     */
     (void)DeleteFileA(context->tombstone_path);
     if (!MoveFileExA(context->manifest_path,
                      context->tombstone_path,
@@ -186,15 +142,13 @@ static inline bool tinydb_compact_v2_migration_open_adapter_remove_manifest(
     return true;
 #else
     if (unlink(context->manifest_path) == 0) return true;
-    return false;
+    return errno == ENOENT;
 #endif
 }
 
 #ifndef _WIN32
 static inline bool tinydb_compact_v2_migration_open_adapter_parent_path(
-    const char* database_filename,
-    char* parent_out,
-    size_t parent_capacity) {
+    const char* database_filename, char* parent_out, size_t parent_capacity) {
     const char* slash;
     size_t length;
     if (parent_out == NULL || parent_capacity == 0u) return false;
@@ -221,22 +175,18 @@ static inline bool tinydb_compact_v2_migration_open_adapter_parent_path(
 }
 #endif
 
-static inline bool tinydb_compact_v2_migration_open_adapter_sync_parent(
-    void* opaque) {
+static inline bool tinydb_compact_v2_migration_open_adapter_sync_parent(void* opaque) {
     TinyDBCompactV2MigrationOpenAdapterContext* context =
         (TinyDBCompactV2MigrationOpenAdapterContext*)opaque;
     if (context == NULL || context->database_filename[0] == '\0') return false;
 #ifdef _WIN32
-    /* The active-name removal already used MOVEFILE_WRITE_THROUGH. */
     return true;
 #else
     char parent[TINYDB_COMPACT_V2_MIGRATION_MANIFEST_PATH_MAX];
     int fd;
     int sync_result;
     if (!tinydb_compact_v2_migration_open_adapter_parent_path(
-            context->database_filename, parent, sizeof(parent))) {
-        return false;
-    }
+            context->database_filename, parent, sizeof(parent))) return false;
 #ifdef O_DIRECTORY
     fd = open(parent, O_RDONLY | O_DIRECTORY);
 #else
@@ -255,9 +205,7 @@ static inline bool tinydb_compact_v2_migration_open_adapter_build(
     if (adapter_out == NULL) return false;
     memset(adapter_out, 0, sizeof(*adapter_out));
     if (context == NULL ||
-        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) {
-        return false;
-    }
+        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) return false;
     adapter_out->pager = (Pager*)context->catalog_state.pager;
     adapter_out->context = context;
     adapter_out->read_catalog = tinydb_compact_v2_migration_open_adapter_read_catalog;
