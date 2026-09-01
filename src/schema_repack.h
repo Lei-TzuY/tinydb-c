@@ -13,10 +13,10 @@
  *
  * The first supported transformation is deliberately narrow: schemas must
  * describe the same ordered columns with the same types, while VARCHAR storage
- * widths may stay unchanged or grow.  INT representation is fixed at 4 bytes.
+ * widths may stay unchanged or grow. INT representation is fixed at 4 bytes.
  * This is enough to move a populated compact-V2 table from (for example)
  * VARCHAR(31) to VARCHAR(127) without interpreting the row through the legacy
- * TinyDBRecord ABI.  No page/catalog mutation happens here; callers can stage
+ * TinyDBRecord ABI. No page/catalog mutation happens here; callers can stage
  * an entirely new tree before publishing a new schema generation.
  */
 
@@ -25,6 +25,10 @@ static inline void tinydb_schema_repack_set_message(char* message,
                                                     const char* text) {
     if (message == NULL || message_size == 0u) return;
     snprintf(message, message_size, "%s", text != NULL ? text : "");
+}
+
+static inline bool tinydb_schema_repack_name_valid(const char* name) {
+    return name != NULL && name[0] != '\0' && memchr(name, '\0', MAX_NAME_SIZE) != NULL;
 }
 
 static inline bool tinydb_schema_repack_layout_valid(const TableSchema* schema) {
@@ -37,8 +41,10 @@ static inline bool tinydb_schema_repack_layout_valid(const TableSchema* schema) 
     uint32_t expected_offset = 0u;
     for (uint32_t i = 0u; i < schema->num_columns; i++) {
         const TableColumn* column = &schema->columns[i];
-        if (column->name[0] == '\0' || column->offset != expected_offset ||
-            column->size == 0u || column->size > schema->row_size - column->offset) {
+        if (!tinydb_schema_repack_name_valid(column->name) ||
+            column->offset != expected_offset || column->size == 0u ||
+            column->offset > schema->row_size ||
+            column->size > schema->row_size - column->offset) {
             return false;
         }
         if (column->type == COL_TYPE_INT) {
@@ -85,7 +91,7 @@ static inline bool tinydb_schema_repack_widening_supported(
     for (uint32_t i = 0u; i < source_schema->num_columns; i++) {
         const TableColumn* source = &source_schema->columns[i];
         const TableColumn* destination = &destination_schema->columns[i];
-        if (strncmp(source->name, destination->name, MAX_NAME_SIZE) != 0) {
+        if (strcmp(source->name, destination->name) != 0) {
             tinydb_schema_repack_set_message(message,
                                              message_size,
                                              "VARCHAR widening cannot reorder or rename columns");
