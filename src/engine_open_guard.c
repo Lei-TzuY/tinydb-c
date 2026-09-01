@@ -78,11 +78,13 @@ TinyDB* tinydb_open(const char* filename) {
 
     memset(&recovery_result, 0, sizeof(recovery_result));
     memset(recovery_message, 0, sizeof(recovery_message));
-    recovery_status = tinydb_compact_v2_migration_recover_open_file(
+    recovery_status = tinydb_compact_v2_migration_recover_open_file_with_preflight(
         database->filename,
         &recovery_adapter,
         recovery_workspace,
         &recovery_result,
+        &recovery_context,
+        tinydb_compact_v2_migration_open_adapter_manifest_is_safe,
         recovery_message,
         sizeof(recovery_message));
     free(recovery_workspace);
