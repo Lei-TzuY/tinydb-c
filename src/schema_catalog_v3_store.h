@@ -22,9 +22,13 @@
  * This is intentionally separate from the legacy V1/V2 reader so the existing
  * on-disk ABI stays untouched while the V3 production path is brought up.
  * The WAL contains one complete checksummed V3 envelope followed by a commit
- * marker.  Recovery only publishes a WAL after both the outer envelope and the
- * marker validate.  Main-file publication writes the same envelope without the
+ * marker. Recovery only publishes a WAL after both the outer envelope and the
+ * marker validate. Main-file publication writes the same envelope without the
  * marker and syncs it before the WAL may be removed.
+ *
+ * The durable commit point is the synced WAL commit marker, not the later
+ * best-effort main-file copy. Once that point is crossed, reopen recovery will
+ * publish the envelope even if copying the main file or removing the WAL fails.
  */
 
 #define TINYDB_SCHEMA_CATALOG_V3_WAL_COMMIT_MAGIC UINT32_C(0x33435754) /* TWC3 */
@@ -36,6 +40,17 @@ typedef enum TinyDBSchemaCatalogV3StoreReadResult {
     TINYDB_SCHEMA_CATALOG_V3_STORE_READ_INVALID,
     TINYDB_SCHEMA_CATALOG_V3_STORE_READ_IO_ERROR
 } TinyDBSchemaCatalogV3StoreReadResult;
+
+typedef struct TinyDBSchemaCatalogV3StorePublishResult {
+    bool wal_committed_durable;
+    bool main_published_durable;
+    bool cleanup_complete;
+} TinyDBSchemaCatalogV3StorePublishResult;
+
+static inline void tinydb_schema_catalog_v3_store_publish_result_zero(
+    TinyDBSchemaCatalogV3StorePublishResult* result) {
+    if (result != NULL) memset(result, 0, sizeof(*result));
+}
 
 static inline bool tinydb_schema_catalog_v3_store_sync(FILE* file) {
     if (file == NULL || fflush(file) != 0) return false;
@@ -151,21 +166,45 @@ static inline bool tinydb_schema_catalog_v3_store_write_file(
     return ok;
 }
 
+static inline bool tinydb_schema_catalog_v3_store_publish_detailed(
+    const char* main_path,
+    const char* wal_path,
+    const unsigned char* envelope,
+    size_t envelope_size,
+    TinyDBSchemaCatalogV3StorePublishResult* result) {
+    tinydb_schema_catalog_v3_store_publish_result_zero(result);
+    if (main_path == NULL || wal_path == NULL || envelope == NULL || result == NULL) {
+        return false;
+    }
+
+    /* Crossing this boundary commits the new catalog. Recovery treats a valid,
+     * synced WAL as authoritative even if the main copy is still old/missing. */
+    if (!tinydb_schema_catalog_v3_store_write_file(
+            wal_path, envelope, envelope_size, true)) {
+        return false;
+    }
+    result->wal_committed_durable = true;
+
+    if (!tinydb_schema_catalog_v3_store_write_file(
+            main_path, envelope, envelope_size, false)) {
+        return true;
+    }
+    result->main_published_durable = true;
+
+    if (remove(wal_path) == 0 || errno == ENOENT) {
+        result->cleanup_complete = true;
+    }
+    return true;
+}
+
 static inline bool tinydb_schema_catalog_v3_store_publish(
     const char* main_path,
     const char* wal_path,
     const unsigned char* envelope,
     size_t envelope_size) {
-    if (main_path == NULL || wal_path == NULL || envelope == NULL) return false;
-    if (!tinydb_schema_catalog_v3_store_write_file(
-            wal_path, envelope, envelope_size, true)) {
-        return false;
-    }
-    if (!tinydb_schema_catalog_v3_store_write_file(
-            main_path, envelope, envelope_size, false)) {
-        return false;
-    }
-    return remove(wal_path) == 0 || errno == ENOENT;
+    TinyDBSchemaCatalogV3StorePublishResult result;
+    return tinydb_schema_catalog_v3_store_publish_detailed(
+        main_path, wal_path, envelope, envelope_size, &result);
 }
 
 static inline bool tinydb_schema_catalog_v3_store_recover(
@@ -189,7 +228,7 @@ static inline bool tinydb_schema_catalog_v3_store_recover(
                                             &envelope_size);
     if (result == TINYDB_SCHEMA_CATALOG_V3_STORE_READ_ABSENT) return true;
     if (result == TINYDB_SCHEMA_CATALOG_V3_STORE_READ_INVALID) {
-        /* An invalid/uncommitted WAL is never authoritative.  Removing it is
+        /* An invalid/uncommitted WAL is never authoritative. Removing it is
          * safe because the main file was the last completed publication. */
         if (remove(wal_path) != 0 && errno != ENOENT) return false;
         return true;
