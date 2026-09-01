@@ -47,10 +47,10 @@ def main():
         assert "title_size=256" in result.stdout, result.stdout
         assert "body_size=256" in result.stdout, result.stdout
         assert "POST_RECOVERY_LIVE_PAGE_VALIDATION_OK" in result.stdout, result.stdout
-        assert "archive_rows=20" in result.stdout, result.stdout
+        assert "archive_rows=80" in result.stdout, result.stdout
         cleanup(db_path)
 
-    print("PASS: reusable tinydb_core engine facade, wide-schema reopen, and post-recovery live-page validation verified")
+    print("PASS: reusable tinydb_core engine facade, multi-leaf wide-schema reopen, and post-recovery live-page validation verified")
 
 
 if __name__ == "__main__":
