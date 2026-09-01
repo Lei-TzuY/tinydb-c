@@ -42,11 +42,15 @@ def main():
         )
         assert result.returncode == 0, result.stdout + "\n" + result.stderr
         assert "ENGINE_API_OK" in result.stdout, result.stdout
+        assert "WIDE_SCHEMA_REOPEN_OK" in result.stdout, result.stdout
+        assert "row_size=516" in result.stdout, result.stdout
+        assert "title_size=128" in result.stdout, result.stdout
+        assert "body_size=384" in result.stdout, result.stdout
         assert "POST_RECOVERY_LIVE_PAGE_VALIDATION_OK" in result.stdout, result.stdout
         assert "archive_rows=20" in result.stdout, result.stdout
         cleanup(db_path)
 
-    print("PASS: reusable tinydb_core engine facade and post-recovery live-page validation verified")
+    print("PASS: reusable tinydb_core engine facade, wide-schema reopen, and post-recovery live-page validation verified")
 
 
 if __name__ == "__main__":
