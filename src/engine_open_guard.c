@@ -1,6 +1,7 @@
 #include "engine.h"
 #include "compact_v2_migration_open_adapter.h"
 #include "compact_v2_migration_open_recovery.h"
+#include "compact_v2_migration_full_page_preflight.h"
 #include "schema_catalog_authoritative_state.h"
 
 #include <stdio.h>
@@ -84,7 +85,7 @@ TinyDB* tinydb_open(const char* filename) {
         recovery_workspace,
         &recovery_result,
         &recovery_context,
-        tinydb_compact_v2_migration_open_adapter_manifest_is_safe,
+        tinydb_compact_v2_migration_open_adapter_manifest_pages_are_safe,
         recovery_message,
         sizeof(recovery_message));
     free(recovery_workspace);
