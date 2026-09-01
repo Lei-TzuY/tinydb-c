@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
     }
 
     if (!execute_ok(database,
-                    "CREATE TABLE archive (id INT, username VARCHAR, email VARCHAR);")) {
+                    "CREATE TABLE archive (id INT, title VARCHAR(128), body VARCHAR(384));")) {
         tinydb_close(database);
         return 1;
     }
@@ -41,11 +41,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    char sql[256];
+    char sql[768];
     for (uint32_t id = 1; id <= 20; id++) {
         snprintf(sql,
                  sizeof(sql),
-                 "INSERT INTO archive VALUES (%u, 'archive-%u', 'archive%u@example.com');",
+                 "INSERT INTO archive VALUES (%u, 'archive-title-%u', 'archive-body-%u');",
                  id,
                  id,
                  id);
@@ -61,6 +61,19 @@ int main(int argc, char** argv) {
     if (users_schema == NULL || archive_schema == NULL ||
         users_schema->root_page_num == archive_schema->root_page_num) {
         fprintf(stderr, "catalog roots are not independent\n");
+        tinydb_close(database);
+        return 1;
+    }
+    if (archive_schema->num_columns != 3 || archive_schema->row_size != 516 ||
+        archive_schema->columns[0].offset != 0 ||
+        archive_schema->columns[1].offset != 4 ||
+        archive_schema->columns[1].size != 128 ||
+        archive_schema->columns[2].offset != 132 ||
+        archive_schema->columns[2].size != 384) {
+        fprintf(stderr,
+                "wide archive schema layout is wrong: columns=%u row_size=%u\n",
+                archive_schema->num_columns,
+                archive_schema->row_size);
         tinydb_close(database);
         return 1;
     }
@@ -122,6 +135,12 @@ int main(int argc, char** argv) {
         tinydb_close(database);
         return 1;
     }
+    if (archive_schema->num_columns != 3 || archive_schema->row_size != 516 ||
+        archive_schema->columns[1].size != 128 || archive_schema->columns[2].size != 384) {
+        fprintf(stderr, "wide archive schema layout did not persist across reopen\n");
+        tinydb_close(database);
+        return 1;
+    }
     if (!tinydb_get_tree_stats(table, "archive", &archive_stats) ||
         archive_stats.total_rows != 20) {
         fprintf(stderr, "archive rows did not persist across reopen\n");
@@ -131,6 +150,15 @@ int main(int argc, char** argv) {
     if (!tinydb_get_tree_stats(table, "users", &users_stats) ||
         users_stats.total_rows != 1) {
         fprintf(stderr, "users rows changed across reopen\n");
+        tinydb_close(database);
+        return 1;
+    }
+
+    TinyDBSqlResult archive_query;
+    if (tinydb_execute_sql(database,
+                           "SELECT * FROM archive WHERE id = 7;",
+                           &archive_query) != TINYDB_SQL_SUCCESS) {
+        fprintf(stderr, "wide archive query failed after reopen\n");
         tinydb_close(database);
         return 1;
     }
@@ -166,6 +194,10 @@ int main(int argc, char** argv) {
            archive_stats.root_page_num,
            archive_stats.total_rows,
            archive_stats.height);
+    printf("WIDE_SCHEMA_REOPEN_OK row_size=%u title_size=%u body_size=%u\n",
+           archive_schema->row_size,
+           archive_schema->columns[1].size,
+           archive_schema->columns[2].size);
     printf("POST_RECOVERY_LIVE_PAGE_VALIDATION_OK\n");
     tinydb_close(database);
     return 0;
