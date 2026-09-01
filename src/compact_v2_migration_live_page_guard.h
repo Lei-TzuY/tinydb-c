@@ -74,11 +74,11 @@ static inline bool tinydb_compact_v2_migration_collect_tree_pages(
             goto cleanup;
         }
 
-        const void* node = handle.data;
+        void* node = handle.data;
         const bool is_root = page_num == root_page_num;
         if ((is_root && !is_node_root(node)) ||
             (!is_root && (is_node_root(node) ||
-                          *node_parent((void*)node) != expected_parent[page_num]))) {
+                          *node_parent(node) != expected_parent[page_num]))) {
             (void)pager_page_handle_release_read(&handle);
             (void)pager_release_page_handle(&handle);
             goto cleanup;
@@ -86,7 +86,7 @@ static inline bool tinydb_compact_v2_migration_collect_tree_pages(
 
         const NodeType type = get_node_type(node);
         if (type == NODE_INTERNAL) {
-            const uint32_t key_count = *internal_node_num_keys((void*)node);
+            const uint32_t key_count = *internal_node_num_keys(node);
             const uint32_t child_count = key_count + 1u;
             if (key_count == 0u || key_count > INTERNAL_NODE_MAX_KEYS ||
                 child_count > owned_capacity ||
@@ -96,7 +96,7 @@ static inline bool tinydb_compact_v2_migration_collect_tree_pages(
                 goto cleanup;
             }
             for (uint32_t i = 0u; i < child_count; i++) {
-                const uint32_t child = *internal_node_child((void*)node, i);
+                const uint32_t child = *internal_node_child(node, i);
                 if (child == INVALID_PAGE_NUM || child >= owned_capacity ||
                     owned[child] != 0u ||
                     tinydb_compact_v2_migration_live_page_is_free(pager, child)) {
