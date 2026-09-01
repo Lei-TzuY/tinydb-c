@@ -42,10 +42,11 @@ def main():
         )
         assert result.returncode == 0, result.stdout + "\n" + result.stderr
         assert "ENGINE_API_OK" in result.stdout, result.stdout
+        assert "POST_RECOVERY_LIVE_PAGE_VALIDATION_OK" in result.stdout, result.stdout
         assert "archive_rows=20" in result.stdout, result.stdout
         cleanup(db_path)
 
-    print("PASS: reusable tinydb_core engine facade verified")
+    print("PASS: reusable tinydb_core engine facade and post-recovery live-page validation verified")
 
 
 if __name__ == "__main__":
