@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
     }
 
     char sql[768];
-    for (uint32_t id = 1; id <= 20; id++) {
+    for (uint32_t id = 1; id <= 80; id++) {
         snprintf(sql,
                  sizeof(sql),
                  "INSERT INTO archive VALUES (%u, 'archive-title-%u', 'archive-body-%u');",
@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (users_stats.total_rows != 1 ||
-        archive_stats.total_rows != 20 ||
+        archive_stats.total_rows != 80 ||
         archive_stats.leaf_pages < 2 ||
         archive_stats.internal_pages < 1 ||
         archive_stats.height < 2) {
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!tinydb_get_tree_stats(table, "archive", &archive_stats) ||
-        archive_stats.total_rows != 20) {
+        archive_stats.total_rows != 80) {
         fprintf(stderr, "archive rows did not persist across reopen\n");
         tinydb_close(database);
         return 1;
