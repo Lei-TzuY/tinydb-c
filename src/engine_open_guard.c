@@ -101,5 +101,16 @@ TinyDB* tinydb_open(const char* filename) {
         return NULL;
     }
 
+    if (recovery_status == TINYDB_COMPACT_V2_MIGRATION_OPEN_RECOVERED &&
+        !tinydb_compact_v2_migration_validate_catalog_live_pages(
+            &database->table->catalog,
+            database->table->pager)) {
+        printf("Error: compact V2 recovery left authoritative catalog trees invalid.\n");
+        db_close(database->table);
+        database->table = NULL;
+        free(database);
+        return NULL;
+    }
+
     return database;
 }
