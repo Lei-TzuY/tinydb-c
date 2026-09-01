@@ -1,5 +1,6 @@
 #include "diagnostics.h"
 #include "engine.h"
+#include "compact_v2_migration_live_page_guard.h"
 
 static bool execute_ok(TinyDB* database, const char* sql) {
     TinyDBSqlResult result;
@@ -134,11 +135,38 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!tinydb_compact_v2_migration_validate_catalog_live_pages(
+            &table->catalog, table->pager)) {
+        fprintf(stderr, "healthy reopened catalog failed live-page validation\n");
+        tinydb_close(database);
+        return 1;
+    }
+
+    if (table->catalog.num_tables >= MAX_TABLES) {
+        fprintf(stderr, "catalog has no room for validation regression fixture\n");
+        tinydb_close(database);
+        return 1;
+    }
+    Catalog duplicate_root_catalog = table->catalog;
+    duplicate_root_catalog.schemas[duplicate_root_catalog.num_tables] =
+        duplicate_root_catalog.schemas[1];
+    snprintf(duplicate_root_catalog.schemas[duplicate_root_catalog.num_tables].name,
+             sizeof(duplicate_root_catalog.schemas[duplicate_root_catalog.num_tables].name),
+             "duplicate_root_fixture");
+    duplicate_root_catalog.num_tables++;
+    if (tinydb_compact_v2_migration_validate_catalog_live_pages(
+            &duplicate_root_catalog, table->pager)) {
+        fprintf(stderr, "duplicate live-tree ownership was accepted\n");
+        tinydb_close(database);
+        return 1;
+    }
+
     printf("ENGINE_API_OK users_root=%u archive_root=%u archive_rows=%u archive_height=%u\n",
            users_schema != NULL ? users_stats.root_page_num : 0,
            archive_stats.root_page_num,
            archive_stats.total_rows,
            archive_stats.height);
+    printf("POST_RECOVERY_LIVE_PAGE_VALIDATION_OK\n");
     tinydb_close(database);
     return 0;
 }
