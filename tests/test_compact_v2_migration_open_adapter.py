@@ -27,7 +27,7 @@ def test_source_contract():
         "tinydb_compact_v2_migration_open_adapter_init(",
         "tinydb_compact_v2_migration_open_adapter_build(",
         "tinydb_compact_v2_migration_recover_open_file_with_preflight(",
-        "tinydb_compact_v2_migration_open_adapter_manifest_is_safe",
+        "tinydb_compact_v2_migration_open_adapter_manifest_pages_are_safe",
         "TINYDB_COMPACT_V2_MIGRATION_OPEN_NO_MIGRATION",
         "TINYDB_COMPACT_V2_MIGRATION_OPEN_RECOVERED",
     ]
