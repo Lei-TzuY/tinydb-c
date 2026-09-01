@@ -23,6 +23,11 @@
  * context for both authoritative catalog lookup and durable sidecar cleanup.
  * Keeping those operations together prevents an open path from accidentally
  * consulting one Catalog while deleting a manifest belonging to another DB.
+ *
+ * Reclaim is additionally guarded by the complete authoritative multi-table
+ * catalog.  A malformed or stale migration sidecar must never be able to free
+ * the current root of another table merely because that page number appears in
+ * its staging claims or retired-root field.
  */
 typedef struct TinyDBCompactV2MigrationOpenAdapterContext {
     TinyDBCompactV2MigrationCatalogState catalog_state;
@@ -92,6 +97,62 @@ static inline bool tinydb_compact_v2_migration_open_adapter_read_catalog(
         table_id,
         root_page_num_out,
         schema_generation_out);
+}
+
+static inline bool tinydb_compact_v2_migration_open_adapter_is_authoritative_root(
+    const TinyDBCompactV2MigrationOpenAdapterContext* context,
+    uint32_t page_num) {
+    const Catalog* catalog;
+    if (context == NULL ||
+        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) {
+        return false;
+    }
+    catalog = context->catalog_state.catalog;
+    for (uint32_t i = 0u; i < catalog->num_tables; i++) {
+        if (catalog->schemas[i].root_page_num == page_num) return true;
+    }
+    return false;
+}
+
+static inline bool tinydb_compact_v2_migration_open_adapter_reclaim_staging(
+    void* opaque,
+    const uint32_t* claimed_pages,
+    uint32_t claimed_page_count) {
+    TinyDBCompactV2MigrationOpenAdapterContext* context =
+        (TinyDBCompactV2MigrationOpenAdapterContext*)opaque;
+    Pager* pager;
+    if (context == NULL || claimed_pages == NULL || claimed_page_count == 0u ||
+        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) {
+        return false;
+    }
+    pager = (Pager*)context->catalog_state.pager;
+    if (!pager->in_transaction) return false;
+    for (uint32_t i = 0u; i < claimed_page_count; i++) {
+        if (tinydb_compact_v2_migration_open_adapter_is_authoritative_root(
+                context, claimed_pages[i])) {
+            return false;
+        }
+    }
+    return tinydb_compact_v2_migration_pager_reclaim_claims(
+        pager, claimed_pages, claimed_page_count);
+}
+
+static inline bool tinydb_compact_v2_migration_open_adapter_reclaim_old_tree(
+    void* opaque,
+    Pager* pager,
+    uint32_t old_root_page_num) {
+    TinyDBCompactV2MigrationOpenAdapterContext* context =
+        (TinyDBCompactV2MigrationOpenAdapterContext*)opaque;
+    if (context == NULL || pager == NULL ||
+        pager != context->catalog_state.pager || !pager->in_transaction ||
+        !tinydb_compact_v2_migration_catalog_state_is_valid(&context->catalog_state)) {
+        return false;
+    }
+    if (tinydb_compact_v2_migration_open_adapter_is_authoritative_root(
+            context, old_root_page_num)) {
+        return false;
+    }
+    return tinydb_fixed_v1_tree_reclaim(pager, old_root_page_num);
 }
 
 static inline bool tinydb_compact_v2_migration_open_adapter_remove_manifest(
@@ -191,6 +252,10 @@ static inline bool tinydb_compact_v2_migration_open_adapter_build(
     adapter_out->pager = (Pager*)context->catalog_state.pager;
     adapter_out->context = context;
     adapter_out->read_catalog = tinydb_compact_v2_migration_open_adapter_read_catalog;
+    adapter_out->reclaim_staging_pages =
+        tinydb_compact_v2_migration_open_adapter_reclaim_staging;
+    adapter_out->reclaim_old_tree =
+        tinydb_compact_v2_migration_open_adapter_reclaim_old_tree;
     adapter_out->remove_manifest = tinydb_compact_v2_migration_open_adapter_remove_manifest;
     adapter_out->sync_parent = tinydb_compact_v2_migration_open_adapter_sync_parent;
     return tinydb_compact_v2_migration_pager_recovery_adapter_is_valid(adapter_out);
