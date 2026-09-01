@@ -6,12 +6,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "src" / "compact_v2_migration_open_adapter.h"
+FULL_PAGE_PREFLIGHT = ROOT / "src" / "compact_v2_migration_full_page_preflight.h"
 OPEN_RECOVERY = ROOT / "src" / "compact_v2_migration_open_recovery.h"
 ENGINE_GUARD = ROOT / "src" / "engine_open_guard.c"
 
 
 def test_source_contract():
     adapter = HEADER.read_text(encoding="utf-8")
+    full_page_preflight = FULL_PAGE_PREFLIGHT.read_text(encoding="utf-8")
     open_recovery = OPEN_RECOVERY.read_text(encoding="utf-8")
     engine = ENGINE_GUARD.read_text(encoding="utf-8")
     for token in [
@@ -20,11 +22,18 @@ def test_source_contract():
         "TINYDB_COMPACT_V2_MIGRATION_STRICT_RECLAIM_STAGING",
         "TINYDB_COMPACT_V2_MIGRATION_STRICT_KEEP_NEW_RECLAIM_OLD",
     ]:
-        assert token in adapter, f"missing cross-table recovery guard: {token}"
+        assert token in adapter, f"missing compatibility cross-table recovery guard: {token}"
+    for token in [
+        "tinydb_compact_v2_migration_build_catalog_live_page_map(",
+        "tinydb_compact_v2_migration_claims_are_disjoint_from_live(",
+        "tinydb_compact_v2_migration_detached_tree_disjoint_from_live(",
+        "tinydb_compact_v2_migration_open_adapter_manifest_pages_are_safe(",
+    ]:
+        assert token in full_page_preflight, f"missing full-page recovery guard: {token}"
     assert "tinydb_compact_v2_migration_recover_open_file_with_preflight(" in open_recovery
     assert "preflight(preflight_context, &workspace->manifest)" in open_recovery
     assert "tinydb_compact_v2_migration_recover_open_file_with_preflight(" in engine
-    assert "tinydb_compact_v2_migration_open_adapter_manifest_is_safe" in engine
+    assert "tinydb_compact_v2_migration_open_adapter_manifest_pages_are_safe" in engine
 
 
 def configure_and_build(tmp_path: Path):
@@ -168,7 +177,7 @@ int main(void) {
 def main():
     test_source_contract()
     run_probe()
-    print("PASS: compact V2 reopen recovery preflights all authoritative multi-table roots")
+    print("PASS: compact V2 reopen recovery keeps the legacy root guard and wires full-page preflight")
 
 
 if __name__ == "__main__":
