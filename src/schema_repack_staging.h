@@ -2,13 +2,13 @@
 #define SCHEMA_REPACK_STAGING_H
 
 #include "leaf_cursor_read.h"
-#include "record_payload_key.h"
 #include "row_envelope.h"
 #include "schema_repack.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 /*
@@ -123,16 +123,11 @@ static inline bool tinydb_schema_repack_staging_visit(
         return false;
     }
 
+    /* widening_supported() has already proven the first field is the stable
+     * four-byte INT primary key at offset zero, so extracting it directly keeps
+     * this pure-memory staging header independent of record_payload.c linkage. */
     uint32_t key = 0u;
-    if (!tinydb_record_payload_primary_key(staging->destination_schema,
-                                           &destination_payload,
-                                           &key,
-                                           validation,
-                                           sizeof(validation))) {
-        staging->failed = true;
-        tinydb_schema_repack_staging_set_message(staging, validation);
-        return false;
-    }
+    memcpy(&key, destination_payload.bytes, sizeof(key));
 
     unsigned char envelope[PAGE_SIZE];
     uint32_t envelope_length = 0u;
