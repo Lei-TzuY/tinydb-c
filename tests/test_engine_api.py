@@ -43,6 +43,9 @@ def main():
         assert result.returncode == 0, result.stdout + "\n" + result.stderr
         assert "ENGINE_API_OK" in result.stdout, result.stdout
         assert "WIDE_SCHEMA_REOPEN_OK" in result.stdout, result.stdout
+        assert "REAL_REPACK_SCAN_OK" in result.stdout, result.stdout
+        assert "source_rows=120" in result.stdout, result.stdout
+        assert "row_size=388" in result.stdout, result.stdout
         assert "row_size=516" in result.stdout, result.stdout
         assert "title_size=256" in result.stdout, result.stdout
         assert "body_size=256" in result.stdout, result.stdout
@@ -50,7 +53,7 @@ def main():
         assert "archive_rows=80" in result.stdout, result.stdout
         cleanup(db_path)
 
-    print("PASS: reusable tinydb_core engine facade, multi-leaf wide-schema reopen, and post-recovery live-page validation verified")
+    print("PASS: reusable tinydb_core engine facade, real authoritative schema-repack scan, multi-leaf wide-schema reopen, and post-recovery live-page validation verified")
 
 
 if __name__ == "__main__":
