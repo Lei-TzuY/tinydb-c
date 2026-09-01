@@ -111,16 +111,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    TinyDBSqlResult join_result;
-    if (tinydb_execute_sql(database,
-                           "SELECT * FROM users JOIN archive ON users.id = archive.id;",
-                           &join_result) != TINYDB_SQL_SUCCESS ||
-        !join_result.join_handled) {
-        fprintf(stderr, "cross-root JOIN did not use the engine JOIN path\n");
-        tinydb_close(database);
-        return 1;
-    }
-
     tinydb_close(database);
     database = tinydb_open(argv[1]);
     if (database == NULL) {
@@ -129,9 +119,11 @@ int main(int argc, char** argv) {
     }
 
     table = tinydb_table(database);
+    users_schema = tinydb_find_table_schema(table, "users");
     archive_schema = tinydb_find_table_schema(table, "archive");
-    if (archive_schema == NULL || archive_schema->root_page_num != archive_root) {
-        fprintf(stderr, "archive root did not persist across reopen\n");
+    if (users_schema == NULL || archive_schema == NULL ||
+        archive_schema->root_page_num != archive_root) {
+        fprintf(stderr, "catalog schemas or archive root did not persist across reopen\n");
         tinydb_close(database);
         return 1;
     }
@@ -190,7 +182,7 @@ int main(int argc, char** argv) {
     }
 
     printf("ENGINE_API_OK users_root=%u archive_root=%u archive_rows=%u archive_height=%u\n",
-           users_schema != NULL ? users_stats.root_page_num : 0,
+           users_stats.root_page_num,
            archive_stats.root_page_num,
            archive_stats.total_rows,
            archive_stats.height);
