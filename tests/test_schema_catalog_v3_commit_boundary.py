@@ -14,6 +14,9 @@ def test_v3_catalog_wal_is_the_durable_commit_boundary():
 #include "schema_catalog_v3_store.h"
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 static int build_envelope(unsigned char* out, size_t* out_size) {
     Catalog catalog;
