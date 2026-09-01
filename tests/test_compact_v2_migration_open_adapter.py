@@ -26,14 +26,15 @@ def test_source_contract():
         "tinydb_schema_catalog_load_authoritative_generation(",
         "tinydb_compact_v2_migration_open_adapter_init(",
         "tinydb_compact_v2_migration_open_adapter_build(",
-        "tinydb_compact_v2_migration_recover_open_file(",
+        "tinydb_compact_v2_migration_recover_open_file_with_preflight(",
+        "tinydb_compact_v2_migration_open_adapter_manifest_is_safe",
         "TINYDB_COMPACT_V2_MIGRATION_OPEN_NO_MIGRATION",
         "TINYDB_COMPACT_V2_MIGRATION_OPEN_RECOVERED",
     ]
     for token in required:
         assert token in guard, f"engine open is missing recovery lifecycle step: {token}"
     assert guard.index("tinydb_schema_catalog_load_authoritative_generation(") < guard.index(
-        "tinydb_compact_v2_migration_recover_open_file("
+        "tinydb_compact_v2_migration_recover_open_file_with_preflight("
     )
 
 
