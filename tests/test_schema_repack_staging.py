@@ -196,6 +196,11 @@ int main(void) {
 def main():
     repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     src = os.path.join(repo, "src")
+    support_sources = [
+        os.path.join(src, "slotted_leaf_v2.c"),
+        os.path.join(src, "leaf_format.c"),
+        os.path.join(src, "leaf_page_access.c"),
+    ]
     with tempfile.TemporaryDirectory() as tmp:
         probe = os.path.join(tmp, "probe.c")
         with open(probe, "w", newline="\n") as handle:
@@ -215,6 +220,7 @@ def main():
                 "/WX",
                 f"/I{src}",
                 probe,
+                *support_sources,
                 f"/Fe:{exe}",
             ]
         else:
@@ -233,6 +239,7 @@ def main():
                 "-pthread",
                 f"-I{src}",
                 probe,
+                *support_sources,
                 "-o",
                 exe,
             ]
