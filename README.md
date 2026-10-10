@@ -32,6 +32,7 @@ Coverage includes:
 Run the complete suite with:
 
 ```sh
+python -m pip install -r tests/requirements.txt
 python tests/run_all.py
 ```
 

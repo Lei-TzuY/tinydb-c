@@ -14,6 +14,7 @@ def test_v3_catalog_wal_is_the_durable_commit_boundary():
 #include "schema_catalog_v3_store.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
 #endif
@@ -59,10 +60,14 @@ int main(int argc, char** argv) {
     if (!tinydb_schema_catalog_v3_store_publish_detailed(
             main_path, wal_path, envelope, envelope_size, &result)) return 2;
     if (!result.wal_committed_durable || result.main_published_durable || result.cleanup_complete) return 3;
-    if (remove(main_path) == 0) return 4;
 #ifdef _WIN32
+    struct _stat blocked_main;
+    if (_stat(main_path, &blocked_main) != 0 ||
+        (blocked_main.st_mode & _S_IFMT) != _S_IFDIR) return 4;
     if (_rmdir(main_path) != 0) return 5;
 #else
+    struct stat blocked_main;
+    if (stat(main_path, &blocked_main) != 0 || !S_ISDIR(blocked_main.st_mode)) return 4;
     if (rmdir(main_path) != 0) return 5;
 #endif
     if (!tinydb_schema_catalog_v3_store_recover(main_path, wal_path,
