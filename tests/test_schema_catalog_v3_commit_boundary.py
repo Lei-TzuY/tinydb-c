@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cmake_probe import find_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -103,7 +105,7 @@ int main(int argc, char** argv) {
         assert cfg.returncode == 0, cfg.stdout + cfg.stderr
         comp = subprocess.run(["cmake", "--build", str(build), "--config", "Debug"], capture_output=True, text=True, timeout=120)
         assert comp.returncode == 0, comp.stdout + comp.stderr
-        exe = build / ("Debug/v3_commit_boundary.exe" if shutil.which("cl") else "v3_commit_boundary")
+        exe = find_executable(build, "v3_commit_boundary")
         run = subprocess.run([str(exe), str(fixture)], capture_output=True, text=True, timeout=30)
         assert run.returncode == 0, run.stdout + run.stderr
         assert "wal_commit_is_durable=yes" in run.stdout
