@@ -36,7 +36,7 @@ static int check(int condition, const char* msg) {
 
 int main(void) {
     Catalog input;
-    Catalog decoded;
+    Catalog decoded = {0};
     unsigned char payload[TINYDB_SCHEMA_CATALOG_SHAPE_MAX_SIZE];
     size_t payload_size = 0u;
     memset(&input, 0, sizeof(input));
