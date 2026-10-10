@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cmake_probe import find_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -14,6 +16,7 @@ def test_v3_catalog_wal_is_the_durable_commit_boundary():
 #include "schema_catalog_v3_store.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
 #endif
@@ -59,10 +62,14 @@ int main(int argc, char** argv) {
     if (!tinydb_schema_catalog_v3_store_publish_detailed(
             main_path, wal_path, envelope, envelope_size, &result)) return 2;
     if (!result.wal_committed_durable || result.main_published_durable || result.cleanup_complete) return 3;
-    if (remove(main_path) == 0) return 4;
 #ifdef _WIN32
+    struct _stat blocked_main;
+    if (_stat(main_path, &blocked_main) != 0 ||
+        (blocked_main.st_mode & _S_IFMT) != _S_IFDIR) return 4;
     if (_rmdir(main_path) != 0) return 5;
 #else
+    struct stat blocked_main;
+    if (stat(main_path, &blocked_main) != 0 || !S_ISDIR(blocked_main.st_mode)) return 4;
     if (rmdir(main_path) != 0) return 5;
 #endif
     if (!tinydb_schema_catalog_v3_store_recover(main_path, wal_path,
@@ -98,7 +105,7 @@ int main(int argc, char** argv) {
         assert cfg.returncode == 0, cfg.stdout + cfg.stderr
         comp = subprocess.run(["cmake", "--build", str(build), "--config", "Debug"], capture_output=True, text=True, timeout=120)
         assert comp.returncode == 0, comp.stdout + comp.stderr
-        exe = build / ("Debug/v3_commit_boundary.exe" if shutil.which("cl") else "v3_commit_boundary")
+        exe = find_executable(build, "v3_commit_boundary")
         run = subprocess.run([str(exe), str(fixture)], capture_output=True, text=True, timeout=30)
         assert run.returncode == 0, run.stdout + run.stderr
         assert "wal_commit_is_durable=yes" in run.stdout

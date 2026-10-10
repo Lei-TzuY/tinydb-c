@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cmake_probe import find_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "src" / "schema_catalog_v3_runtime.h"
 
@@ -131,7 +133,7 @@ int main(void) {
             "cmake_minimum_required(VERSION 3.10)\n"
             "project(TinyDBSchemaV3RuntimeProbe C)\n"
             "set(CMAKE_C_STANDARD 99)\nset(CMAKE_C_STANDARD_REQUIRED TRUE)\n"
-            "if(MSVC)\n  add_compile_options(/W4 /WX /utf-8)\nelse()\n  add_compile_options(-Wall -Wextra -Werror)\nendif()\n"
+            "if(MSVC)\n  add_compile_options(/W4 /WX /utf-8 /D_CRT_SECURE_NO_WARNINGS)\nelse()\n  add_compile_options(-Wall -Wextra -Werror)\nendif()\n"
             "add_executable(schema_v3_runtime_probe probe.c)\n"
             f'target_include_directories(schema_v3_runtime_probe PRIVATE "{(ROOT / "src").as_posix()}")\n',
             encoding="utf-8",
@@ -147,7 +149,7 @@ int main(void) {
             capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=120,
         )
         assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-        executable = build / ("Debug/schema_v3_runtime_probe.exe" if shutil.which("cl") else "schema_v3_runtime_probe")
+        executable = find_executable(build, "schema_v3_runtime_probe")
         run = subprocess.run(
             [str(executable)], capture_output=True, text=True,
             encoding="utf-8", errors="ignore", timeout=30,

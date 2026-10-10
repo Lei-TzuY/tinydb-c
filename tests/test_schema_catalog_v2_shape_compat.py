@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cmake_probe import find_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION = ROOT / "src" / "schema_catalog_v2.c"
 
@@ -147,7 +149,7 @@ int main(void) {
             "cmake_minimum_required(VERSION 3.10)\n"
             "project(TinyDBV2ShapeCompat C)\n"
             "set(CMAKE_C_STANDARD 99)\nset(CMAKE_C_STANDARD_REQUIRED TRUE)\n"
-            "if(MSVC)\n  add_compile_options(/W4 /WX /utf-8)\nelse()\n  add_compile_options(-Wall -Wextra -Werror)\nendif()\n"
+            "if(MSVC)\n  add_compile_options(/W4 /WX /utf-8 /D_CRT_SECURE_NO_WARNINGS)\nelse()\n  add_compile_options(-Wall -Wextra -Werror)\nendif()\n"
             "add_executable(v2_shape_compat probe.c)\n"
             f'target_include_directories(v2_shape_compat PRIVATE "{(ROOT / "src").as_posix()}")\n',
             encoding="utf-8",
@@ -157,7 +159,7 @@ int main(void) {
         assert configure.returncode == 0, configure.stdout + configure.stderr
         compiled = subprocess.run(["cmake", "--build", str(build), "--config", "Debug"], capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=120)
         assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-        executable = build / ("Debug/v2_shape_compat.exe" if shutil.which("cl") else "v2_shape_compat")
+        executable = find_executable(build, "v2_shape_compat")
         run = subprocess.run([str(executable)], capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=30)
         assert run.returncode == 0, run.stdout + run.stderr
         for token in ["v2_bytes_identical=yes", "legacy_decode_compatible=yes", "different_schema_shapes=yes"]:

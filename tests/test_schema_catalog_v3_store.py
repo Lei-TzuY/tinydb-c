@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cmake_probe import find_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "src" / "schema_catalog_v3_store.h"
 
@@ -169,7 +171,7 @@ int main(int argc, char** argv) {
             f'target_include_directories(schema_v3_store_probe PRIVATE "{(ROOT / "src").as_posix()}")\n'
         )
         build = configure_and_build(tmp_path, cmake)
-        executable = build / ("Debug/schema_v3_store_probe.exe" if shutil.which("cl") else "schema_v3_store_probe")
+        executable = find_executable(build, "schema_v3_store_probe")
         db_prefix = tmp_path / "catalog_fixture"
         run = subprocess.run(
             [str(executable), str(db_prefix)], capture_output=True, text=True,
